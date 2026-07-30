@@ -40,17 +40,37 @@ reg_drive_current: 22           # from LDC_CALIBRATE_DRIVE_CURRENT
 # --- geometry ---
 coil_x: 350.0                   # approximate coil center (refined by EDDY_LOCATE)
 coil_y: 5.0
+coil_z: 0.0                     # machine Z of the coil top face
+coil_inner_diameter: 2.0        # mm, coil bore; sets the default fit window
 scan_height: 1.0                # nozzle height above coil top during XY scans
+scan_safe_z: 2.0                # mm above the scan height for travel moves
 z_start: 5.0                    # Z descent start for Z curves
 z_stop: 0.5                     # closest approach (never touches)
+z_step: 0.05                    # descent step; must divide z_start - z_stop
 # --- scan tuning ---
 scan_speed: 4.0                 # mm/s
 scan_length: 4.0                # mm, must exceed coil diameter
+locate_scan_length: 12.0        # mm, EDDY_LOCATE coarse pass; 3 * scan_length
+travel_speed: 100.0             # mm/s for XY travel between passes
+z_speed: 10.0                   # mm/s for every Z leg
 scan_angles: 45, 135            # degrees; two directions reconstruct X and Y
 pair_scans: True                # forward+reverse averaging (latency cancellation)
 samples_min: 100                # abort fit below this sample count per pass
+query_time: 0.5                 # seconds EDDY_QUERY samples for
 save_csv: False                 # dump raw scan data for analysis
+# --- fit tuning ---
+fit_window_radius: 1.0          # mm each side of the extremum; coil_inner_diameter / 2
+fit_sigma_fraction: 0.5         # Gaussian weight sigma as a fraction of the window
+fit_vertex_limit: 0.5           # reject a vertex past this fraction of the window
+edge_margin: 0.15               # fraction of each pass treated as edge
+freq_min: 1000000.0             # Hz; samples below this are discarded as noise
+# --- per-tool Z anchors, written by EDDY_SET_Z_REF ---
+z_ref_t0: 0.2000:12345678.000   # "<z>:<reference frequency>", one per tool 0 to 15
 ```
+
+Display precision in every readout: millimetres to 4 decimals, frequencies to
+3 decimals. Values are printed exactly as measured at that precision, never
+rounded further and never clamped.
 
 The plugin instantiates Kalico's `extras.ldc1612.LDC1612` directly with its own
 config wrapper, so users need no separate `[ldc1612]` section. (Fallback design
@@ -59,10 +79,10 @@ reference it; decide during implementation, wrapper preferred.)
 
 ## Commands
 
-- `EDDY_QUERY` — print current frequency, sanity check wiring.
-- `EDDY_LOCATE` — coarse raster over the configured coil position, finds and
+- `EDDY_QUERY`: print current frequency, sanity check wiring.
+- `EDDY_LOCATE`: coarse raster over the configured coil position, finds and
   stores the refined coil center for the session; prints it.
-- `EDDY_CALIBRATE_TOOL [T=<n>]` — full XY(+Z) measurement for the mounted tool:
+- `EDDY_CALIBRATE_TOOL [T=<n>]`: full XY(+Z) measurement for the mounted tool:
   1. XY: for each configured angle, scan through the current center estimate,
      forward and reverse; parabolic fit of the response extremum per pass;
      average pairs; least-squares reconstruct the center from the two
@@ -74,9 +94,9 @@ reference it; decide during implementation, wrapper preferred.)
      curve fit only.
   3. Print labeled results: raw center, and offsets relative to the stored T0
      baseline if one exists in this session.
-- `EDDY_SET_BASELINE` — declare the currently mounted tool as T0 baseline
+- `EDDY_SET_BASELINE`: declare the currently mounted tool as T0 baseline
   (stores its center + Z curve for the session).
-- `EDDY_SET_Z_REF [T=<n>] Z=<real_offset>` — one-time per-tool anchor: after the
+- `EDDY_SET_Z_REF [T=<n>] Z=<real_offset>`: one-time per-tool anchor: after the
   owner measures true Z by their existing method (paper/pin), this binds the
   measured frequency curve to reality; stored in memory and printed so the owner
   can persist it in config (`z_ref_t<n>:` option) for reuse.

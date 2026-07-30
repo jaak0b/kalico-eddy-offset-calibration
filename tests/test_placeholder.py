@@ -1,27 +1,47 @@
-"""Placeholder test: confirms the plugin module imports without klippy.
+"""Guards the standalone-import constraint of the plugin module.
 
 The plugin module must import cleanly with no klippy installation present
 (these tests run standalone on a dev machine), so eddy_tool_calibration.py
-keeps all klippy imports inside function/method bodies rather than at module
-scope. This test just exercises that constraint; real math-function tests
-land alongside the ported algorithms.
+keeps every klippy import inside a function or method body rather than at
+module scope. The test below reads the module source and asserts that no
+top-level statement imports klippy.
 """
 
-import importlib.util
+import ast
 import pathlib
+import sys
+
+import eddy_tool_calibration as etc
 
 
-def _load_plugin_module():
-    repo_root = pathlib.Path(__file__).resolve().parent.parent
-    module_path = repo_root / "eddy_tool_calibration.py"
-    spec = importlib.util.spec_from_file_location(
-        "eddy_tool_calibration", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _module_source():
+    path = pathlib.Path(etc.__file__)
+    return path.read_text(encoding="utf-8")
 
 
-def test_plugin_module_imports():
-    module = _load_plugin_module()
-    assert hasattr(module, "EddyToolCalibration")
-    assert hasattr(module, "load_config")
+def _toplevel_import_names(source):
+    """Module names imported by statements at module scope only."""
+    names = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Import):
+            names.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.append(node.module or "")
+    return names
+
+
+def test_no_klippy_import_at_module_scope():
+    # Arrange
+    source = _module_source()
+
+    # Act
+    imported = _toplevel_import_names(source)
+
+    # Assert: no module-scope import reaches into the klippy package.
+    assert [name for name in imported if name.split(".")[0] == "klippy"] == []
+
+
+def test_importing_the_plugin_does_not_pull_in_klippy():
+    # Assert: importing the module (done at the top of this file, with no
+    # klippy installed) left no klippy package loaded.
+    assert not [name for name in sys.modules if name.split(".")[0] == "klippy"]

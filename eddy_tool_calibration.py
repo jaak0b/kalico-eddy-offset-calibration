@@ -76,10 +76,10 @@ def detect_peak_type(freqs, edge_margin):
     if not 0.0 < edge_margin < 0.5:
         raise ValueError(
             "edge margin must be between 0 and 0.5, got %r" % (edge_margin,))
-    edge_count = max(1, int(n * edge_margin))
+    edge_count = max(1, int(round(n * edge_margin)))
     edge = list(freqs[:edge_count]) + list(freqs[n - edge_count:])
-    low = int(n * PEAK_TYPE_CENTER_LOW_FRACTION)
-    high = max(low + 1, int(n * PEAK_TYPE_CENTER_HIGH_FRACTION))
+    low = int(round(n * PEAK_TYPE_CENTER_LOW_FRACTION))
+    high = max(low + 1, int(round(n * PEAK_TYPE_CENTER_HIGH_FRACTION)))
     center = list(freqs[low:high])
     if not center:
         raise ValueError(
@@ -89,7 +89,11 @@ def detect_peak_type(freqs, edge_margin):
     center_avg = sum(center) / len(center)
     if center_avg > edge_avg:
         return 'peak'
-    return 'valley'
+    if center_avg < edge_avg:
+        return 'valley'
+    raise ValueError(
+        "the pass shows no response contrast, its middle band and its edges "
+        "both average %.3f, so the scan may not cross the coil" % (edge_avg,))
 
 
 def find_extremum_index(freqs, peak_type, edge_margin):
@@ -105,7 +109,7 @@ def find_extremum_index(freqs, peak_type, edge_margin):
     if not 0.0 < edge_margin < 0.5:
         raise ValueError(
             "edge margin must be between 0 and 0.5, got %r" % (edge_margin,))
-    margin = max(1, int(n * edge_margin))
+    margin = max(1, int(round(n * edge_margin)))
     lo = margin
     hi = n - margin
     if hi - lo < 3:
@@ -170,19 +174,30 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
     wy = sum(wi * y for wi, y in zip(ws, ys))
     wxy = sum(wi * x * y for wi, x, y in zip(ws, xs, ys))
     wx2y = sum(wi * x * x * y for wi, x, y in zip(ws, xs, ys))
+    # Cramer's rule on the weighted normal equations
+    #   [[wx4, wx3, wx2], [wx3, wx2, wx], [wx2, wx, w]] * [a, b, c]
+    #       = [wx2y, wxy, wy]
+    # Every determinant below is the cofactor expansion along the first row of
+    # the matrix with the matching column replaced by the right-hand side.
+    #
+    # Deliberate deviation from upstream: upstream's det_b expansion is wrong.
+    # It reduces to the correct value only when the fit window is symmetric
+    # about the extremum sample (wx = wx3 = 0), and a window clipped by the
+    # start or the end of a pass is not symmetric, so upstream returns a
+    # meaningless vertex there. The expansion below is the correct one.
     det = (wx4 * (wx2 * w - wx * wx)
-           - wx3 * (wx3 * w - wx * wx2)
+           - wx3 * (wx3 * w - wx2 * wx)
            + wx2 * (wx3 * wx - wx2 * wx2))
     if abs(det) < FIT_DET_EPSILON:
         raise ValueError(
             "quadratic fit normal equations are singular, the response in "
             "the fit window carries no curvature")
     det_a = (wx2y * (wx2 * w - wx * wx)
-             - wxy * (wx3 * w - wx * wx2)
-             + wy * (wx3 * wx - wx2 * wx2))
+             - wx3 * (wxy * w - wy * wx)
+             + wx2 * (wxy * wx - wy * wx2))
     det_b = (wx4 * (wxy * w - wx * wy)
-             - wx3 * (wx2y * w - wx * wy)
-             + wx2 * (wx2y * wx - wxy * wx2))
+             - wx2y * (wx3 * w - wx2 * wx)
+             + wx2 * (wx3 * wy - wx2 * wxy))
     a = det_a / det
     b = det_b / det
     if abs(a) < FIT_CURVATURE_EPSILON:
@@ -201,8 +216,8 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
     max_offset = half_window * vertex_limit
     if abs(x_peak) > max_offset:
         raise ValueError(
-            "fitted vertex sits %.2f samples from the extremum sample, past "
-            "the %.2f sample limit" % (x_peak, max_offset))
+            "fitted vertex sits %.2f samples away from the extremum sample, "
+            "past the %.2f sample limit" % (abs(x_peak), max_offset))
     return x_peak
 
 
@@ -349,6 +364,62 @@ def scan_endpoints(center_x, center_y, angle_deg, length):
     return (center_x - dx, center_y - dy, center_x + dx, center_y + dy)
 
 
+def normalize_scan_angles(angles, pair_scans):
+    """Normalize configured scan angles to [0, 360) and reject duplicates.
+
+    Two passes along the same direction add no information and would enter the
+    pair-averaging map twice, so a repeated angle is an error rather than a
+    silently dropped pass. With pair_scans enabled the opposite of every
+    configured angle is scanned as well, so a configured pair of opposites is
+    the same duplicate one step later and is rejected here too.
+    """
+    if not angles:
+        raise ValueError("at least one scan angle is required")
+    out = []
+    for angle in angles:
+        normalized = float(angle) % 360.0
+        if normalized in out:
+            raise ValueError(
+                "scan angle %.1f degrees is listed twice" % (normalized,))
+        if pair_scans and (normalized + 180.0) % 360.0 in out:
+            raise ValueError(
+                "scan angles %.1f and %.1f degrees are opposites, and "
+                "pair_scans already scans the opposite of every angle"
+                % ((normalized + 180.0) % 360.0, normalized))
+        out.append(normalized)
+    return out
+
+
+def expand_scan_angles(angles, pair_scans):
+    """Full pass list for a normalized angle set, adding opposites if paired."""
+    out = list(angles)
+    if pair_scans:
+        for angle in list(angles):
+            out.append((angle + 180.0) % 360.0)
+    return out
+
+
+def z_descent_targets(z_start, z_stop, z_step):
+    """Descent heights from z_start down to z_stop inclusive.
+
+    The descent has to end exactly at z_stop, so the span must be a whole
+    number of steps. Raises ValueError when it is not, rather than truncating
+    and stopping short.
+    """
+    if z_step <= 0.0:
+        raise ValueError("z_step must be greater than 0, got %r" % (z_step,))
+    if z_stop >= z_start:
+        raise ValueError(
+            "z_stop %.4f mm must lie below z_start %.4f mm" % (z_stop, z_start))
+    span = z_start - z_stop
+    steps = int(round(span / z_step))
+    if abs(span - steps * z_step) > 1e-9:
+        raise ValueError(
+            "the %.4f mm span from z_start to z_stop is not a whole number of "
+            "%.4f mm steps" % (span, z_step))
+    return [z_start - i * z_step for i in range(steps)] + [float(z_stop)]
+
+
 def build_z_curve(points):
     """Validate and order a frequency-vs-Z descent curve.
 
@@ -448,14 +519,31 @@ def spread(values):
 # Tool indices accepted by T= and by the z_ref_t<n> config options.
 MAX_TOOLS = 16
 
-# Settle and dwell timings ported from probe_eddy_current's calibration moves
-# and from upstream's scan collection.
+# Provenance: probe_eddy_current's calibration moves. Each step settles for
+# 0.050 s before its 0.100 s sample window, dwells 0.200 s in place, is
+# approached from 0.500 mm above, and the whole descent is bracketed by a
+# 1.0 s dwell so the sample stream settles before and after it.
 SAMPLE_SETTLE_TIME = 0.050
 SAMPLE_WINDOW_TIME = 0.100
 STEP_DWELL_TIME = 0.200
 Z_APPROACH_HOP = 0.500
+DESCENT_SETTLE_DWELL = 1.000
+
+# Chosen value, not from probe_eddy_current: the bulk sensor delivers 0.100 s
+# batches, so collection runs two batch periods past the end of a move to be
+# sure the batch carrying the last in-move samples has arrived.
 COLLECT_TAIL_TIME = 0.200
-QUERY_COLLECT_TIME = 0.500
+
+# Chosen value, not from probe_eddy_current: half a second at the sensor's
+# 250 Hz sample rate gives about 125 samples, enough for a meaningful spread
+# without making a wiring check feel slow. Exposed as the query_time config
+# option; this is the default.
+QUERY_COLLECT_TIME_DEFAULT = 0.500
+
+# Chosen value: the coarse locate pass has to cover the uncertainty in the
+# configured coil position, which is much larger than the coil itself, so the
+# default locate length is three times the regular scan length.
+LOCATE_SCAN_LENGTH_FACTOR = 3.0
 
 
 class EddyToolCalibration:
@@ -472,32 +560,48 @@ class EddyToolCalibration:
         self.coil_y = config.getfloat('coil_y', 5.0)
         self.coil_inner_diameter = config.getfloat(
             'coil_inner_diameter', 2.0, above=0.0)
+        # Machine Z of the coil top face, the origin every scan height and
+        # descent height in this plugin is measured from.
+        self.coil_z = config.getfloat('coil_z', 0.0)
         self.scan_height = config.getfloat('scan_height', 1.0)
         self.scan_safe_z = config.getfloat('scan_safe_z', 2.0, above=0.0)
         self.z_start = config.getfloat('z_start', 5.0)
         self.z_stop = config.getfloat('z_stop', 0.5)
         self.z_step = config.getfloat('z_step', 0.05, above=0.0)
-        if self.z_stop >= self.z_start:
+        try:
+            self.z_targets = z_descent_targets(
+                self.z_start, self.z_stop, self.z_step)
+        except ValueError as e:
             raise config.error(
-                "%s: z_stop must be below z_start" % (self.name,))
+                "%s: %s. Raise z_stop, lower z_start, or pick a z_step that "
+                "divides the span." % (self.name, e))
 
         # Scan tuning.
         self.scan_speed = config.getfloat('scan_speed', 4.0, above=0.0)
         self.scan_length = config.getfloat('scan_length', 4.0, above=0.0)
         self.locate_scan_length = config.getfloat(
-            'locate_scan_length', self.scan_length * 3.0, above=0.0)
+            'locate_scan_length',
+            self.scan_length * LOCATE_SCAN_LENGTH_FACTOR, above=0.0)
         self.travel_speed = config.getfloat('travel_speed', 100.0, above=0.0)
         self.z_speed = config.getfloat('z_speed', 10.0, above=0.0)
-        self.scan_angles = [
-            float(a) for a in
-            config.get('scan_angles', '45, 135').split(',')
-        ]
         self.pair_scans = config.getboolean('pair_scans', True)
+        try:
+            self.scan_angles = normalize_scan_angles(
+                [float(a) for a in
+                 config.get('scan_angles', '45, 135').split(',')],
+                self.pair_scans)
+        except ValueError as e:
+            raise config.error("%s: scan_angles: %s" % (self.name, e))
         self.samples_min = config.getint('samples_min', 100, minval=3)
         self.save_csv = config.getboolean('save_csv', False)
+        self.query_time = config.getfloat(
+            'query_time', QUERY_COLLECT_TIME_DEFAULT, above=0.0)
 
         # Fit tuning. The window radius defaults to the coil inner radius, so
         # the fit sees exactly the sample span the coil bore responds over.
+        # Deliberate deviation from upstream, which shrinks the bore by a
+        # further 0.5 mm before halving it; that shrink is unexplained and an
+        # unexplained constant is not carried over.
         self.fit_window_radius = config.getfloat(
             'fit_window_radius', self.coil_inner_diameter / 2.0, above=0.0)
         # Upstream's convention: a Gaussian weight whose standard deviation is
@@ -575,9 +679,10 @@ class EddyToolCalibration:
         motion_report = self.printer.lookup_object('motion_report', None)
         if motion_report is None:
             raise gcmd.error(
-                "Add a [motion_report] section to the printer config. This "
-                "plugin maps every sensor sample to a toolhead position "
-                "through it.")
+                "Run this command after the printer has finished starting "
+                "up. The motion report is registered by the printer's "
+                "steppers, so it is missing only before startup completes or "
+                "when no steppers are configured.")
         dump = motion_report.trapqs.get('toolhead')
         if dump is None:
             raise gcmd.error(
@@ -588,55 +693,138 @@ class EddyToolCalibration:
     def _tool_index(self, gcmd):
         return gcmd.get_int('T', 0, minval=0, maxval=MAX_TOOLS - 1)
 
-    def _report_sensor_health(self, gcmd, errors, overflows):
-        if errors:
+    def _report_sensor_health(self, gcmd, stats):
+        if stats['errors']:
             raise gcmd.error(
-                "The sensor reported %d sample errors during the "
-                "measurement. Run LDC_CALIBRATE_DRIVE_CURRENT "
-                "CHIP=%s and retry."
-                % (errors, self.name.split()[-1]))
-        if overflows:
+                "Run LDC_CALIBRATE_DRIVE_CURRENT CHIP=%s and retry. The "
+                "sensor reported %d sample errors during the measurement."
+                % (self.name.split()[-1], stats['errors']))
+        if stats['overflows']:
             gcmd.respond_info(
-                "sensor buffer overflows: %d" % (overflows,))
+                "sensor buffer overflows: %d" % (stats['overflows'],))
 
-    def _move(self, x, y, z, speed):
+    def _new_collection(self):
+        """Start counting the samples and faults of one collection.
+
+        Both the LDC1612 error count and the bulk reader's overflow count are
+        cumulative for the life of the sensor, so a collection owns only the
+        difference between the counts at its end and at its start. The
+        baselines are read here, before the client is added, because the first
+        delivered batch already carries a batch period of counts.
+        """
+        return {
+            'base_errors': self.sensor.last_error_count,
+            'base_overflows': self.sensor.ffreader.get_last_overflows(),
+            'raw_count': 0,
+            'dropped_low_freq': 0,
+            'dropped_no_position': 0,
+            'dropped_outside_move': 0,
+            'errors': 0,
+            'overflows': 0,
+        }
+
+    def _close_collection(self, stats):
+        """Finish a collection, converting the cumulative counts to its own."""
+        stats['errors'] = self.sensor.last_error_count - stats['base_errors']
+        stats['overflows'] = (
+            self.sensor.ffreader.get_last_overflows() - stats['base_overflows'])
+        return stats
+
+    def _sample_drop_rows(self, stats):
+        """Labeled diagnostic rows for the samples a collection discarded."""
+        return [
+            "raw samples: %d" % (stats['raw_count'],),
+            "dropped below freq_min: %d" % (stats['dropped_low_freq'],),
+            "dropped without a position: %d"
+            % (stats['dropped_no_position'],),
+            "dropped outside the move: %d"
+            % (stats['dropped_outside_move'],),
+        ]
+
+    def _no_sample_cause(self, stats):
+        """Name the likely cause when a collection yielded nothing usable.
+
+        The three filters a sample can die in have three different causes, so
+        the message names whichever one consumed the samples.
+        """
+        if stats['raw_count'] == 0:
+            return ("Check the sensor wiring and the I2C bus configuration. "
+                    "The sensor delivered no samples at all.")
+        if stats['dropped_no_position'] > stats['dropped_low_freq']:
+            return ("Re-run the command after homing, and leave the printer "
+                    "idle while it runs. The toolhead motion queue did not "
+                    "cover the sample timestamps.")
+        if stats['dropped_low_freq'] > 0:
+            return ("Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT "
+                    "CHIP=%s. Every sample read below freq_min, so the coil "
+                    "may not be resonating." % (self.name.split()[-1],))
+        return ("Lower scan_speed or raise scan_length. Samples arrived but "
+                "none of them fell inside the scan move's time window.")
+
+    def _descent_gap_cause(self, stats):
+        """Name the likely cause when a descent left some steps without data."""
+        if stats['raw_count'] == 0:
+            return ("Check the sensor wiring and the I2C bus configuration. "
+                    "The sensor delivered no samples during the descent.")
+        if stats['dropped_low_freq'] == stats['raw_count']:
+            return ("Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT "
+                    "CHIP=%s. Every descent sample read below freq_min."
+                    % (self.name.split()[-1],))
+        return ("Raise z_step above the printer's Z resolution. Steps finer "
+                "than the kinematics can resolve land on the same height and "
+                "collapse into one measurement.")
+
+    def _move(self, x, y, z, z_speed):
+        """Travel to (x, y, z), never crossing the coil below the target Z.
+
+        XY always travels at travel_speed and the Z leg at z_speed. A move to
+        a higher Z raises Z first; a move to a lower Z travels in XY first, so
+        the nozzle never approaches at a height below where it is going.
+        """
         toolhead = self.printer.lookup_object('toolhead')
-        toolhead.manual_move([x, y, None], self.travel_speed)
-        toolhead.manual_move([None, None, z], speed)
+        if z > toolhead.get_position()[2]:
+            toolhead.manual_move([None, None, z], z_speed)
+            toolhead.manual_move([x, y, None], self.travel_speed)
+        else:
+            toolhead.manual_move([x, y, None], self.travel_speed)
+            toolhead.manual_move([None, None, z], z_speed)
         toolhead.wait_moves()
 
     # -- sample collection ------------------------------------------------
 
-    def _collect_stationary(self, gcmd, duration):
-        """Collect samples without moving. Returns (freqs, errors, overflows)."""
+    def _collect_stationary(self, duration):
+        """Collect samples without moving. Returns (freqs, stats)."""
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
         freqs = []
-        state = {'running': True, 'errors': 0, 'overflows': 0}
+        stats = self._new_collection()
+        state = {'running': True}
 
         def handle_batch(msg):
             if not state['running']:
                 return False
             if not msg:
                 return True
-            state['errors'] = max(state['errors'], msg['errors'])
-            state['overflows'] = max(state['overflows'], msg['overflows'])
             for print_time, freq, dummy_z in msg['data']:
+                stats['raw_count'] += 1
                 if freq < self.freq_min:
+                    stats['dropped_low_freq'] += 1
                     continue
                 freqs.append(freq)
             return True
 
         self.sensor.add_client(handle_batch)
-        toolhead.wait_moves()
-        reactor.pause(reactor.monotonic() + duration)
-        state['running'] = False
-        return freqs, state['errors'], state['overflows']
+        try:
+            toolhead.wait_moves()
+            reactor.pause(reactor.monotonic() + duration)
+        finally:
+            state['running'] = False
+        return freqs, self._close_collection(stats)
 
     def _collect_scan(self, gcmd, start_x, start_y, end_x, end_y, scan_z):
         """Run one directional scan pass and return its mapped samples.
 
-        Returns (samples, errors, overflows) where samples is a list of
+        Returns (samples, stats) where samples is a list of
         (print_time, frequency, x, y). Positions come from the toolhead
         motion queue at each sample's own timestamp, so acceleration ramps
         map correctly.
@@ -645,20 +833,22 @@ class EddyToolCalibration:
         toolhead = self.printer.lookup_object('toolhead')
         dump = self._get_trapq(gcmd)
         collected = []
-        state = {'running': True, 'errors': 0, 'overflows': 0}
+        stats = self._new_collection()
+        state = {'running': True}
 
         def handle_batch(msg):
             if not state['running']:
                 return False
             if not msg:
                 return True
-            state['errors'] = max(state['errors'], msg['errors'])
-            state['overflows'] = max(state['overflows'], msg['overflows'])
             for print_time, freq, dummy_z in msg['data']:
+                stats['raw_count'] += 1
                 if freq < self.freq_min:
+                    stats['dropped_low_freq'] += 1
                     continue
                 pos, velocity = dump.get_trapq_position(print_time)
                 if pos is None:
+                    stats['dropped_no_position'] += 1
                     continue
                 collected.append((print_time, freq, pos[0], pos[1]))
             return True
@@ -667,31 +857,37 @@ class EddyToolCalibration:
         self._move(start_x, start_y, safe_z, self.z_speed)
         self._move(start_x, start_y, scan_z, self.z_speed)
         self.sensor.add_client(handle_batch)
-        # Baseline error count, so only errors raised by this pass count.
-        reactor.pause(reactor.monotonic() + SAMPLE_SETTLE_TIME)
-        base_errors = state['errors']
-        move_start = toolhead.get_last_move_time()
-        toolhead.manual_move([end_x, end_y, None], self.scan_speed)
-        toolhead.wait_moves()
-        move_end = toolhead.get_last_move_time()
-        reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
-        state['running'] = False
+        try:
+            reactor.pause(reactor.monotonic() + SAMPLE_SETTLE_TIME)
+            move_start = toolhead.get_last_move_time()
+            toolhead.manual_move([end_x, end_y, None], self.scan_speed)
+            # The scan move's end time is read while the move is still
+            # queued, so it is the move's own end. Reading it after
+            # wait_moves() would return a time padded into the future by the
+            # toolhead's buffer, admitting stationary samples into the pass.
+            move_end = toolhead.get_last_move_time()
+            toolhead.wait_moves()
+            reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
+        finally:
+            state['running'] = False
         toolhead.manual_move([None, None, safe_z], self.z_speed)
         toolhead.wait_moves()
         samples = [s for s in collected if move_start <= s[0] <= move_end]
-        return samples, state['errors'] - base_errors, state['overflows']
+        stats['dropped_outside_move'] = len(collected) - len(samples)
+        return samples, self._close_collection(stats)
 
     def _scan_pass(self, gcmd, center_x, center_y, angle_deg, length, scan_z,
                    label):
         start_x, start_y, end_x, end_y = scan_endpoints(
             center_x, center_y, angle_deg, length)
-        samples, errors, overflows = self._collect_scan(
+        samples, stats = self._collect_scan(
             gcmd, start_x, start_y, end_x, end_y, scan_z)
-        self._report_sensor_health(gcmd, errors, overflows)
+        self._report_sensor_health(gcmd, stats)
         if not samples:
             raise gcmd.error(
-                "The sensor returned no samples during the %s pass. Check "
-                "the sensor wiring and the I2C bus configuration." % (label,))
+                "The %s pass produced no usable samples. %s\n%s"
+                % (label, self._no_sample_cause(stats),
+                   "\n".join(self._sample_drop_rows(stats))))
         if len(samples) < self.samples_min:
             raise gcmd.error(
                 "The %s pass returned %d samples, below the configured "
@@ -714,7 +910,7 @@ class EddyToolCalibration:
                 "The %s pass did not yield a usable response fit: %s. Run "
                 "EDDY_LOCATE to refine the coil center, and check that no "
                 "metal sits near the coil." % (label, e))
-        return result
+        return result, stats
 
     def _save_csv(self, gcmd, label, samples):
         config_file = self.printer.get_start_args()['config_file']
@@ -736,24 +932,24 @@ class EddyToolCalibration:
 
     def _measure_center(self, gcmd, center_x, center_y, length, label):
         """One full multi-direction XY measurement around a center estimate."""
-        angles = list(self.scan_angles)
-        if self.pair_scans:
-            for angle in list(angles):
-                opposite = (angle + 180.0) % 360.0
-                if opposite not in angles:
-                    angles.append(opposite)
-        scan_z = self.coil_z() + self.scan_height
+        angles = expand_scan_angles(self.scan_angles, self.pair_scans)
+        scan_z = self.coil_z + self.scan_height
         peaks = []
         for angle in angles:
-            result = self._scan_pass(
+            result, stats = self._scan_pass(
                 gcmd, center_x, center_y, angle, length, scan_z,
                 "%s %.0f deg" % (label, angle))
-            gcmd.respond_info(
-                "pass %.0f deg: type %s, samples %d, vertex offset %+.3f, "
-                "peak x %.4f, peak y %.4f"
-                % (angle, result['peak_type'], result['sample_count'],
-                   result['vertex_offset'], result['peak_x'],
-                   result['peak_y']))
+            rows = [
+                "pass angle: %.1f deg" % (angle,),
+                "response type: %s" % (result['peak_type'],),
+                "samples: %d" % (result['sample_count'],),
+                "extremum sample: %d" % (result['extremum_index'],),
+                "vertex offset: %+.3f samples" % (result['vertex_offset'],),
+                "peak x: %.4f" % (result['peak_x'],),
+                "peak y: %.4f" % (result['peak_y'],),
+            ]
+            rows.extend(self._sample_drop_rows(stats))
+            gcmd.respond_info("\n".join(rows))
             peaks.append((angle, result['peak_x'], result['peak_y']))
         if self.pair_scans:
             projections = average_paired_projections(peaks)
@@ -766,15 +962,6 @@ class EddyToolCalibration:
                 "The scan directions did not reconstruct a center: %s. Set "
                 "scan_angles to two directions at least 30 degrees apart."
                 % (e,))
-
-    def coil_z(self):
-        """Z of the coil top surface in machine coordinates.
-
-        The coil sits on the bed, so its top surface is the Z origin of the
-        scan heights. Kept as a single accessor so a future coil_z config
-        option has one home.
-        """
-        return 0.0
 
     def _measure_xy(self, gcmd):
         center_x, center_y = self.center if self.center else (
@@ -799,62 +986,67 @@ class EddyToolCalibration:
         toolhead = self.printer.lookup_object('toolhead')
         kin = toolhead.get_kinematics()
         msgs = []
-        state = {'running': True, 'errors': 0, 'overflows': 0}
+        stats = self._new_collection()
+        state = {'running': True}
 
         def handle_batch(msg):
             if not state['running']:
                 return False
             if not msg:
                 return True
-            state['errors'] = max(state['errors'], msg['errors'])
-            state['overflows'] = max(state['overflows'], msg['overflows'])
             msgs.append(msg)
             return True
 
         self._move(center_x, center_y, self.z_start + Z_APPROACH_HOP,
                    self.z_speed)
         self.sensor.add_client(handle_batch)
-        toolhead.dwell(1.0)
-        steps = int((self.z_start - self.z_stop) / self.z_step)
-        targets = [self.z_start - i * self.z_step for i in range(steps + 1)]
         times = []
-        for target in targets:
-            toolhead.manual_move(
-                [None, None, target + Z_APPROACH_HOP], self.z_speed)
-            toolhead.manual_move([None, None, target], self.z_speed)
-            start_query_time = (
-                toolhead.get_last_move_time() + SAMPLE_SETTLE_TIME)
-            end_query_time = start_query_time + SAMPLE_WINDOW_TIME
-            toolhead.dwell(STEP_DWELL_TIME)
-            toolhead.flush_step_generation()
-            kin_spos = {
-                s.get_name(): s.get_commanded_position()
-                for s in kin.get_steppers()
-            }
-            kin_pos = kin.calc_position(kin_spos)
-            times.append((start_query_time, end_query_time, kin_pos[2]))
-        toolhead.dwell(1.0)
-        toolhead.wait_moves()
-        reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
-        state['running'] = False
+        try:
+            toolhead.dwell(DESCENT_SETTLE_DWELL)
+            for target in self.z_targets:
+                toolhead.manual_move(
+                    [None, None, target + Z_APPROACH_HOP], self.z_speed)
+                toolhead.manual_move([None, None, target], self.z_speed)
+                start_query_time = (
+                    toolhead.get_last_move_time() + SAMPLE_SETTLE_TIME)
+                end_query_time = start_query_time + SAMPLE_WINDOW_TIME
+                toolhead.dwell(STEP_DWELL_TIME)
+                toolhead.flush_step_generation()
+                kin_spos = {
+                    s.get_name(): s.get_commanded_position()
+                    for s in kin.get_steppers()
+                }
+                kin_pos = kin.calc_position(kin_spos)
+                times.append((start_query_time, end_query_time, kin_pos[2]))
+            toolhead.dwell(DESCENT_SETTLE_DWELL)
+            toolhead.wait_moves()
+            reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
+        finally:
+            state['running'] = False
         self._move(center_x, center_y, self.z_start + Z_APPROACH_HOP,
                    self.z_speed)
-        self._report_sensor_health(gcmd, state['errors'], state['overflows'])
+        self._close_collection(stats)
+        self._report_sensor_health(gcmd, stats)
         buckets = {}
         step = 0
         for msg in msgs:
             for query_time, freq, dummy_z in msg['data']:
+                stats['raw_count'] += 1
                 if freq < self.freq_min:
+                    stats['dropped_low_freq'] += 1
                     continue
                 while step < len(times) and query_time > times[step][1]:
                     step += 1
                 if step < len(times) and query_time >= times[step][0]:
                     buckets.setdefault(times[step][2], []).append(freq)
+                else:
+                    stats['dropped_outside_move'] += 1
         if len(buckets) != len(times):
             raise gcmd.error(
-                "The descent produced sensor data for %d of %d steps. Check "
-                "the sensor wiring and the I2C bus configuration."
-                % (len(buckets), len(times)))
+                "The descent produced sensor data for %d of %d steps. %s\n%s"
+                % (len(buckets), len(times),
+                   self._descent_gap_cause(stats),
+                   "\n".join(self._sample_drop_rows(stats))))
         points = [(z, sum(freqs) / len(freqs))
                   for z, freqs in buckets.items()]
         try:
@@ -872,21 +1064,23 @@ class EddyToolCalibration:
         "sanity check.")
 
     def cmd_EDDY_QUERY(self, gcmd):
-        freqs, errors, overflows = self._collect_stationary(
-            gcmd, QUERY_COLLECT_TIME)
+        freqs, stats = self._collect_stationary(self.query_time)
         if not freqs:
             raise gcmd.error(
-                "The sensor returned no samples. Check the sensor wiring and "
-                "the I2C bus configuration.")
-        self._report_sensor_health(gcmd, errors, overflows)
+                "The sensor returned no usable samples. %s\n%s"
+                % (self._no_sample_cause(stats),
+                   "\n".join(self._sample_drop_rows(stats))))
+        self._report_sensor_health(gcmd, stats)
         low, high, std = spread(freqs)
-        gcmd.respond_info(
-            "samples: %d\n"
-            "frequency mean: %.3f Hz\n"
-            "frequency min: %.3f Hz\n"
-            "frequency max: %.3f Hz\n"
-            "frequency stddev: %.3f Hz"
-            % (len(freqs), sum(freqs) / len(freqs), low, high, std))
+        rows = [
+            "samples: %d" % (len(freqs),),
+            "frequency mean: %.3f Hz" % (sum(freqs) / len(freqs),),
+            "frequency min: %.3f Hz" % (low,),
+            "frequency max: %.3f Hz" % (high,),
+            "frequency stddev: %.3f Hz" % (std,),
+        ]
+        rows.extend(self._sample_drop_rows(stats))
+        gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_LOCATE_help = (
         "Coarse raster scan over the configured coil position to find and "
@@ -987,23 +1181,16 @@ class EddyToolCalibration:
         # A baseline is always a fresh measurement, so the baseline and the
         # tools compared against it come from the same machinery.
         result = self._run_tool_measurement(gcmd, tool)
+        # _report_tool_result owns the reference-frequency crossing, so the
+        # baseline stores the value that readout produced instead of
+        # evaluating the curve a second time.
+        self._report_tool_result(gcmd, tool, result)
         self.baseline = {
             'tool': tool,
             'x': result['x'],
             'y': result['y'],
             'z_cross': result.get('z_cross'),
         }
-        if tool in self.z_refs:
-            ref_z, ref_freq = self.z_refs[tool]
-            try:
-                self.baseline['z_cross'] = z_curve_z_at_freq(
-                    result['z_curve'], ref_freq)
-            except ValueError as e:
-                raise gcmd.error(
-                    "The Z reference for T%d does not fall inside this "
-                    "descent: %s. Re-run EDDY_SET_Z_REF T=%d for this tool."
-                    % (tool, e, tool))
-        self._report_tool_result(gcmd, tool, result)
         gcmd.respond_info("baseline tool: T%d" % (tool,))
 
     cmd_EDDY_SET_Z_REF_help = (

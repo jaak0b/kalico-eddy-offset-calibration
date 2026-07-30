@@ -188,6 +188,108 @@ def test_rejects_a_flat_fit_window():
         etc.fit_vertex_offset(freqs, 20, 10, 5.0, 'peak', VERTEX_LIMIT)
 
 
+def test_recovers_the_vertex_when_the_fit_window_is_clipped_at_the_pass_start():
+    # Arrange: an exact downward parabola with its vertex seeded at sample
+    # 6.4, fitted around sample 3 with a 10 sample half window. The window is
+    # clipped by the start of the pass and so covers samples 0 to 13, which is
+    # asymmetric about sample 3 (7 samples left of it are missing).
+    freqs = [-((i - 6.4) ** 2) for i in range(41)]
+
+    # Act
+    offset = etc.fit_vertex_offset(freqs, 3, 10, 5.0, 'peak', VERTEX_LIMIT)
+
+    # Assert: the seeded vertex sits 6.4 - 3 = 3.4 samples past the fit index.
+    # The data is an exact quadratic, so a correct solve of the normal
+    # equations returns it to floating-point round-off; the tolerance is a
+    # thousand times that round-off. Upstream's determinant expansion, which
+    # is only valid for a symmetric window, returns roughly 7.84 here.
+    assert offset == pytest.approx(3.4, abs=1e-12)
+
+
+def test_recovers_the_vertex_when_the_fit_window_is_symmetric():
+    # Arrange: the same exact parabola with its vertex seeded at sample 20.25,
+    # fitted around sample 20 so the 10 sample half window is symmetric.
+    freqs = [-((i - 20.25) ** 2) for i in range(41)]
+
+    # Act
+    offset = etc.fit_vertex_offset(freqs, 20, 10, 5.0, 'peak', VERTEX_LIMIT)
+
+    # Assert: the seeded vertex sits 20.25 - 20 = 0.25 samples past the fit
+    # index, recovered to floating-point round-off as above.
+    assert offset == pytest.approx(0.25, abs=1e-12)
+
+
+def test_rejects_a_pass_with_no_response_contrast():
+    # Arrange: a flat pass, so the middle band and the edges read the same and
+    # the response has neither a peak nor a valley.
+    freqs = [12345.0] * 100
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="no response contrast"):
+        etc.detect_peak_type(freqs, EDGE_MARGIN)
+
+
+# --- scan angle normalization ----------------------------------------------
+
+
+def test_normalizes_scan_angles_into_a_single_turn():
+    # Arrange / Act
+    angles = etc.normalize_scan_angles([-45.0, 405.0], pair_scans=False)
+
+    # Assert: -45 wraps to 315 and 405 wraps to 45.
+    assert angles == [315.0, 45.0]
+
+
+def test_rejects_a_scan_angle_listed_twice_in_different_turns():
+    with pytest.raises(ValueError, match="listed twice"):
+        etc.normalize_scan_angles([45.0, 405.0], pair_scans=False)
+
+
+def test_rejects_opposite_scan_angles_when_pairing_already_adds_them():
+    with pytest.raises(ValueError, match="are opposites"):
+        etc.normalize_scan_angles([45.0, 225.0], pair_scans=True)
+
+
+def test_keeps_opposite_scan_angles_when_pairing_is_off():
+    # Arrange / Act: without pair_scans nothing adds the opposites, so an
+    # explicit opposed pair is a legitimate configuration.
+    angles = etc.normalize_scan_angles([45.0, 225.0], pair_scans=False)
+
+    # Assert
+    assert angles == [45.0, 225.0]
+
+
+def test_pairing_expands_each_angle_with_its_opposite():
+    # Arrange / Act
+    angles = etc.expand_scan_angles([45.0, 135.0], pair_scans=True)
+
+    # Assert: the opposite of 45 is 225 and the opposite of 135 is 315.
+    assert angles == [45.0, 135.0, 225.0, 315.0]
+
+
+# --- Z descent targets -----------------------------------------------------
+
+
+def test_descent_targets_end_exactly_at_z_stop():
+    # Arrange / Act: a 5.0 mm to 4.5 mm descent in 0.1 mm steps.
+    targets = etc.z_descent_targets(5.0, 4.5, 0.1)
+
+    # Assert: six heights, the last one exactly z_stop.
+    assert len(targets) == 6
+    assert targets[0] == pytest.approx(5.0, abs=1e-12)
+    assert targets[-1] == 4.5
+
+
+def test_rejects_a_descent_span_that_is_not_a_whole_number_of_steps():
+    with pytest.raises(ValueError, match="whole number"):
+        etc.z_descent_targets(5.0, 0.5, 0.04)
+
+
+def test_rejects_a_descent_whose_stop_lies_above_its_start():
+    with pytest.raises(ValueError, match="must lie below"):
+        etc.z_descent_targets(0.5, 5.0, 0.05)
+
+
 # --- pair averaging --------------------------------------------------------
 
 
