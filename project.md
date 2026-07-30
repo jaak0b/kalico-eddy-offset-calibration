@@ -79,6 +79,10 @@ SCL, SDA. No MCU on the sensor board, nothing to flash. Kalico's standard MCU
 firmware already contains I2C + ldc1612 support (re-flash mainboard only if its
 firmware predates the ldc1612 driver).
 
+Owner's printer: BTT Manta M8P V2.0 (STM32H723) with Raspberry Pi CM4 host.
+Wiring plan: software I2C on the M8P V2.0 I2C connector pins PA8 (SCL) / PC9
+(SDA); details in docs/bringup.md.
+
 ## Software (next phase)
 
 Target: Kalico only. Upstream plugin `tool_eddy_calibration.py` (GPLv3, klippy extra)
