@@ -1,0 +1,145 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+A Kalico (Klipper fork) plugin that calibrates per-tool XYZ nozzle offsets on toolchanger 3D
+printers using a bed-mounted LDC1612 eddy-current sensor board. Non-contact and immune to dirty
+nozzles: the sensor sees only metal. XY comes from directional scans over the coil with parabolic
+sub-sample fitting of the symmetric response (material-independent); Z comes from a
+frequency-vs-height descent curve anchored by a one-time per-tool contact reference. Offsets are
+printed to the console in v1; no toolchanger integration yet. Hardware is chengxg's open-source
+"Little Crab" dual-coil board (self-assembled; see `project.md`). Design: `docs/design.md`;
+session state: `HANDOVER.md`.
+
+## The plugin: Python, Kalico klippy plugin
+
+Single module `eddy_tool_calibration.py`, installed by symlink into Kalico's gitignored
+`klippy/plugins/` directory (Kalico loads it like an extra; config section name = module name).
+GPLv3 (algorithm ported from the GPLv3 upstream, kept in `reference/`). Kalico-only target; no
+stock-Klipper compatibility requirement.
+
+Commands (repo root):
+
+```bash
+pip install -r requirements_test.txt
+python -m pytest tests/            # unit tests for fit math and scan geometry
+```
+
+Structure:
+
+- **`eddy_tool_calibration.py`**: the plugin. Pure-math parts (parabolic fit, pair averaging,
+  center reconstruction, curve evaluation) live in functions with no klippy dependency so they
+  are unit-testable standalone.
+- **`reference/tool_eddy_calibration.py`**: upstream file, unmodified, algorithm provenance.
+- **`kalico/`**: shallow read-only clone of Kalico for API reference (not shipped, gitignored).
+  Files we build against: `klippy/extras/ldc1612.py`, `probe_eddy_current.py`,
+  `motion_report.py`, `tools_calibrate.py`.
+- **`tests/`**: pytest; synthetic response curves with known centers as oracles.
+- **`docs/`**, **`project.md`**, **`HANDOVER.md`**: design, hardware state, session handover.
+
+Durable gotchas:
+- Inside `klippy/plugins/`, cross-module imports must use the full namespace
+  (`from klippy.extras import ldc1612`), never relative imports.
+- Our crab board's LDC1612 CLKIN is 24 MHz (`frequency: 24000000`); the BTT Eddy Coil dev unit
+  differs (driver default 12 MHz). Wrong constant scales all frequencies; geometry math is
+  scale-free but Z references are not transferable across clock settings.
+- `ldc1612.add_client` delivers 0.1 s batches of `(print_time, freq_hz, dummy_z)` at a fixed
+  250 Hz; watch the `errors`/`overflows` fields at scan edges.
+- Map sample timestamps to positions with `motion_report.get_trapq_position(print_time)`,
+  never by assuming constant scan velocity.
+
+## Conventions
+
+Numbered for unambiguous reference; do not cite rule numbers in shipped source or UI text.
+
+1. **Measurement integrity: established methods only, never a fudge.** Every algorithm
+   (parabolic sub-sample fitting, forward/reverse pair cancellation, least-squares center
+   reconstruction, frequency-curve evaluation) is an established method or ported from the
+   validated upstream, named with provenance in comments. NEVER introduce a hand-tuned constant,
+   empirical offset, or bias correction fitted to make one particular setup's numbers look
+   right: that overfits the sample and lies on the next one. Tunable tolerances are config
+   parameters, exposed and documented, not buried magic numbers.
+
+2. **No silently swallowed errors.** An `except` must surface the error, rethrow, or return a
+   value the caller can act on. Every failure path a user can hit (no samples, too few samples,
+   bad fit residual, no extremum in window, sensor amplitude errors) raises a gcode error with
+   an actionable message naming the likely cause.
+
+3. **Keep the math framework-agnostic and modular.** Fit and geometry functions take plain
+   numbers/arrays and import nothing from klippy; the plugin class is the only klippy-facing
+   layer. New calibration modes or sensor variants are their own modules behind clear
+   interfaces.
+
+4. **Limited AI attribution in git/GitHub.** A `Co-Authored-By: Claude <...>` trailer IS allowed
+   on commits. Beyond that trailer, no AI attribution anywhere. Commit messages: a single short
+   sentence.
+
+5. **Commit approval.** The owner granted standing approval to commit at will on `main`
+   (2026-07-30). Pushes still require explicit approval.
+
+6. **Never use the em-dash character**, and never a hyphen as a substitute for it. Rewrite with
+   a colon, parentheses, a comma, or two sentences. Hyphens only where grammar requires
+   (compound modifiers).
+
+7. **UI text is plain technical prose; terminology is the Klipper/Voron community's.** Complete
+   grammatical sentences in docs and error messages, neutral register. Terms as the ecosystem
+   names them (toolhead, nozzle offset, probe, macro, config section, print_time); one term per
+   concept. Gcode command names follow Klipper convention (UPPER_SNAKE, parameters `T=`, `Z=`).
+
+8. **Diagnostic readouts show raw values** as labeled rows, not prose sentences (frequency,
+   fitted center, residual, sample count, per-axis offset).
+
+9. **Never corrupt reported offsets.** The printed offsets reflect the fitted measurement
+   exactly; no rounding beyond documented display precision, no silent clamping, no "helpful"
+   adjustments. A measurement that fails validation is reported as failed, never as a plausible
+   number.
+
+10. **Extend the concept's existing home; never bolt a duplicate beside a symptom.** Before
+    adding or fixing logic, find the module that already owns the concept (search for the
+    concept, not just the symptom site) and extend it. Never compute a value the codebase
+    already derives elsewhere: if a figure is produced in two places, unify on the single
+    source. Reuse Kalico's own machinery (ldc1612 driver, motion_report, EddyCalibration
+    patterns) instead of reimplementing it. Any non-trivial or cross-cutting change gets a short
+    written design first (its canonical home, what it extends, what it must not duplicate) for
+    owner approval before implementation. Interim ("quick fix now, proper fix later") solutions
+    are forbidden in all cases: the correct structure is built immediately, even when it costs a
+    schema change or a larger diff.
+
+11. **Subagent discipline.** Give every subagent a correct, specific title; never run more than
+    1 Fable agent at a time (hard budget limit). Sonnet is fine for parallel design/research
+    work. Only Anthropic/Claude agents: never route work to cross-vendor lanes (grok/codex).
+    The main (user-facing) agent edits repository files itself only for tiny changes (a single
+    line); anything larger is performed by a subagent. The main agent also delegates other
+    context-heavy work and consumes only conclusions: codebase exploration and broad searches,
+    reading large files or external references, and reviews/audits. The main agent keeps for
+    itself only what needs conversation context or judgment: talking to the owner, design
+    decisions, writing the subagent prompts, running tests to verify outcomes, and git commits.
+    Exceptions where the main agent may edit directly: CLAUDE.md and the memory directory
+    (meta-configuration the owner asks for), and reverting a file with git. When delegating
+    implementation, the prompt must be self-contained (files, constraints, conventions,
+    definition of done, exact interfaces or design decisions already made); iterative design
+    loops with the owner are still driven by the main agent, which re-delegates each round with
+    the updated instructions rather than editing directly because the round feels small.
+
+12. **Exhaustive dispatch over closed sets.** Any branch on a closed set (command parameters,
+    calibration phases, sensor status codes the plugin claims to handle) must handle every
+    member explicitly and end in an explicit "unhandled" path (raise, or log-and-skip per
+    rule 2). Never write an `else` that assumes whatever is left: it silently absorbs members
+    added later.
+
+13. **Test oracles must be independent of the logic they judge.** A test's expected value comes
+    from a source the implementation cannot contaminate: a synthetic response curve constructed
+    with a known center asserts that literal center within tolerance; latency-bias tests build
+    the bias in by construction. Never compute the expectation by calling, copying, or
+    paraphrasing the code under test: a test that mirrors the implementation passes when both
+    are wrong and verifies nothing. This is the deliberate exception to rule 10: oracle math is
+    duplicated on purpose. Self-consistency checks (repeatability spread) are legitimate but
+    must never be presented as accuracy evidence; accuracy claims require the independent
+    contact-method cross-check.
+
+**Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
+Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
+dev unit or crab board), verified by the owner, per the validation ladder in `docs/design.md`
+(repeatability spread, contact-method cross-check, dirty-nozzle test).
