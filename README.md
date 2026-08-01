@@ -157,16 +157,9 @@ cd kalico-eddy-offset-calibration
 ./install.sh
 ```
 
-`install.sh` symlinks `eddy_tool_calibration.py` into your Kalico checkout's
-`klippy/plugins/` directory (it tries `~/kalico`, then `~/klipper`, or takes the
-directory as an argument, or the `KALICO_DIR` environment variable). Prefer the
-symlink: a git pull then updates the installed plugin. Copying the file works
-too:
-
-```
-mkdir -p ~/kalico/klippy/plugins
-cp eddy_tool_calibration.py ~/kalico/klippy/plugins/
-```
+`install.sh` symlinks the plugin into your Kalico checkout, so a `git pull`
+updates it. Pass the checkout directory as an argument if it is not `~/kalico`
+or `~/klipper`.
 
 Add the config section, then restart klippy so it loads the module:
 
