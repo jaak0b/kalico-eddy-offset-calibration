@@ -1030,12 +1030,7 @@ class EddyToolCalibration:
         # there are, and the lines that mount one. Without them each tool is
         # still calibrated on its own with T=.
         self.tool_count = config.getint(
-            'tool_count', None, minval=1, maxval=99)
-        if self.tool_count is not None and self.tool_count > MAX_TOOLS:
-            raise config.error(
-                "%s: tool_count is %d, and T= accepts T0 through T%d. Lower "
-                "tool_count to the number of tools the machine has."
-                % (self.name, self.tool_count, MAX_TOOLS - 1))
+            'tool_count', None, minval=1, maxval=MAX_TOOLS)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.toolchange_gcode = gcode_macro.load_template(
             config, 'toolchange_gcode', '')

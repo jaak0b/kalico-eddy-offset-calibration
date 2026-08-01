@@ -132,6 +132,27 @@ transfers them manually. save_variables/SAVE_CONFIG hooks are future work.
 Maintenance rule: pin upstream SHA; after each Kalico update run a smoke
 calibration (API breakage surfaces at runtime, not load time).
 
+### Hardware validation (2026-08-01)
+
+First hardware validation day, BTT Eddy Coil on a Manta M8P V2.0, Voron printer
+with StealthChanger, nozzles at 150 C.
+
+- EDDY_QUERY noise floor: stddev ~58 Hz at 3.216 MHz base frequency.
+- XY repeatability, six EDDY_CALIBRATE runs on T0 without toolchange: stddev
+  4.6 um X, 2.5 um Y (ranges 12.2 um X, 6.9 um Y).
+- T1 offset repeatability across four runs, including one full dock/redock:
+  range 12 um X, 11 um Y.
+- Switch press spread per anchor run: 2.5 um (T0), 0.0 um (T1).
+- Cross-check against a fresh contact calibration (the toolchanger's own
+  routine, same day, 150 C): X within 22 to 66 um, Y within 46 um. Sign
+  convention verified, offsets match the toolchanger's gcode offset
+  convention directly.
+- Trapq position-mapping bug found and fixed on hardware day: samples were
+  mapped to scan-start position mid-move; fixed by mapping after the move
+  completes.
+- Z descent monotonicity requires a z_start of 2.5 mm (sensor range limit is
+  roughly 2 to 3 mm).
+
 ## Decisions log
 
 - Eddy current sensing chosen over contact pin (dirty-nozzle immunity) and optical
