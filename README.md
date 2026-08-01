@@ -220,7 +220,7 @@ On the printer host:
 cd ~
 git clone https://github.com/jaak0b/kalico-eddy-offset-calibration
 cd kalico-eddy-offset-calibration
-./install.sh
+sh install.sh
 ```
 
 `install.sh` symlinks the plugin into your Kalico checkout, so a `git pull`
