@@ -882,6 +882,23 @@ class EddyToolCalibration:
         (print_time, frequency, x, y). Positions come from the toolhead
         motion queue at each sample's own timestamp, so acceleration ramps
         map correctly.
+
+        Positions are resolved only after the scan move has completed, never
+        inside the sensor callback. motion_report's get_trapq_position reads
+        the trapq through trapq_extract_old, which walks the trapq's history
+        list alone. A move reaches that history list only when the toolhead's
+        flush loop calls trapq_finalize_moves with a free time past the move's
+        end, so while the scan move is still executing it sits in the trapq's
+        pending "moves" list and is invisible to the query. The query then
+        finds the newest already-finalized move instead, clamps its move_time
+        to that move's own duration, and returns its end position: the scan
+        start point. That is a real tuple, not None, so a mid-move query
+        silently yields a stale position for nearly every sample and the
+        pass "finds" its extremum at the scan start. Queried after
+        wait_moves(), the whole move is in history (retained for
+        MOVE_HISTORY_EXPIRE, 30 s in toolhead.py, far longer than a pass),
+        so every timestamp maps correctly and a None result again genuinely
+        means the timestamp lies outside known motion.
         """
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
@@ -900,11 +917,7 @@ class EddyToolCalibration:
                 if freq < self.freq_min:
                     stats['dropped_low_freq'] += 1
                     continue
-                pos, velocity = dump.get_trapq_position(print_time)
-                if pos is None:
-                    stats['dropped_no_position'] += 1
-                    continue
-                collected.append((print_time, freq, pos[0], pos[1]))
+                collected.append((print_time, freq))
             return True
 
         safe_z = scan_z + self.scan_safe_z
@@ -926,8 +939,15 @@ class EddyToolCalibration:
             state['running'] = False
         toolhead.manual_move([None, None, safe_z], self.z_speed)
         toolhead.wait_moves()
-        samples = [s for s in collected if move_start <= s[0] <= move_end]
-        stats['dropped_outside_move'] = len(collected) - len(samples)
+        in_window = [s for s in collected if move_start <= s[0] <= move_end]
+        stats['dropped_outside_move'] = len(collected) - len(in_window)
+        samples = []
+        for print_time, freq in in_window:
+            pos, velocity = dump.get_trapq_position(print_time)
+            if pos is None:
+                stats['dropped_no_position'] += 1
+                continue
+            samples.append((print_time, freq, pos[0], pos[1]))
         return samples, self._close_collection(stats)
 
     def _scan_pass(self, gcmd, center_x, center_y, angle_deg, length, scan_z,

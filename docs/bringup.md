@@ -289,6 +289,14 @@ connects, that is a warning, not a failure. It is not a reason to reflash.
 4. Run `EDDY_CALIBRATE_TOOL` with `save_csv: True` already set in config, so
    every scan pass and the Z descent are written to CSV for offline review.
 
+**Known failure signature: peaks at the scan start.** If every pass reports its
+extremum sample near index 0 and the reconstructed center comes out exactly
+equal to the configured `coil_x` / `coil_y`, the samples are not being mapped to
+real positions and the result is meaningless rather than accurate. Check the
+saved CSV: a broken run repeats one identical x, y pair across most rows. This
+was the signature of a position-mapping bug fixed in the plugin, so a
+reappearance means the scan collector regressed.
+
 ## 7. Safety notes
 
 - **Verify `coil_z` against the real coil before the first Z descent.** The
