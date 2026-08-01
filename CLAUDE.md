@@ -153,6 +153,15 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     documented hardware). A wrong-looking example number presented as a default teaches users
     to keep it.
 
+15. **A comment states what the code cannot.** Write one only for provenance (a ported
+    algorithm and its source), a constraint invisible in the code (a hardware or API behaviour,
+    a physical assumption, a deliberate deviation and why), or an "unhandled" branch's reason.
+    Never restate what the next line does, never justify a change to a reviewer, never document
+    the edit rather than the code, and never write a docstring that only repeats the function
+    signature in prose. Code that needs a paragraph to be followed should be rewritten, not
+    annotated. The test: would this sentence still earn its place for someone reading the file
+    a year from now with no knowledge of how it came to be written? If not, delete it.
+
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
 dev unit or crab board), verified by the owner, per the validation ladder in `docs/design.md`
