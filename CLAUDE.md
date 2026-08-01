@@ -163,13 +163,16 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     fix, and docstrings that paraphrase the function name or signature. Code needing a paragraph
     to follow gets rewritten, not annotated.
 
-    **Enforcement, because the principle alone does not hold.** Every task that edits code
-    carries an explicit budget of new comment lines, stated in the task's instructions and
-    proportional to its size (a bug fix gets a handful; a new subsystem rarely needs more than
-    25). Deleting comments that fail the three categories is always free and never counts
-    against a budget. The rationale in a task's instructions is for whoever does the work, not
-    for the file: never copy the reasoning behind an assignment into the code it produces. When
-    reviewing, treat an over-budget or narrating comment as a finding like any other.
+    **Enforcement, because the principle alone does not hold.** Every comment must be able to
+    name which of the three categories justifies it, and a provenance comment must cite the file
+    and line it rests on. A comment whose category cannot be named is deleted, no judgement call
+    and no argument from usefulness. That requirement is what limits volume: a change contains
+    only so many genuine citations, constraints and unhandled branches, so no quota is needed and
+    none is set, since a quota would only invite filling it. Deleting comments that fail the
+    categories is always free. The rationale in a task's instructions is for whoever does the
+    work, not for the file: never copy the reasoning behind an assignment into the code it
+    produces. When reviewing, a comment that cannot name its category is a finding like any
+    other.
 
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
