@@ -710,6 +710,70 @@ def decode_state(text):
     return anchors
 
 
+def sweep_tool_order(tool_count):
+    """Tool numbers a fleet run visits, in the order it visits them.
+
+    Tools are numbered from zero upward with no holes, so the order is simply
+    T0 through T(tool_count-1). The baseline tool comes first, which is what
+    lets a fleet offset run satisfy the baseline rule on its own.
+    """
+    if tool_count is None:
+        raise ValueError(
+            "the tool count is not set, so the tools a fleet run covers are "
+            "not known")
+    count = int(tool_count)
+    if count < 1:
+        raise ValueError(
+            "the tool count must be at least 1, got %r" % (tool_count,))
+    return list(range(count))
+
+
+def offset_template_context(tool, offsets, calibrate_z):
+    """Names an apply_offsets_gcode template is rendered with.
+
+    With calibrate_z False no descent ran, so offset_z is left out of the
+    context rather than passed as zero: a template that applies a Z offset
+    that was never measured would move the nozzle on the strength of a number
+    nothing produced.
+    """
+    context = {
+        'tool': int(tool),
+        'offset_x': float(offsets['x']),
+        'offset_y': float(offsets['y']),
+    }
+    if calibrate_z:
+        if offsets['z'] is None:
+            raise ValueError(
+                "the Z offset of T%d was not measured, and Z calibration is "
+                "on" % (int(tool),))
+        context['offset_z'] = float(offsets['z'])
+    return context
+
+
+def fleet_summary_rows(entries):
+    """Labeled per-tool rows closing a fleet run.
+
+    entries is a list of dicts holding a tool number and either its offsets
+    or None for the baseline tool, in the order the tools were measured.
+    """
+    if not entries:
+        raise ValueError("a fleet summary needs at least one measured tool")
+    rows = ["fleet summary:"]
+    for entry in entries:
+        tool = int(entry['tool'])
+        offsets = entry['offsets']
+        if offsets is None:
+            rows.append(
+                "T%d: baseline tool, offsets zero by definition" % (tool,))
+            continue
+        parts = ["offset x: %+.4f" % (offsets['x'],),
+                 "offset y: %+.4f" % (offsets['y'],)]
+        if offsets['z'] is not None:
+            parts.append("offset z: %+.4f" % (offsets['z'],))
+        rows.append("T%d: %s" % (tool, ", ".join(parts)))
+    return rows
+
+
 def validate_csv_dir(csv_dir):
     """Reject a scan dump directory that would sit on the state file's own.
 
@@ -759,6 +823,11 @@ MAX_TOOLS = 16
 
 # The tool every other tool's offsets are measured against.
 BASELINE_TOOL = 0
+
+# The stages a fleet run reports a failure against. A failure is always
+# attributed to exactly one of these, so the message says which part of the
+# run stopped.
+TOOL_PHASES = ('toolchange', 'switch probing', 'measurement', 'apply')
 
 # The switch options EDDY_CALIBRATE_Z cannot run without. They are read at
 # load but their absence is not a load error, because a machine that only
@@ -957,6 +1026,29 @@ class EddyToolCalibration:
                 % (self.name, self.switch_probe_sample_retract_dist,
                    self.switch_probe_max_travel))
 
+        # Fleet options. They are what a run without T= needs: how many tools
+        # there are, and the lines that mount one. Without them each tool is
+        # still calibrated on its own with T=.
+        self.tool_count = config.getint(
+            'tool_count', None, minval=1, maxval=99)
+        if self.tool_count is not None and self.tool_count > MAX_TOOLS:
+            raise config.error(
+                "%s: tool_count is %d, and T= accepts T0 through T%d. Lower "
+                "tool_count to the number of tools the machine has."
+                % (self.name, self.tool_count, MAX_TOOLS - 1))
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
+        self.toolchange_gcode = gcode_macro.load_template(
+            config, 'toolchange_gcode', '')
+        self.apply_offsets_gcode = gcode_macro.load_template(
+            config, 'apply_offsets_gcode', '')
+        # An empty template is how klippy spells "the owner did not set this
+        # option", and both options change what the commands do rather than
+        # only what they emit, so the plain text is checked once here.
+        self.has_toolchange_gcode = bool(
+            config.get('toolchange_gcode', '').strip())
+        self.has_apply_offsets_gcode = bool(
+            config.get('apply_offsets_gcode', '').strip())
+
         # Session state.
         self.center = None
         self.baseline = None
@@ -1107,14 +1199,106 @@ class EddyToolCalibration:
                 "command after the printer has finished starting up.")
         return dump
 
-    def _required_tool_index(self, gcmd, command):
+    def _optional_tool_index(self, gcmd):
+        """The tool named by T=, or None when T= was left out.
+
+        An omitted T= is a request for every tool rather than a mistake, so
+        the two cases are handed back to the caller to dispatch over.
+        """
         tool = gcmd.get_int('T', None, minval=0, maxval=MAX_TOOLS - 1)
         if tool is None:
+            return None
+        if self.tool_count is not None and tool >= self.tool_count:
             raise gcmd.error(
-                "Add T= to name the tool being measured, for example %s T=0. "
-                "Mount that tool before running the command."
-                % (command,))
+                "T=%d is beyond the last tool. tool_count is %d in the [%s] "
+                "config section, so the tools are T0 through T%d."
+                % (tool, self.tool_count, self.name, self.tool_count - 1))
         return tool
+
+    def _sweep_tools(self, gcmd, command):
+        """The tools a run without T= covers, or the error naming what is
+        missing before one can run."""
+        missing = []
+        if self.tool_count is None:
+            missing.append('tool_count')
+        if not self.has_toolchange_gcode:
+            missing.append('toolchange_gcode')
+        if missing:
+            raise gcmd.error(
+                "Add %s to the [%s] config section and restart, or run "
+                "%s T=0 to calibrate one tool at a time. Running the command "
+                "without T= calibrates every tool in turn, which needs the "
+                "number of tools in tool_count and the lines that mount a "
+                "tool in toolchange_gcode."
+                % (" and ".join(missing), self.name, command))
+        try:
+            return sweep_tool_order(self.tool_count)
+        except ValueError as e:
+            raise gcmd.error(
+                "The tools of this machine could not be listed: %s. Set "
+                "tool_count in the [%s] config section to the number of tools "
+                "the machine has." % (e, self.name))
+
+    @contextlib.contextmanager
+    def _phase(self, gcmd, tool, phase, sweeping):
+        """Name the tool and the stage a failure inside a fleet run came from.
+
+        A single-tool run reports its own error unchanged: the tool is the one
+        named on the command line and there is nothing to disambiguate.
+        """
+        if phase not in TOOL_PHASES:
+            raise gcmd.error(
+                "Internal error: the calibration stage %r is not one of %r."
+                % (phase, TOOL_PHASES))
+        if not sweeping:
+            yield
+            return
+        try:
+            yield
+        except self.printer.command_error as e:
+            raise gcmd.error(
+                "T%d failed during %s: %s. The tools calibrated before it "
+                "keep their results." % (tool, phase, e))
+
+    def _mount_tool(self, gcmd, tool):
+        """Run the configured toolchange lines for a tool.
+
+        With no toolchange_gcode configured the plugin works on whatever tool
+        is mounted, which is how it behaves on a machine that changes tools by
+        hand. It never learns anything about the toolchanger either way: it
+        runs the lines the owner wrote and nothing else.
+        """
+        if not self.has_toolchange_gcode:
+            return
+        context = self.toolchange_gcode.create_template_context()
+        context['tool'] = tool
+        self.toolchange_gcode.run_gcode_from_command(context)
+        # A toolchange moves the toolhead, and the measurement reads positions
+        # out of the motion queue, so the change is finished before it starts.
+        self.printer.lookup_object('toolhead').wait_moves()
+
+    def _apply_offsets(self, gcmd, tool, offsets):
+        """Run the configured apply lines with a tool's measured offsets."""
+        if not self.has_apply_offsets_gcode:
+            return
+        try:
+            values = offset_template_context(tool, offsets, self.calibrate_z)
+        except ValueError as e:
+            raise gcmd.error(
+                "The offsets of T%d cannot be applied: %s." % (tool, e))
+        context = self.apply_offsets_gcode.create_template_context()
+        context.update(values)
+        try:
+            self.apply_offsets_gcode.run_gcode_from_command(context)
+        except self.printer.command_error as e:
+            raise gcmd.error(
+                "apply_offsets_gcode failed for T%d: %s. The lines can use "
+                "tool, offset_x and offset_y%s."
+                % (tool, e,
+                   ", and offset_z" if self.calibrate_z else
+                   "; offset_z is available only with calibrate_z set to "
+                   "True, and it is False, so a line naming offset_z has "
+                   "nothing to put there"))
 
     def _report_sensor_health(self, gcmd, stats):
         if stats['errors']:
@@ -1854,29 +2038,48 @@ class EddyToolCalibration:
         gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_CALIBRATE_Z_help = (
-        "One-time Z reference setup for the tool named by T=. Presses the "
-        "contact switch and binds the result to the eddy sensor's reading. "
-        "Run it after changing a nozzle or a hotend, or after moving the coil "
-        "or the switch. This is the setup step, not the routine offset "
-        "measurement; that is EDDY_CALIBRATE_OFFSET. Add DEBUG=1 to print "
-        "each scan pass's diagnostic rows.")
+        "One-time Z reference setup for the tool named by T=, or for every "
+        "tool when T= is left out. Presses the contact switch and binds the "
+        "result to the eddy sensor's reading. Run it after changing a nozzle "
+        "or a hotend, or after moving the coil or the switch. This is the "
+        "setup step, not the routine offset measurement; that is "
+        "EDDY_CALIBRATE_OFFSET. Add DEBUG=1 to print each scan pass's "
+        "diagnostic rows.")
 
     def cmd_EDDY_CALIBRATE_Z(self, gcmd):
         self._require_switch_config(gcmd)
         self._ensure_homed(gcmd)
-        tool = self._required_tool_index(gcmd, 'EDDY_CALIBRATE_Z')
         debug = self._debug_flag(gcmd)
+        tool = self._optional_tool_index(gcmd)
+        if tool is None:
+            tools = self._sweep_tools(gcmd, 'EDDY_CALIBRATE_Z')
+            sweeping = True
+        else:
+            tools = [tool]
+            sweeping = False
         self._require_switch_z_range(gcmd)
-        self._query_switch(gcmd)
+        for tool in tools:
+            with self._phase(gcmd, tool, 'toolchange', sweeping):
+                self._mount_tool(gcmd, tool)
+            self._anchor_tool(gcmd, tool, debug, sweeping)
+
+    def _anchor_tool(self, gcmd, tool, debug, sweeping):
+        """Press the switch for one tool and store its Z reference."""
         travel_z = self.switch_probe_z_start + self.scan_safe_z
         with self._retreating():
-            self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
-            self._move(self.switch_x, self.switch_y,
-                       self.switch_probe_z_start, self.z_speed)
-            trigger_z, counted, press_spread = self._probe_switch(gcmd, debug)
-            self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
-            center_x, center_y, agg = self._measure_xy(gcmd, debug)
-            curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
+            with self._phase(gcmd, tool, 'switch probing', sweeping):
+                self._query_switch(gcmd)
+                self._move(
+                    self.switch_x, self.switch_y, travel_z, self.z_speed)
+                self._move(self.switch_x, self.switch_y,
+                           self.switch_probe_z_start, self.z_speed)
+                trigger_z, counted, press_spread = self._probe_switch(
+                    gcmd, debug)
+                self._move(
+                    self.switch_x, self.switch_y, travel_z, self.z_speed)
+            with self._phase(gcmd, tool, 'measurement', sweeping):
+                center_x, center_y, agg = self._measure_xy(gcmd, debug)
+                curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
         self._merge_aggregate(agg, agg_z)
         anchor_height, anchor_freq = switch_anchor(curve, trigger_z)
         record = {
@@ -1892,7 +2095,8 @@ class EddyToolCalibration:
         previous = self.anchors.get(tool)
         self.anchors[tool] = record
         try:
-            self._write_state(gcmd)
+            with self._phase(gcmd, tool, 'measurement', sweeping):
+                self._write_state(gcmd)
         except Exception:
             # An anchor that did not persist would be gone at the next
             # restart, so the in-memory state goes back to what it was.
@@ -1922,16 +2126,21 @@ class EddyToolCalibration:
 
     cmd_EDDY_CALIBRATE_OFFSET_help = (
         "Measure the tool named by T= over the coil and print its offsets "
-        "relative to T0. T=0 measures the baseline every other tool is "
-        "compared against, so run it first. Add DEBUG=1 to print each scan "
-        "pass's diagnostic rows.")
+        "relative to T0, or measure every tool in turn when T= is left out. "
+        "T=0 measures the baseline every other tool is compared against, so "
+        "run it first. Add DEBUG=1 to print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_CALIBRATE_OFFSET(self, gcmd):
         self._ensure_homed(gcmd)
-        tool = self._required_tool_index(gcmd, 'EDDY_CALIBRATE_OFFSET')
         debug = self._debug_flag(gcmd)
-        is_baseline_run = tool == BASELINE_TOOL
-        if not is_baseline_run and self.baseline is None:
+        tool = self._optional_tool_index(gcmd)
+        if tool is None:
+            tools = self._sweep_tools(gcmd, 'EDDY_CALIBRATE_OFFSET')
+            sweeping = True
+        else:
+            tools = [tool]
+            sweeping = False
+        if BASELINE_TOOL not in tools and self.baseline is None:
             raise gcmd.error(
                 "Run EDDY_CALIBRATE_OFFSET T=%d first, with the baseline tool "
                 "mounted. Offsets are measured against that tool and it has "
@@ -1940,12 +2149,29 @@ class EddyToolCalibration:
         if self.calibrate_z:
             # Checked before any motion, so a machine that is only half
             # anchored fails in a second rather than partway through the run.
-            needed = [tool]
-            if not is_baseline_run:
+            needed = list(tools)
+            if BASELINE_TOOL not in tools:
                 needed.append(self.baseline['tool'])
             self._require_anchors(gcmd, needed)
-        with self._retreating():
-            result = self._run_tool_measurement(gcmd, tool, debug)
+        summary = []
+        for tool in tools:
+            summary.append(
+                self._calibrate_one_offset(gcmd, tool, debug, sweeping))
+        if sweeping:
+            gcmd.respond_info("\n".join(fleet_summary_rows(summary)))
+
+    def _calibrate_one_offset(self, gcmd, tool, debug, sweeping):
+        """Measure one tool's offsets, report them, and apply them.
+
+        Returns the tool's entry for the fleet summary: its offsets, or None
+        for the baseline tool, whose offsets are zero by definition.
+        """
+        with self._phase(gcmd, tool, 'toolchange', sweeping):
+            self._mount_tool(gcmd, tool)
+        is_baseline_run = tool == BASELINE_TOOL
+        with self._phase(gcmd, tool, 'measurement', sweeping):
+            with self._retreating():
+                result = self._run_tool_measurement(gcmd, tool, debug)
         if is_baseline_run:
             # A fresh T0 run always replaces the session baseline, so the
             # comparison never mixes results from two different setups.
@@ -1961,6 +2187,14 @@ class EddyToolCalibration:
         result['measured_time'] = self.printer.get_reactor().monotonic()
         self.last_tool = tool
         self._report_tool_result(gcmd, tool, result, is_baseline_run)
+        if is_baseline_run:
+            # The baseline tool's offsets are zero by definition, and applying
+            # zeros would overwrite whatever the owner set for it.
+            return {'tool': tool, 'offsets': None}
+        offsets = self._offsets(result)
+        with self._phase(gcmd, tool, 'apply', sweeping):
+            self._apply_offsets(gcmd, tool, offsets)
+        return {'tool': tool, 'offsets': offsets}
 
     def _require_anchors(self, gcmd, tools):
         """Refuse to measure Z for a tool that has no stored anchor."""
@@ -2109,9 +2343,9 @@ class EddyToolCalibration:
             }
         return {
             'calibrate_z': self.calibrate_z,
-            # None until the fleet options land: the key is published from the
-            # start so a macro can read it without testing for its presence.
-            'tool_count': None,
+            # None when tool_count is not configured, which is the state a
+            # machine calibrated one tool at a time stays in.
+            'tool_count': self.tool_count,
             'baseline_tool': (
                 None if self.baseline is None else self.baseline['tool']),
             'session_id': self.session_id,

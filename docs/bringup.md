@@ -298,6 +298,11 @@ connects, that is a warning, not a failure. It is not a reason to reflash.
    on for the remaining tools. Each run prints its offsets against the `T=0`
    result from this session. Re-run `T=0` after any restart, because the
    baseline is not persisted.
+6. Once `tool_count` and `toolchange_gcode` are set, the same work runs as one
+   command: `EDDY_CALIBRATE_OFFSET` with no `T=` mounts and measures every tool
+   in turn and ends with a summary of their offsets. Bring-up is easier one
+   tool at a time, so leave the fleet run until the single-tool runs look
+   right.
 
 **Known failure signature: peaks at the scan start.** If every pass reports its
 extremum sample near index 0 and the reconstructed center comes out exactly

@@ -79,7 +79,21 @@ switch_probe_lift_speed: 5.0    # default: switch_probe_speed
 switch_probe_max_travel: 4.0    # mm below the press start height
 switch_probe_sample_retract_dist: 2.0  # mm, must be below max_travel
 switch_probe_tolerance: 0.020   # mm, spread across the counted presses
+# --- fleet runs: required only for a command without T= ---
+tool_count: 4                   # 1 to 99; tools are T0 .. T(tool_count-1), no holes
+toolchange_gcode:               # the lines that mount a tool; {tool} is the number
+    T{tool}
+apply_offsets_gcode:            # optional; {tool}, {offset_x}, {offset_y}, {offset_z}
+    SET_TOOL_OFFSET T={tool} X={offset_x} Y={offset_y} Z={offset_z}
 ```
+
+`tool_count`, `toolchange_gcode` and `apply_offsets_gcode` are the fleet
+options. `tool_count` above the 16 tools `T=` accepts is a config error. The two
+gcode options are klippy templates, loaded through the standard `gcode_macro`
+machinery, and the plugin only renders and runs them: it learns nothing about
+the toolchanger. `{offset_z}` is available to `apply_offsets_gcode` only with
+`calibrate_z: True`; with it False no descent ran, so the name is left out of
+the template context rather than passed as a zero the machine would apply.
 
 `switch_pin`, `switch_x`, `switch_y` and `switch_probe_z_start` are the four
 options `EDDY_CALIBRATE_Z` cannot run without; it names whichever is missing.
@@ -143,11 +157,13 @@ reference it; decide during implementation, wrapper preferred.)
 - `EDDY_LOCATE [DEBUG=1]`: coarse raster over the configured coil position,
   finds and stores the refined coil center for the session; prints it.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_CALIBRATE_OFFSET T=<n> [DEBUG=1]`: full XY(+Z) measurement for the
-  mounted tool. `T=` is required; a missing `T=` is a gcode error. `T=0`
-  measures the baseline and always replaces the session baseline with its
-  result, reporting its own offsets as zero by definition. `T=1` to `T=15`
-  require that `T=0` was calibrated in this session and error otherwise.
+- `EDDY_CALIBRATE_OFFSET [T=<n>] [DEBUG=1]`: full XY(+Z) measurement. `T=<n>`
+  measures that one tool; a missing `T=` measures every tool from T0 upward in
+  turn and ends with a summary table of their offsets. `T=0` measures the
+  baseline and always replaces the session baseline with its result, reporting
+  its own offsets as zero by definition. `T=1` to `T=15` require that `T=0` was
+  calibrated in this session and error otherwise. Each non-baseline tool's
+  result is passed to `apply_offsets_gcode` if that option is set.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
   1. XY: for each configured angle, scan through the current center estimate,
      forward and reverse; parabolic fit of the response extremum per pass;
@@ -161,12 +177,20 @@ reference it; decide during implementation, wrapper preferred.)
      `calibrate_z: False` this whole step is skipped and no descent runs.
   3. Print labeled results: raw center, the Z curve rows when a descent ran,
      and offsets relative to the T0 baseline.
-- `EDDY_CALIBRATE_Z T=<n> [DEBUG=1]`: one-time per-tool Z reference. Presses
+- `EDDY_CALIBRATE_Z [T=<n>] [DEBUG=1]`: one-time per-tool Z reference. Presses
   the contact switch four times, discards the first press as a warm-up, takes
   the median of the remaining three as the trigger plane, then measures the
   tool's XY center and descent curve and stores the curve midpoint's height
   above that trigger plane together with the frequency there. Written to the
   state file immediately. Requires `calibrate_z: True` and the switch options.
+  A missing `T=` anchors every tool from T0 upward in turn.
+- Both calibration commands share one tool rule. `T=<n>` runs that tool;
+  omitting `T=` runs the whole fleet and needs `tool_count` and
+  `toolchange_gcode`, naming both when either is missing. With
+  `toolchange_gcode` set, the plugin mounts the tool it is about to work on in
+  both cases; without it, both cases work on whatever tool is mounted. A
+  failure inside a fleet run lifts the toolhead clear and names the tool and
+  the stage that failed, keeping the results and references already taken.
 - All output as labeled raw-value rows, not prose.
 
 ## Algorithm notes (ported from upstream, with provenance)

@@ -77,7 +77,30 @@ switch_x: 340.0                 # machine X of the nozzle over the switch
 switch_y: 5.0                   # machine Y of the nozzle over the switch
 switch_probe_z_start: 3.0       # machine Z the press starts from
 switch_probe_tolerance: 0.020   # mm the counted presses may disagree by
+# --- fleet runs: needed only to calibrate every tool with one command ---
+tool_count: 4                   # tools are T0 through T(tool_count-1)
+toolchange_gcode:
+    T{tool}
+apply_offsets_gcode:            # optional, applies each result as it goes
+    SET_TOOL_OFFSET T={tool} X={offset_x} Y={offset_y} Z={offset_z}
 ```
+
+`toolchange_gcode` and `apply_offsets_gcode` are your own lines; the plugin
+knows nothing about your toolchanger and only runs what you wrote. The
+`SET_TOOL_OFFSET` example above is Contomo's `klipper-toolchanger-hard` fork.
+On the viesturz original, which has no `SET_TOOL_OFFSET`, use three lines
+instead:
+
+```ini
+apply_offsets_gcode:
+    SET_TOOL_PARAMETER T={tool} PARAMETER=gcode_x_offset VALUE={offset_x}
+    SET_TOOL_PARAMETER T={tool} PARAMETER=gcode_y_offset VALUE={offset_y}
+    SET_TOOL_PARAMETER T={tool} PARAMETER=gcode_z_offset VALUE={offset_z}
+```
+
+Use `{offset_z}` only with `calibrate_z: True`. With `calibrate_z: False` no
+descent runs, there is no measured Z, and the name is not available to the
+template.
 
 See `docs/design.md` for the full schema description and rationale.
 
@@ -88,16 +111,30 @@ See `docs/design.md` for the full schema description and rationale.
 - `EDDY_LOCATE [DEBUG=1]`: coarse raster scan over the configured coil
   position to find and store the refined coil center for the session.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_CALIBRATE_Z T=<n> [DEBUG=1]`: one-time Z reference setup for the
-  mounted tool. Run it after changing a nozzle or a hotend, or after moving
-  the coil or the switch. This is the setup step, not the routine
-  measurement.
-- `EDDY_CALIBRATE_OFFSET T=<n> [DEBUG=1]`: measure the mounted tool over the
-  coil and print its offsets relative to T0. With `calibrate_z: True` every
-  tool involved needs its `EDDY_CALIBRATE_Z` reference first, and the run
-  stops before it moves if one is missing. Run `T=0` first with the baseline
-  tool mounted; every later tool is measured against it. `DEBUG=1` also
-  prints each scan pass's diagnostic rows.
+- `EDDY_CALIBRATE_Z [T=<n>] [DEBUG=1]`: one-time Z reference setup. Run it
+  after changing a nozzle or a hotend, or after moving the coil or the
+  switch. This is the setup step, not the routine measurement.
+- `EDDY_CALIBRATE_OFFSET [T=<n>] [DEBUG=1]`: measure a tool over the coil and
+  print its offsets relative to T0. With `calibrate_z: True` every tool
+  involved needs its `EDDY_CALIBRATE_Z` reference first, and the run stops
+  before it moves if one is missing. `DEBUG=1` also prints each scan pass's
+  diagnostic rows.
+
+Both commands take `T=` the same way:
+
+- `T=<n>` calibrates that one tool. Run `EDDY_CALIBRATE_OFFSET T=0` first;
+  every later tool is measured against that baseline.
+- Leaving `T=` off calibrates every tool from T0 upward in turn, and needs
+  `tool_count` and `toolchange_gcode` in the config. Without them the command
+  says so and names both options. An offset sweep ends with a summary table
+  of every tool's offsets, and applies each result as it goes if
+  `apply_offsets_gcode` is set.
+
+The plugin mounts the tool it is about to work on whenever `toolchange_gcode`
+is configured, with `T=` as well as without it. Without that option it works
+on whatever tool is already mounted. A failure part way through a sweep stops
+the run, lifts the nozzle clear of the coil and the switch, and names the tool
+that failed; the tools already finished keep their results.
 
 ## Z offsets
 
