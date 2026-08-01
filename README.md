@@ -7,83 +7,52 @@ Z.
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-- Non-contact. The coil responds to metal, so molten plastic on the nozzle is
-  expected to be invisible to it; that expectation is not yet validated on
-  hardware (see Status and limitations).
-- One 4-wire board at the edge of the bed. Nothing on the toolhead, no extra
-  mass, no extra cable in the umbilical.
-- Plain I2C to a pin you already have, hardware or software bus. The BTT Eddy
-  Coil carries no MCU, so there is nothing to flash for that variant.
-- Offsets are printed as labeled rows and, if you write the macro lines,
-  applied to your toolchanger by your own template.
+- **Non-contact.** The coil responds to metal, so plastic on the nozzle is
+  expected to be invisible to it. Not yet validated on hardware (see Status and
+  limitations).
+- **Nothing on the toolhead.** One 4-wire board at the edge of the bed.
+- **Plain I2C**, hardware or software bus. The BTT Eddy Coil carries no MCU, so
+  there is nothing to flash.
+- **Labeled offset rows** on the console, applied by your own macro lines if you
+  write them.
 
 ## Why this exists
 
-Contact-pin offset calibration wants a spotless nozzle. On a toolchanger that
-means wiping four hotends before every calibration run, and a run that looks
-fine but measured a blob of PLA instead of brass. Camera systems want lighting,
-mounting and focus work. An eddy-current coil sidesteps both. The LDC1612 sees
-the change in coil inductance a piece of metal causes. Plastic is expected not
-to change it, an expectation the dirty-nozzle test still has to confirm (see
-Status and limitations).
-
-The scan does not measure how strong the response is, it measures where the
-response is symmetric. The scan locates the symmetry center of the response,
-not its amplitude. Steel, brass and plated copper nozzles therefore produce
-different amplitudes and the same center.
+Contact-pin offset calibration wants a spotless nozzle, so on a toolchanger you
+wipe every hotend before every run, and a run that looks fine may have measured
+a blob of PLA instead of brass. Camera systems want lighting, mounting and focus
+work. An eddy-current coil sidesteps both.
 
 ## How it works
 
-**XY.** The plugin drives the nozzle across the coil along two directions
-(45 and 135 degrees by default) at 4 mm/s while the LDC1612 streams samples at
-250 Hz. Each sample is mapped to a real position by asking Kalico's
-`motion_report` for the commanded position at that sample's `print_time`, not by
-assuming a constant scan velocity. Each pass gets a Gaussian-weighted quadratic
-least-squares fit around the response extremum, which gives the crossing point
-to a fraction of a sample. Every direction is scanned forward and reverse and
-the pair is averaged, which cancels the constant position bias transport latency
-adds along the direction of travel. The per-axis projections then go into a
-least-squares reconstruction of the center. The whole measurement runs twice,
-the second time re-centered on the first result.
-
-**Z.** A stepwise descent over the coil center records frequency against the
-machine Z the kinematics report, in 0.05 mm steps by default. That curve is
-anchored once per tool: `EDDY_CALIBRATE_Z` presses a contact switch next to the
-coil four times, discards the first press as a warm-up, takes the median of the
-remaining three, and binds that height to a frequency on the tool's own curve.
-The switch's own height never has to be known. Every tool presses the same
-switch, only differences between tools matter, and the switch height cancels
-out.
-
-Nothing is fitted to make a particular machine's numbers look right. The
-parabolic sub-sample fit, the forward/reverse pair cancellation, the
-least-squares center reconstruction and the curve evaluation are ported from
-chengxg's `tool_eddy_calibration` and from Kalico's own `probe_eddy_current`,
-and every tolerance is a documented config option rather than a buried
-constant.
+- **XY** comes from the symmetry center of the coil response, not its amplitude,
+  so nozzle material does not shift the result.
+- **Z** comes from a frequency-vs-height descent curve, anchored once per tool by
+  a press on a contact switch next to the coil. The switch's own height never has
+  to be known, because it cancels between tools.
+- The fitting math is ported from chengxg's `tool_eddy_calibration` and Kalico's
+  `probe_eddy_current`. `docs/design.md` has the details.
 
 ## Example output
 
-The rows one `EDDY_CALIBRATE_OFFSET T=1` run prints with `calibrate_z: False`.
-Values are in mm, and the ones below stand in for your machine's:
+Abridged from a run on the author's machine (Z rows omitted). Values are in mm:
 
 ```
 tool: T1
-center x: 349.8127
-center y: 5.1044
+center x: 99.0577
+center y: -40.5779
 baseline tool: T0
-offset x: -0.0431
-offset y: +0.1187
-samples used: 4820
+offset x: +0.0224
+offset y: -0.2598
+samples used: 6916
 ```
 
 For the spread repeated runs produced on the author's machine, see
 [Status and limitations](#status-and-limitations).
 
-`DEBUG=1` adds a block per scan pass: response type, sample count, discarded-
-sample counts, extremum sample, fitted vertex offset, pass angle and the
-pass's peak position. A failed pass always prints its full diagnostics,
-whether or not `DEBUG=1` was given.
+`DEBUG=1` adds a block per scan pass: response type, sample counts, extremum
+sample, fitted vertex offset, pass angle and peak position. A failed pass always
+prints its full diagnostics, with or without `DEBUG=1`.
 
 ## Commands
 
