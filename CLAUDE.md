@@ -145,6 +145,14 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     must never be presented as accuracy evidence; accuracy claims require the independent
     contact-method cross-check.
 
+14. **No invented defaults for setup-specific values.** A config option whose correct value
+    depends on the user's machine (coordinates, pins, drive current, tool count) gets NO
+    default in code or docs: it is a required option the user must provide, and the config
+    reference shows it blank. Defaults exist only for values we can genuinely know (protocol
+    constants, algorithm tunables with provenance, driver defaults that are correct for the
+    documented hardware). A wrong-looking example number presented as a default teaches users
+    to keep it.
+
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
 dev unit or crab board), verified by the owner, per the validation ladder in `docs/design.md`

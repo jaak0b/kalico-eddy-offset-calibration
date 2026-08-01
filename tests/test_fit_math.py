@@ -299,10 +299,10 @@ def test_rejects_a_descent_whose_stop_lies_above_its_start():
 
 def test_accepts_a_scan_plane_and_descent_that_clear_the_coil_top_face():
     # Arrange / Act: the shipped defaults, scanning 1.0 mm above the face and
-    # descending from 5.0 mm to 0.5 mm above it.
+    # descending from 2.5 mm to 0.5 mm above it.
     # Assert: a valid geometry raises nothing, so reaching the next line is
     # the assertion.
-    etc.validate_vertical_geometry(1.0, 5.0, 0.5)
+    etc.validate_vertical_geometry(1.0, 2.5, 0.5)
 
 
 def test_rejects_a_descent_that_stops_at_the_coil_top_face():

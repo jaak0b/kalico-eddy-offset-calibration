@@ -904,21 +904,27 @@ class EddyToolCalibration:
         self.printer = config.get_printer()
         self.name = config.get_name()
 
-        # Geometry.
-        self.coil_x = config.getfloat('coil_x', 350.0)
-        self.coil_y = config.getfloat('coil_y', 5.0)
+        # Geometry. coil_x, coil_y and coil_z are machine coordinates specific
+        # to where the coil is mounted on this printer; no default can be
+        # correct for an unknown machine, so they are required.
+        self.coil_x = config.getfloat('coil_x')
+        self.coil_y = config.getfloat('coil_y')
+        # The coil bore diameter is specific to the physical coil fitted;
+        # a wrong value silently missizes the fit window, so it is required.
         self.coil_inner_diameter = config.getfloat(
-            'coil_inner_diameter', 2.0, above=0.0)
+            'coil_inner_diameter', above=0.0)
         # Machine Z of the coil top face, the origin every other vertical
         # option in this section is measured from. _machine_z is the one
         # place that converts those heights into machine coordinates.
-        self.coil_z = config.getfloat('coil_z', 0.0)
+        self.coil_z = config.getfloat('coil_z')
         # Height above the coil top face the XY scan passes run at.
         self.scan_height = config.getfloat('scan_height', 1.0)
         # Extra clearance above the scan height for travel moves.
         self.scan_safe_z = config.getfloat('scan_safe_z', 2.0, above=0.0)
-        # Heights above the coil top face the Z descent runs between.
-        self.z_start = config.getfloat('z_start', 5.0)
+        # Heights above the coil top face the Z descent runs between. 2.5 mm
+        # is where the sensor's usable range ends above the coil top face;
+        # higher and the descent curve stops being monotonic.
+        self.z_start = config.getfloat('z_start', 2.5)
         self.z_stop = config.getfloat('z_stop', 0.5)
         self.z_step = config.getfloat('z_step', 0.05, above=0.0)
         try:

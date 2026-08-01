@@ -228,32 +228,37 @@ Every option and its default. Options shown commented out may be left out.
 #   BTT Eddy family's oscillator. Setting this option at all requires Kalico
 #   from March 2026 or newer. A wrong value here scales every reported
 #   frequency.
-#reg_drive_current: 15
-#   The LDC1612 DRIVE_CURRENT0 register value, 0 to 31. Determine it with
+#reg_drive_current:
+#   The LDC1612 DRIVE_CURRENT0 register value, 0 to 31. The driver default
+#   of 15 suits the BTT Eddy coil family. For any other coil, including the
+#   crab board, determine the right value with
 #   LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration and store the
 #   printed value with SAVE_CONFIG.
-#coil_x: 350.0
-#coil_y: 5.0
-#   Approximate machine X and Y of the coil center. A ruler measurement is
-#   good enough: EDDY_LOCATE refines it, and every scan starts from the
-#   refined center once it has been located in this session.
-#coil_z: 0.0
-#   Machine Z of the coil top face. This is the only vertical option in
-#   this section given in machine coordinates; every other height below is
-#   measured upward from this face. A coil_z set below the real face
-#   drives the nozzle into the coil by that difference.
-#coil_inner_diameter: 2.0
-#   Bore of the sensing coil, in mm. Must be greater than 0. It sets the
-#   default fit_window_radius, so a value below the coil's real bore
-#   narrows the fit window below the response it should cover.
+#coil_x:
+#coil_y:
+#   Required. Approximate machine X and Y of the coil center. A ruler
+#   measurement is good enough: EDDY_LOCATE refines it, and every scan
+#   starts from the refined center once it has been located in this
+#   session.
+#coil_z:
+#   Required. Machine Z of the coil top face. This is the only vertical
+#   option in this section given in machine coordinates; every other
+#   height below is measured upward from this face. A coil_z set below the
+#   real face drives the nozzle into the coil by that difference.
+#coil_inner_diameter:
+#   Required. Bore of the sensing coil, in mm. Must be greater than 0. It
+#   sets the default fit_window_radius, so a value below the coil's real
+#   bore narrows the fit window below the response it should cover.
 #scan_height: 1.0
 #   Height above the coil top face the XY scan passes run at. Must be
 #   above the face and below z_start.
 #scan_safe_z: 2.0
 #   Extra clearance, in mm, added above the scan height for travel moves.
 #   Must be greater than 0.
-#z_start: 5.0
-#   Height above the coil top face the Z descent starts from.
+#z_start: 2.5
+#   Height above the coil top face the Z descent starts from. The default
+#   is where the sensor's usable range typically ends; raising it risks a
+#   non-monotonic descent curve.
 #z_stop: 0.5
 #   Height above the coil top face the Z descent ends at. Must be above
 #   the face, and below z_start.
