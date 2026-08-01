@@ -107,8 +107,21 @@ switch and report a missing trigger instead of the real cause.
 
 Per-tool Z references are not config options. They live in
 `EddyToolCalibration/calibration_state.json` next to the printer config,
-written by `EDDY_CALIBRATE_Z` as soon as a reference is measured. See
-`docs/z-probe-design.md` for the state file schema and the anchor math.
+written by `EDDY_CALIBRATE_Z` as soon as a reference is measured.
+
+The state file holds one JSON object per anchored tool under an `"anchors"`
+key, keyed by decimal tool number as a string, alongside a top-level
+`"version"` field (currently 1). Each entry stores `anchor_height` and
+`anchor_frequency`, the only two fields the offset math reads, plus
+diagnostic record fields (`trigger_z`, `curve_low_z`, `curve_high_z`,
+`center_x`, `center_y`, `updated`) that let a stale anchor be recognised
+later but are never fed back into a measurement. Writes serialise to a
+temporary file and `os.replace` it over the target, so an interrupted write
+cannot leave a truncated state file; a fleet run rewrites the file after each
+tool, so an abort partway through keeps the anchors already measured. A
+missing file is normal and means no tool is anchored yet; a file that exists
+but does not parse, or carries a `version` this build does not handle, is a
+config error naming the path.
 
 `coil_z` is the only vertical option in machine coordinates. `scan_height`,
 `z_start` and `z_stop` are heights above the coil top face, so the plugin adds
@@ -139,8 +152,20 @@ in whatever state the printer is in.
   offset. `EDDY_CALIBRATE_OFFSET` refuses to run, before any motion, for a
   tool that has no stored reference.
 
-The anchor math, the state file schema and the error paths are specified in
-`docs/z-probe-design.md`.
+The switch trigger point is one fixed physical plane, so the difference
+between two tools' trigger heights is exactly their Z nozzle offset,
+whatever height the switch happens to sit at: the switch's own height is a
+constant that cancels in every difference. `EDDY_CALIBRATE_Z` anchors each
+tool at the midpoint of its own measured descent range, the point furthest
+from both ends and so the one that leaves the widest margin for a later
+descent to still bracket the frequency. What is stored is not that machine Z
+but its height above the trigger plane and the frequency measured there, a
+switch-relative pair. A later session measures the tool's curve again, finds
+the height at which it reaches the stored frequency, subtracts the stored
+height to reconstruct the trigger plane, and differences that against the
+baseline tool's reconstructed trigger plane to report the Z offset. The coil
+face height never enters an offset; it only has to be small enough that the
+switch probing and the descent are both reachable.
 
 Display precision in every readout: millimetres to 4 decimals, frequencies to
 3 decimals. Values are printed exactly as measured at that precision, never

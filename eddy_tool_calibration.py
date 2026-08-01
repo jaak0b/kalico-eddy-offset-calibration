@@ -14,8 +14,8 @@
 
 """Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_Z
 and EDDY_CALIBRATE_OFFSET gcode commands for eddy-current based per-tool
-nozzle offset calibration. See docs/design.md and docs/z-probe-design.md for
-the full design and config schema.
+nozzle offset calibration. See docs/design.md for the full design and config
+schema.
 
 Constraint: this module must import cleanly on a machine without klippy
 installed (unit tests run standalone). Any import of klippy modules

@@ -26,7 +26,7 @@ Base design: chengxg's open-source "Little Crab" eddy XY calibration module
 - Upstream repo: https://github.com/chengxg/tool_eddy_calibration
   (English fork: thunderkeys/tool_eddy_calibration, branch translate-en)
 - oshwhub project (EasyEDA source): https://oshwhub.com/cxg01/project_lbabffjk
-- Local verified copy: `E:\Development\crab-eddy-board\` — KiCad 10 import of the
+- Local verified copy: `E:\Development\crab-eddy-board\`: KiCad 10 import of the
   EasyEDA project (`kicad/crab_dualcoil.kicad_pcb|sch`), verified against the author's
   Gerbers by raster XOR (bottom copper 0.18% mismatch = render noise; top matches).
   Fab files: `gerber_dualcoil_v2.zip`, `BOM_dualcoil_v2.csv`, `CPL_dualcoil_v2.csv`.
@@ -81,7 +81,7 @@ firmware predates the ldc1612 driver).
 
 Owner's printer: BTT Manta M8P V2.0 (STM32H723) with Raspberry Pi CM4 host.
 Wiring plan: software I2C on the M8P V2.0 I2C connector pins PA8 (SCL) / PC9
-(SDA); details in docs/bringup.md.
+(SDA), per the mainboard's own manual.
 
 ## Software (next phase)
 

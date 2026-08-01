@@ -476,12 +476,10 @@ is_system_service: False
 
 ## Documentation
 
-- `docs/design.md`: the full design, config schema rationale and validation
-  ladder.
-- `docs/bringup.md`: step-by-step first bring-up on a BTT Eddy Coil, including
-  the wiring cross-check against BTT's published documentation.
-- `docs/z-probe-design.md`: the Z reference, the switch anchor math and the
-  state file schema.
+`docs/design.md` holds the internal design record and validation plan,
+including the config schema, the Z reference anchor math and the state file
+schema. For wiring and mounting, follow your sensor board's and mainboard's
+own manuals.
 
 ## License
 
