@@ -12,10 +12,9 @@
 # Free Software Foundation, either version 3 of the License, or (at your
 # option) any later version. See LICENSE for the full text.
 
-"""Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_TOOL,
-EDDY_SET_BASELINE and EDDY_SET_Z_REF gcode commands for eddy-current based
-per-tool nozzle offset calibration. See docs/design.md for the full design
-and config schema.
+"""Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_TOOL
+and EDDY_SET_Z_REF gcode commands for eddy-current based per-tool nozzle
+offset calibration. See docs/design.md for the full design and config schema.
 
 Constraint: this module must import cleanly on a machine without klippy
 installed (unit tests run standalone). Any import of klippy modules
@@ -516,6 +515,22 @@ def z_curve_z_at_freq(curve, freq):
         "curve" % (freq,))
 
 
+def z_curve_shared_reference(curve):
+    """Reference height and frequency at the middle of a curve's Z range.
+
+    Returns (z, frequency) at the midpoint by height of the measured range.
+    The midpoint is the height furthest from both ends of the descent, so a
+    reference taken there leaves the widest margin on either side for another
+    tool's curve to still bracket that frequency.
+    """
+    if len(curve) < 2:
+        raise ValueError(
+            "Z curve needs at least 2 steps to take a reference, got %d"
+            % (len(curve),))
+    mid_z = (curve[0][0] + curve[-1][0]) / 2.0
+    return mid_z, z_curve_freq_at(curve, mid_z)
+
+
 def fit_half_window_samples(sample_rate, scan_speed, window_radius):
     """Fit half window in samples for a scan speed and window radius in mm."""
     if sample_rate <= 0.0:
@@ -549,6 +564,23 @@ def spread(values):
 # Tool indices accepted by T= and by the z_ref_t<n> config options.
 MAX_TOOLS = 16
 
+# The tool every other tool's offsets are measured against.
+BASELINE_TOOL = 0
+
+# Values accepted by the z_offset_mode config option. The option has no
+# default: leaving it out measures the Z curve but reports no Z offset.
+#
+# identical_hotends rests on a physical assumption about the machine: every
+# tool carries the same hotend assembly, nozzle, heater block and shroud
+# alike, because the coil responds to all the metal near it and not to the
+# nozzle tip alone. Identical assemblies produce identical frequency-vs-height
+# curves, so equal frequency means equal distance and one reference frequency
+# serves every tool. mixed_hotends drops that assumption and anchors each tool
+# separately with EDDY_SET_Z_REF.
+Z_OFFSET_MODE_IDENTICAL = 'identical_hotends'
+Z_OFFSET_MODE_MIXED = 'mixed_hotends'
+Z_OFFSET_MODES = (Z_OFFSET_MODE_IDENTICAL, Z_OFFSET_MODE_MIXED)
+
 # Provenance: probe_eddy_current's calibration moves. Each step settles for
 # 0.050 s before its 0.100 s sample window, dwells 0.200 s in place, is
 # approached from 0.500 mm above, and the whole descent is bracketed by a
@@ -578,7 +610,7 @@ LOCATE_SCAN_LENGTH_FACTOR = 3.0
 
 class EddyToolCalibration:
     """Klippy extra: EDDY_QUERY / EDDY_LOCATE / EDDY_CALIBRATE_TOOL /
-    EDDY_SET_BASELINE / EDDY_SET_Z_REF gcode commands.
+    EDDY_SET_Z_REF gcode commands.
     """
 
     def __init__(self, config):
@@ -660,6 +692,16 @@ class EddyToolCalibration:
         self.freq_min = config.getfloat(
             'freq_min', FREQ_MIN_DEFAULT, minval=0.0)
 
+        # How the Z offset between two tools is derived, or None to skip Z
+        # offsets entirely and report the measured curve alone.
+        self.z_offset_mode = config.get('z_offset_mode', None)
+        if (self.z_offset_mode is not None
+                and self.z_offset_mode not in Z_OFFSET_MODES):
+            raise config.error(
+                "%s: z_offset_mode must read %s. Leave the option out to "
+                "measure the Z curve without reporting a Z offset."
+                % (self.name, " or ".join(Z_OFFSET_MODES)))
+
         # Per-tool Z anchors persisted in config as "z_ref_t<n>: <z>:<freq>".
         self.z_refs = {}
         for tool in range(MAX_TOOLS):
@@ -677,6 +719,13 @@ class EddyToolCalibration:
                 raise config.error(
                     "%s: z_ref_t%d must read \"<z>:<frequency>\""
                     % (self.name, tool))
+        if self.z_refs and self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
+            raise config.error(
+                "%s: remove the z_ref_t%d option, or set z_offset_mode to "
+                "%s. In %s mode every tool shares one reference frequency, "
+                "so a per-tool anchor is never read."
+                % (self.name, sorted(self.z_refs)[0], Z_OFFSET_MODE_MIXED,
+                   Z_OFFSET_MODE_IDENTICAL))
 
         # Session state.
         self.center = None
@@ -701,9 +750,6 @@ class EddyToolCalibration:
         gcode.register_command(
             'EDDY_CALIBRATE_TOOL', self.cmd_EDDY_CALIBRATE_TOOL,
             desc=self.cmd_EDDY_CALIBRATE_TOOL_help)
-        gcode.register_command(
-            'EDDY_SET_BASELINE', self.cmd_EDDY_SET_BASELINE,
-            desc=self.cmd_EDDY_SET_BASELINE_help)
         gcode.register_command(
             'EDDY_SET_Z_REF', self.cmd_EDDY_SET_Z_REF,
             desc=self.cmd_EDDY_SET_Z_REF_help)
@@ -737,6 +783,14 @@ class EddyToolCalibration:
 
     def _tool_index(self, gcmd):
         return gcmd.get_int('T', 0, minval=0, maxval=MAX_TOOLS - 1)
+
+    def _required_tool_index(self, gcmd):
+        tool = gcmd.get_int('T', None, minval=0, maxval=MAX_TOOLS - 1)
+        if tool is None:
+            raise gcmd.error(
+                "Add T= to name the tool being measured, for example "
+                "EDDY_CALIBRATE_TOOL T=0.")
+        return tool
 
     def _report_sensor_health(self, gcmd, stats):
         if stats['errors']:
@@ -1277,23 +1331,80 @@ class EddyToolCalibration:
         gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_CALIBRATE_TOOL_help = (
-        "Run the full XY and Z eddy-current measurement for the mounted "
-        "tool and print its offsets relative to the T0 baseline. Add "
-        "DEBUG=1 to print each scan pass's diagnostic rows.")
+        "Run the full XY and Z eddy-current measurement for the tool named "
+        "by T= and print its offsets relative to T0. T=0 measures the "
+        "baseline every other tool is compared against, so run it first. "
+        "Add DEBUG=1 to print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_CALIBRATE_TOOL(self, gcmd):
         self._ensure_homed(gcmd)
-        tool = self._tool_index(gcmd)
+        tool = self._required_tool_index(gcmd)
         debug = self._debug_flag(gcmd)
+        is_baseline_run = tool == BASELINE_TOOL
+        if not is_baseline_run and self.baseline is None:
+            raise gcmd.error(
+                "Run EDDY_CALIBRATE_TOOL T=%d first, with the baseline tool "
+                "mounted. Offsets are measured against that tool and it has "
+                "not been calibrated in this session."
+                % (BASELINE_TOOL,))
         result = self._run_tool_measurement(gcmd, tool, debug)
-        self._report_tool_result(gcmd, tool, result)
+        if is_baseline_run:
+            # A fresh T0 run always replaces the session baseline, so the
+            # comparison never mixes results from two different setups.
+            self.baseline = {
+                'tool': tool,
+                'x': result['x'],
+                'y': result['y'],
+                'z_curve': result['z_curve'],
+            }
+        self._report_tool_result(gcmd, tool, result, is_baseline_run)
+
+    def _require_anchor_mode(self, gcmd):
+        """Reject a per-tool anchor under a mode that would never read it."""
+        if self.z_offset_mode is None:
+            raise gcmd.error(
+                "Set z_offset_mode to %s and restart. Without a mode no "
+                "descent is measured, and an anchor binds a measured "
+                "descent to your Z measurement." % (Z_OFFSET_MODE_MIXED,))
+        if self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
+            raise gcmd.error(
+                "Set z_offset_mode to %s and restart to use per-tool "
+                "anchors. In %s mode every tool is compared against one "
+                "shared reference frequency, so an anchor for a single tool "
+                "would be measured in a different frame from the rest."
+                % (Z_OFFSET_MODE_MIXED, Z_OFFSET_MODE_IDENTICAL))
+        if self.z_offset_mode == Z_OFFSET_MODE_MIXED:
+            return
+        raise self._unhandled_mode_error(gcmd)
+
+    def _unhandled_mode_error(self, gcmd):
+        return gcmd.error(
+            "Set z_offset_mode to %s and restart. The configured value %r is "
+            "not one this plugin handles."
+            % (" or ".join(Z_OFFSET_MODES), self.z_offset_mode))
+
+    def _measures_z(self, gcmd):
+        """Whether the configured mode has any use for a Z descent.
+
+        Without a mode the descent's output is never read, and the descent is
+        the slowest part of a calibration, so it is not run at all.
+        """
+        if self.z_offset_mode is None:
+            return False
+        if self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
+            return True
+        if self.z_offset_mode == Z_OFFSET_MODE_MIXED:
+            return True
+        raise self._unhandled_mode_error(gcmd)
 
     def _run_tool_measurement(self, gcmd, tool, debug):
         center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
-        curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
         agg = self._new_aggregate()
         self._merge_aggregate(agg, agg_xy)
-        self._merge_aggregate(agg, agg_z)
+        curve = None
+        if self._measures_z(gcmd):
+            curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
+            self._merge_aggregate(agg, agg_z)
         result = {
             'x': center_x,
             'y': center_y,
@@ -1303,85 +1414,136 @@ class EddyToolCalibration:
         self.results[tool] = result
         return result
 
-    def _report_tool_result(self, gcmd, tool, result, is_baseline_run=False):
-        curve = result['z_curve']
-        rows = [
-            "tool: T%d" % (tool,),
-            "center x: %.4f" % (result['x'],),
-            "center y: %.4f" % (result['y'],),
+    def _z_curve_rows(self, curve):
+        """Labeled rows describing the measured descent curve itself."""
+        return [
             "z curve steps: %d" % (len(curve),),
             "z curve range (machine Z): %.4f to %.4f mm"
             % (curve[0][0], curve[-1][0]),
             "z curve frequency range: %.3f to %.3f Hz"
             % (curve[-1][1], curve[0][1]),
         ]
-        z_cross = None
-        if tool in self.z_refs:
-            ref_z, ref_freq = self.z_refs[tool]
-            try:
-                z_cross = z_curve_z_at_freq(curve, ref_freq)
-            except ValueError as e:
-                raise gcmd.error(
-                    "The Z reference for T%d does not fall inside this "
-                    "descent: %s. Re-run EDDY_SET_Z_REF T=%d for this tool."
-                    % (tool, e, tool))
-            result['z_cross'] = z_cross
-            rows.append("z reference frequency: %.3f Hz" % (ref_freq,))
-            rows.append("z crossing (machine Z): %.4f mm" % (z_cross,))
-            rows.append("z vs anchor: %+.4f mm" % (z_cross - ref_z,))
+
+    def _z_rows_identical(self, gcmd, tool, result, is_baseline_run):
+        """Crossing rows and Z offset row with one shared reference frequency.
+
+        The reference is the baseline tool's own frequency at the middle of
+        its descent. Identical hotend assemblies respond to the coil
+        identically, so equal frequency means equal distance and the height
+        at which another tool's curve reaches that frequency is directly
+        comparable.
+        """
+        base_curve = self.baseline['z_curve']
+        base_z, ref_freq = z_curve_shared_reference(base_curve)
+        rows = ["z reference frequency (shared): %.3f Hz" % (ref_freq,)]
+        if is_baseline_run:
+            # The baseline crosses its own reference at the height the
+            # reference was taken from, by construction.
+            rows.append("z crossing (machine Z): %.4f mm" % (base_z,))
+            return rows, None
+        try:
+            z_cross = z_curve_z_at_freq(result['z_curve'], ref_freq)
+        except ValueError as e:
+            raise gcmd.error(
+                "The shared Z reference frequency does not fall inside this "
+                "tool's descent: %s. Widen the descent by raising z_start or "
+                "lowering z_stop, which are heights above the coil top face, "
+                "then re-run EDDY_CALIBRATE_TOOL T=%d." % (e, BASELINE_TOOL))
+        rows.append("z crossing (machine Z): %.4f mm" % (z_cross,))
+        return rows, "offset z: %+.4f" % (z_cross - base_z,)
+
+    def _z_crossing_at_anchor(self, gcmd, tool, curve):
+        """Height at which a tool's curve reaches its own anchor frequency.
+
+        Returns None when the tool has no anchor. Raises when it has one that
+        this descent does not reach.
+        """
+        if tool not in self.z_refs:
+            return None
+        ref_z, ref_freq = self.z_refs[tool]
+        try:
+            return z_curve_z_at_freq(curve, ref_freq)
+        except ValueError as e:
+            raise gcmd.error(
+                "The Z reference for T%d does not fall inside this descent: "
+                "%s. Re-run EDDY_SET_Z_REF T=%d for this tool."
+                % (tool, e, tool))
+
+    def _z_rows_mixed(self, gcmd, tool, result, is_baseline_run):
+        """Crossing rows and Z offset row from each tool's own anchor."""
+        z_cross = self._z_crossing_at_anchor(gcmd, tool, result['z_curve'])
+        if z_cross is None:
+            rows = ["z crossing: not available, run EDDY_SET_Z_REF T=%d "
+                    "Z=<machine Z>" % (tool,)]
         else:
-            rows.append(
-                "z crossing: not available, run EDDY_SET_Z_REF T=%d "
-                "Z=<machine Z>" % (tool,))
-        if self.baseline is not None:
+            ref_z, ref_freq = self.z_refs[tool]
+            rows = [
+                "z reference frequency: %.3f Hz" % (ref_freq,),
+                "z crossing (machine Z): %.4f mm" % (z_cross,),
+                "z vs anchor: %+.4f mm" % (z_cross - ref_z,),
+            ]
+        if is_baseline_run:
+            return rows, None
+        base = self.baseline
+        base_cross = self._z_crossing_at_anchor(
+            gcmd, base['tool'], base['z_curve'])
+        if z_cross is None:
+            return rows, ("offset z: not available, run EDDY_SET_Z_REF T=%d "
+                          "Z=<machine Z> for T%d" % (tool, tool))
+        if base_cross is None:
+            return rows, ("offset z: not available, run EDDY_SET_Z_REF T=%d "
+                          "Z=<machine Z> for the baseline tool"
+                          % (base['tool'],))
+        return rows, "offset z: %+.4f" % (z_cross - base_cross,)
+
+    def _z_rows(self, gcmd, tool, result, is_baseline_run):
+        """Every Z row for one tool: curve, crossing, and the Z offset row.
+
+        Returns (rows, offset_row), where offset_row is None when the run has
+        no Z offset to report.
+        """
+        if self.z_offset_mode is None:
+            return [], None
+        rows = self._z_curve_rows(result['z_curve'])
+        if self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
+            more, offset_row = self._z_rows_identical(
+                gcmd, tool, result, is_baseline_run)
+        elif self.z_offset_mode == Z_OFFSET_MODE_MIXED:
+            more, offset_row = self._z_rows_mixed(
+                gcmd, tool, result, is_baseline_run)
+        else:
+            raise self._unhandled_mode_error(gcmd)
+        return rows + more, offset_row
+
+    def _report_tool_result(self, gcmd, tool, result, is_baseline_run):
+        rows = [
+            "tool: T%d" % (tool,),
+            "center x: %.4f" % (result['x'],),
+            "center y: %.4f" % (result['y'],),
+        ]
+        z_rows, offset_row = self._z_rows(
+            gcmd, tool, result, is_baseline_run)
+        rows.extend(z_rows)
+        if is_baseline_run:
+            rows.append("offsets: baseline tool, zero by definition")
+        else:
             base = self.baseline
             rows.append("baseline tool: T%d" % (base['tool'],))
             rows.append("offset x: %+.4f" % (result['x'] - base['x'],))
             rows.append("offset y: %+.4f" % (result['y'] - base['y'],))
-            if z_cross is not None and base.get('z_cross') is not None:
-                rows.append(
-                    "offset z: %+.4f" % (z_cross - base['z_cross'],))
-            else:
-                rows.append(
-                    "offset z: not available, both tools need a Z reference")
-        elif is_baseline_run:
-            rows.append("offsets: baseline tool, zero by definition")
-        else:
-            rows.append(
-                "offsets: not available, run EDDY_SET_BASELINE on the "
-                "reference tool")
+            if offset_row is not None:
+                rows.append(offset_row)
         rows.extend(self._aggregate_rows(result['agg']))
         gcmd.respond_info("\n".join(rows))
-
-    cmd_EDDY_SET_BASELINE_help = (
-        "Declare the currently mounted tool as the T0 baseline for this "
-        "session. Add DEBUG=1 to print each scan pass's diagnostic rows.")
-
-    def cmd_EDDY_SET_BASELINE(self, gcmd):
-        self._ensure_homed(gcmd)
-        tool = self._tool_index(gcmd)
-        debug = self._debug_flag(gcmd)
-        # A baseline is always a fresh measurement, so the baseline and the
-        # tools compared against it come from the same machinery.
-        result = self._run_tool_measurement(gcmd, tool, debug)
-        # _report_tool_result owns the reference-frequency crossing, so the
-        # baseline stores the value that readout produced instead of
-        # evaluating the curve a second time.
-        self._report_tool_result(gcmd, tool, result, is_baseline_run=True)
-        self.baseline = {
-            'tool': tool,
-            'x': result['x'],
-            'y': result['y'],
-            'z_cross': result.get('z_cross'),
-        }
-        gcmd.respond_info("baseline tool: T%d" % (tool,))
 
     cmd_EDDY_SET_Z_REF_help = (
         "Bind the current tool's measured frequency curve to a real Z "
         "obtained by another method. Z= is a machine Z coordinate, the same "
-        "frame the descent curve is reported in.")
+        "frame the descent curve is reported in. Requires "
+        "z_offset_mode: mixed_hotends.")
 
     def cmd_EDDY_SET_Z_REF(self, gcmd):
+        self._require_anchor_mode(gcmd)
         tool = self._tool_index(gcmd)
         z = gcmd.get_float('Z')
         result = self.results.get(tool)

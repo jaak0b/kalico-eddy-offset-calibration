@@ -56,7 +56,7 @@ designed; zero implementation code written. Next phase = scaffold + implement.
    README, move kalico clone path into .gitignore or document it.
 2. Implement per docs/design.md: config wrapper embedding LDC1612, EDDY_QUERY,
    EDDY_LOCATE, scan engine (trapq-synced sampling), parabolic fit + pair
-   averaging, EDDY_SET_BASELINE / EDDY_CALIBRATE_TOOL, Z curve + EDDY_SET_Z_REF.
+   averaging, EDDY_CALIBRATE_TOOL, Z curve + EDDY_SET_Z_REF.
    Port algorithm details from reference/tool_eddy_calibration.py (esp. its
    scan/fit functions, lines ~590-660 for sampling, fitting near extremum).
 3. Offline testing before hardware: Kalico has no easy full sim, but fit math

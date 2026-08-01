@@ -172,6 +172,11 @@ pair_scans: True
 samples_min: 100
 save_csv: True                  # keep raw scan data while validating
 #csv_dir: EddyToolCalibration    # optional: folder name for scan CSV files
+# --- Z offsets ---
+z_offset_mode: identical_hotends # every tool carries the same hotend
+                                 # assembly; use mixed_hotends if they
+                                 # differ, or leave the option out to skip
+                                 # the Z descent entirely
 ```
 
 **Do not add `frequency:` unless your Kalico is from March 2026 or
@@ -287,8 +292,14 @@ connects, that is a warning, not a failure. It is not a reason to reflash.
 3. Run `EDDY_LOCATE` and confirm the printed coil center is close to your
    configured `coil_x` / `coil_y`. A result far from your estimate means the
    coarse scan missed the coil; recheck the geometry in section 4.
-4. Run `EDDY_CALIBRATE_TOOL` with `save_csv: True` already set in config, so
-   every scan pass and the Z descent are written to CSV for offline review.
+4. Run `EDDY_CALIBRATE_TOOL T=0` with `save_csv: True` already set in config,
+   so every scan pass and the Z descent are written to CSV for offline
+   review. `T=` is required, and `T=0` is the baseline every other tool is
+   measured against.
+5. Mount the next tool and run `EDDY_CALIBRATE_TOOL T=1`, then `T=2` and so
+   on for the remaining tools. Each run prints its offsets against the `T=0`
+   result from this session. Re-run `T=0` after any restart, because the
+   baseline is not persisted.
 
 **Known failure signature: peaks at the scan start.** If every pass reports its
 extremum sample near index 0 and the reconstructed center comes out exactly

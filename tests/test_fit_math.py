@@ -543,6 +543,42 @@ def test_rejects_a_height_outside_the_measured_curve():
         etc.z_curve_freq_at(curve, 0.5)
 
 
+def test_shared_reference_is_taken_at_the_middle_of_the_measured_range():
+    # Arrange: a descent measured from 1.0 mm to 4.0 mm, reading 100 Hz at
+    # 1.0 mm, 80 Hz at 2.0 mm and 40 Hz at 4.0 mm.
+    curve = etc.build_z_curve([(1.0, 100.0), (2.0, 80.0), (4.0, 40.0)])
+
+    # Act
+    ref_z, ref_freq = etc.z_curve_shared_reference(curve)
+
+    # Assert: the midpoint of 1.0 to 4.0 mm is 2.5 mm, a quarter of the way
+    # from the 80 Hz step to the 40 Hz step, so the frequency there is 70 Hz.
+    assert ref_z == pytest.approx(2.5, abs=1e-9)
+    assert ref_freq == pytest.approx(70.0, abs=1e-9)
+
+
+def test_shared_reference_recovers_a_seeded_height_shift_between_two_tools():
+    # Arrange: one hotend response, and the same response measured 0.300 mm
+    # higher because the second tool's nozzle sits 0.300 mm shorter. The
+    # 0.300 mm is the seeded truth this test recovers.
+    baseline = etc.build_z_curve([(1.0, 100.0), (2.0, 80.0), (4.0, 40.0)])
+    second_tool = etc.build_z_curve([(1.3, 100.0), (2.3, 80.0), (4.3, 40.0)])
+
+    # Act
+    ref_z, ref_freq = etc.z_curve_shared_reference(baseline)
+    z_cross = etc.z_curve_z_at_freq(second_tool, ref_freq)
+
+    # Assert: the baseline reference sits at 2.5 mm and 70 Hz, and the shifted
+    # curve reaches 70 Hz at 2.8 mm, which is the seeded 0.300 mm higher.
+    assert ref_z == pytest.approx(2.5, abs=1e-9)
+    assert z_cross == pytest.approx(2.8, abs=1e-9)
+
+
+def test_rejects_a_shared_reference_from_a_single_step():
+    with pytest.raises(ValueError, match="at least 2 steps"):
+        etc.z_curve_shared_reference([(1.0, 100.0)])
+
+
 # --- fit window sizing -----------------------------------------------------
 
 

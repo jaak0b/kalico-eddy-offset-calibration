@@ -67,6 +67,8 @@ scan_angles: 45, 135
 pair_scans: True
 samples_min: 100
 save_csv: False
+# --- Z offsets: omit z_offset_mode to skip the Z descent entirely ---
+z_offset_mode: identical_hotends
 ```
 
 See `docs/design.md` for the full schema description and rationale.
@@ -78,15 +80,28 @@ See `docs/design.md` for the full schema description and rationale.
 - `EDDY_LOCATE [DEBUG=1]`: coarse raster scan over the configured coil
   position to find and store the refined coil center for the session.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_CALIBRATE_TOOL [T=<n>] [DEBUG=1]`: run the full XY and Z measurement
-  for the mounted tool and print its offsets relative to the T0 baseline.
+- `EDDY_CALIBRATE_TOOL T=<n> [DEBUG=1]`: run the full XY and Z measurement
+  for the mounted tool and print its offsets relative to T0. Run `T=0` first
+  with the baseline tool mounted; every later tool is measured against it.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_SET_BASELINE [DEBUG=1]`: declare the currently mounted tool as the
-  T0 baseline for this session. `DEBUG=1` also prints each scan pass's
-  diagnostic rows.
 - `EDDY_SET_Z_REF [T=<n>] Z=<machine Z>`: bind the current tool's measured
   frequency curve to a real Z obtained by another method. `Z=` is a machine
-  coordinate, the same frame the descent curve is reported in.
+  coordinate, the same frame the descent curve is reported in. Requires
+  `z_offset_mode: mixed_hotends`.
+
+## Z offsets
+
+Set `z_offset_mode` to pick how the Z offset between two tools is derived.
+
+- `identical_hotends`: no anchor needed. Every tool is compared against one
+  shared reference frequency taken from the baseline tool's own descent
+  curve. Use it when all tools carry the same hotend assembly, nozzle,
+  heater block and shroud alike, because the coil responds to all the metal
+  near it.
+- `mixed_hotends`: anchor each tool once with `EDDY_SET_Z_REF` against a Z
+  you measured by another method. Use it when tools differ.
+- Left out: no Z descent runs at all, which makes each calibration
+  noticeably faster. XY offsets are still measured and reported.
 
 ## Moonraker update_manager
 
