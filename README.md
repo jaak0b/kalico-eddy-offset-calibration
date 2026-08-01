@@ -53,6 +53,10 @@ samples used: 6916
 For the spread repeated runs produced on the author's machine, see
 [Status and limitations](#status-and-limitations).
 
+Every readout that prints a fitted center also prints what one microstep moves
+each X and Y stepper, read off the kinematics, so a measured spread can be read
+against the machine's own resolution.
+
 `DEBUG=1` adds a block per scan pass: response type, sample counts, extremum
 sample, fitted vertex offset, pass angle and peak position. A failed pass always
 prints its full diagnostics, with or without `DEBUG=1`.
@@ -110,6 +114,30 @@ measurement starts. Each non-baseline result is passed to `apply_offsets_gcode`
 when that option is set. A run over more than one tool ends with a per-tool
 summary. `DEBUG=1` prints each scan pass's diagnostic rows.
 
+#### EDDY_REPEATABILITY
+
+`EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] [DEBUG=1]`: Measure
+one tool over and over and report how far the results spread. `T=`, `RUNS=` and
+`CYCLES=` are all required. A cycle mounts another tool and remounts the
+measured one, then takes `RUNS` measurements without touching it again, so the
+runs inside a cycle show the measurement alone and the cycles show what the
+docking adds on top of it.
+
+`CYCLES` above 1 needs `tool_count` and `toolchange_gcode`, because a cycle has
+to dock through a second tool. `CYCLES=1` runs on any machine and exercises no
+docking.
+
+`SKIP_Z` defaults to 1, which skips the Z descent even with `calibrate_z: True`,
+so a study is XY only and fast. `SKIP_Z=0` includes the descent, which needs
+`calibrate_z: True` and the tool's `EDDY_CALIBRATE_Z` reference.
+
+The command prints its plan and a rough run time before it moves, each cycle's
+mean and spread as that cycle finishes, and a summary at the end: the
+within-cycle spread (the measurement), the between-cycle spread (the docking),
+the range and the largest deviation from the mean, per axis. Every individual
+measurement is written to `repeatability_T<n>_<index>.csv` in `csv_dir`, with a
+fresh index per study, so nothing overwrites an earlier one.
+
 The LDC1612 driver also registers Kalico's own
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`.
 
@@ -137,12 +165,20 @@ Read this section before wiring anything.
 - Cartesian kinematics for the switch probing. The switch probing reads the
   kinematic Z limits and refuses to run without them.
 
+- No drift figure yet. Every completed measurement is appended to
+  `history_T<n>.csv` in `csv_dir`, and that log is what a claim about drift over
+  time would be based on. None is claimed here until it covers enough time.
+
 ### Measured so far
 
 Measured on one machine, one session each (a Voron with StealthChanger, a Manta
 M8P and a BTT Eddy Coil), recorded in full in the project's decisions log. These
 are one setup's figures, not a specification; a smaller coil, a different
 mainboard or a different toolchanger will read differently.
+
+`EDDY_REPEATABILITY` is the command that produces figures like these: it reports
+the within-cycle spread, the between-cycle spread, the range and the largest
+deviation from the mean, and writes every measurement to a CSV file.
 
 | What | Measured | How |
 |---|---|---|
@@ -298,6 +334,13 @@ Every option and its default. Options shown commented out may be left out.
 #   the fit window is reported as a failed fit rather than clamped.
 #save_csv: False
 #   Write every scan pass's raw samples to a CSV file for offline review.
+#save_history: True
+#   Append every completed measurement of a tool to history_T<n>.csv in
+#   csv_dir: the timestamp, the fitted center, the offsets, the Z crossing
+#   and trigger plane, the nozzle temperature and the sample count. This is
+#   the drift log, one line per measurement, and it is what a claim about
+#   drift over time rests on. It is separate from save_csv, which dumps the
+#   raw samples of each scan pass instead.
 #csv_dir: EddyToolCalibration/data
 #   Directory the scan CSV files are written to, relative to the printer
 #   config directory. It must not be the directory holding the calibration

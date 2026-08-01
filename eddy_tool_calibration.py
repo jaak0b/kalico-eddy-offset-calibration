@@ -12,10 +12,10 @@
 # Free Software Foundation, either version 3 of the License, or (at your
 # option) any later version. See LICENSE for the full text.
 
-"""Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_Z
-and EDDY_CALIBRATE_OFFSET gcode commands for eddy-current based per-tool
-nozzle offset calibration. See docs/design.md for the full design and config
-schema.
+"""Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_Z,
+EDDY_CALIBRATE_OFFSET and EDDY_REPEATABILITY gcode commands for eddy-current
+based per-tool nozzle offset calibration. See docs/design.md for the full
+design and config schema.
 
 Constraint: this module must import cleanly on a machine without klippy
 installed (unit tests run standalone). Any import of klippy modules
@@ -944,6 +944,354 @@ def spread(values):
     return min(values), max(values), math.sqrt(var)
 
 
+# --- machine resolution ----------------------------------------------------
+
+
+def step_distance_rows(step_distances):
+    """Labeled rows naming how far one microstep moves each XY stepper.
+
+    step_distances is a list of (stepper section name, millimetres per step),
+    read off the kinematics. The rows exist so a measured spread can be read
+    against the machine's own resolution. An empty list produces no rows,
+    because a resolution the machine did not report is better left out than
+    guessed at.
+    """
+    return ["step distance %s: %.6f mm" % (name, distance)
+            for name, distance in step_distances]
+
+
+# --- move timing -----------------------------------------------------------
+
+# Provenance: probe_eddy_current's calibration moves. Each step settles for
+# 0.050 s before its 0.100 s sample window, dwells 0.200 s in place, is
+# approached from 0.500 mm above, and the whole descent is bracketed by a
+# 1.0 s dwell so the sample stream settles before and after it. The same
+# times are what the run time estimate below counts.
+SAMPLE_SETTLE_TIME = 0.050
+SAMPLE_WINDOW_TIME = 0.100
+STEP_DWELL_TIME = 0.200
+Z_APPROACH_HOP = 0.500
+DESCENT_SETTLE_DWELL = 1.000
+
+# Chosen value, not from probe_eddy_current: the bulk sensor delivers 0.100 s
+# batches, so collection runs two batch periods past the end of a move to be
+# sure the batch carrying the last in-move samples has arrived.
+COLLECT_TAIL_TIME = 0.200
+
+
+def measurement_time_estimate(rounds, pass_count, scan_length, scan_speed,
+                              scan_safe_z, z_speed, z_step_count, z_step,
+                              include_z):
+    """Rough duration in seconds of one full measurement of a tool.
+
+    Counts what the configured scan parameters and the fixed collection times
+    determine: every scan pass, the vertical leg down to the scan plane and
+    back, the settle and tail times around each pass, and, when a descent
+    runs, every descent step with its approach hop and dwell. Travel between
+    the coil and wherever the toolhead starts is not counted, because that
+    distance is not known before the move runs, so the figure is a floor
+    rather than a prediction.
+    """
+    if rounds < 1:
+        raise ValueError(
+            "a measurement runs at least one scan round, got %r" % (rounds,))
+    if pass_count < 1:
+        raise ValueError(
+            "a scan round runs at least one pass, got %r" % (pass_count,))
+    if scan_speed <= 0.0 or z_speed <= 0.0:
+        raise ValueError(
+            "scan_speed and z_speed must be greater than 0, got %r and %r"
+            % (scan_speed, z_speed))
+    if scan_length <= 0.0:
+        raise ValueError(
+            "scan length must be greater than 0, got %r" % (scan_length,))
+    per_pass = (scan_length / scan_speed
+                + 2.0 * scan_safe_z / z_speed
+                + SAMPLE_SETTLE_TIME + COLLECT_TAIL_TIME)
+    total = rounds * pass_count * per_pass
+    if include_z:
+        if z_step_count < 1:
+            raise ValueError(
+                "a descent runs at least one step, got %r" % (z_step_count,))
+        # Each step lifts to its own approach height and descends onto the
+        # target, so the leg up is the hop less the step already descended.
+        per_step = ((abs(Z_APPROACH_HOP - z_step) + Z_APPROACH_HOP) / z_speed
+                    + STEP_DWELL_TIME)
+        total += (2.0 * DESCENT_SETTLE_DWELL + COLLECT_TAIL_TIME
+                  + z_step_count * per_step)
+    return total
+
+
+# --- measurement logs ------------------------------------------------------
+
+# The drift log's columns, in file order, each with the format its values are
+# written in. Millimetres carry 4 decimals and temperatures 1, the same
+# precision the console rows show. A value that was not measured is written
+# as an empty field rather than a zero.
+HISTORY_COLUMNS = (
+    ('timestamp', '%s'),
+    ('command', '%s'),
+    ('center_x', '%.4f'),
+    ('center_y', '%.4f'),
+    ('offset_x', '%.4f'),
+    ('offset_y', '%.4f'),
+    ('z_crossing', '%.4f'),
+    ('trigger_z', '%.4f'),
+    ('offset_z', '%.4f'),
+    ('temperature', '%.1f'),
+    ('samples_used', '%d'),
+)
+
+# A repeatability study writes the same columns with the cycle and the run
+# number in front, so a study file and a drift log carry the same fields and
+# can be read by the same script.
+STUDY_COLUMNS = (('cycle', '%d'), ('run', '%d')) + HISTORY_COLUMNS
+
+
+def csv_header(columns):
+    """Header line for a column layout."""
+    return ",".join(name for name, _format in columns) + "\n"
+
+
+def csv_row(columns, entry):
+    """One CSV line for a column layout.
+
+    Every column has to be present in entry, and no other name may be, so a
+    misspelled field is an error rather than a column silently written empty.
+    A column whose value is None is written as an empty field, which is how a
+    run that measured no Z or had no baseline to compare against reports that
+    it did not measure the value at all.
+    """
+    known = set(name for name, _format in columns)
+    unknown = sorted(set(entry) - known)
+    if unknown:
+        raise ValueError(
+            "the log row carries the unknown field %s" % (", ".join(unknown),))
+    fields = []
+    for name, value_format in columns:
+        if name not in entry:
+            raise ValueError("the log row is missing the %s field" % (name,))
+        value = entry[name]
+        if value is None:
+            fields.append('')
+            continue
+        fields.append(value_format % (value,))
+    return ",".join(fields) + "\n"
+
+
+def history_filename(tool):
+    """File name of one tool's drift log."""
+    return "history_T%d.csv" % (int(tool),)
+
+
+def next_study_filename(existing, tool):
+    """File name for a repeatability study that cannot overwrite an earlier one.
+
+    existing holds the names already in the directory. The index is one above
+    the highest index already there, so a study never lands on the file
+    another study wrote, whatever order the files were created in.
+    """
+    prefix = "repeatability_T%d_" % (int(tool),)
+    suffix = ".csv"
+    highest = 0
+    for name in existing:
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        index = name[len(prefix):len(name) - len(suffix)]
+        if not index.isdigit():
+            continue
+        highest = max(highest, int(index))
+    return "%s%03d%s" % (prefix, highest + 1, suffix)
+
+
+# --- repeatability studies -------------------------------------------------
+
+# Whether a study docks the measured tool between its cycles, and why it does
+# not when it cannot. A cycle exercises the docking by mounting another tool
+# and remounting the measured one, which needs both a second tool and the
+# lines that mount one.
+DOCKING_STATES = ('through_tool', 'no_other_tool', 'no_toolchange_gcode')
+
+
+def study_docking(tool, tool_count, has_toolchange_gcode):
+    """The tool a study docks through, as (state, tool number).
+
+    The docking tool is the lowest tool number of the fleet that is not the
+    measured one. Returns a state out of DOCKING_STATES and the tool number,
+    which is None whenever no docking can run.
+    """
+    if not has_toolchange_gcode:
+        return 'no_toolchange_gcode', None
+    if tool_count is not None:
+        for candidate in range(int(tool_count)):
+            if candidate != int(tool):
+                return 'through_tool', candidate
+    return 'no_other_tool', None
+
+
+def docking_row(state, docking_tool):
+    """The labeled row saying whether a study exercised the docking."""
+    if state == 'through_tool':
+        return ("docking between cycles: each cycle mounts T%d and remounts "
+                "the measured tool" % (int(docking_tool),))
+    if state == 'no_other_tool':
+        return ("docking between cycles: not exercised, tool_count names no "
+                "second tool to dock through")
+    if state == 'no_toolchange_gcode':
+        return ("docking between cycles: not exercised, toolchange_gcode is "
+                "not set")
+    raise ValueError(
+        "unhandled docking state %r, expected one of %r"
+        % (state, DOCKING_STATES))
+
+
+def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
+                    seconds):
+    """Labeled rows describing a study before it starts moving.
+
+    seconds is the estimated run time, or None when no honest estimate is
+    available, in which case the row is left out rather than filled with a
+    number nothing produced.
+    """
+    if runs < 2:
+        raise ValueError(
+            "a study needs at least 2 runs per cycle, got %r" % (runs,))
+    if cycles < 1:
+        raise ValueError("a study needs at least 1 cycle, got %r" % (cycles,))
+    rows = [
+        "repeatability study:",
+        "tool: T%d" % (int(tool),),
+        "runs per cycle: %d" % (runs,),
+        "cycles: %d" % (cycles,),
+        "measurements: %d" % (runs * cycles,),
+        "z descent: %s" % ("included" if include_z else "skipped",),
+        docking_row(state, docking_tool),
+    ]
+    if seconds is not None:
+        rows.append(
+            "estimated run time: %.0f s (%.1f min), counting the scan and "
+            "descent moves only" % (seconds, seconds / 60.0))
+    return rows
+
+
+def cycle_progress_rows(cycle, axes):
+    """Labeled rows closing one cycle of a study.
+
+    axes is a list of (axis label, values measured in that cycle).
+    """
+    rows = []
+    for label, values in axes:
+        low, high, deviation = spread(values)
+        rows.append(
+            "cycle %d %s mean: %.4f mm" % (cycle, label,
+                                           sum(values) / len(values)))
+        rows.append(
+            "cycle %d %s range: %.4f mm" % (cycle, label, high - low))
+        rows.append(
+            "cycle %d %s standard deviation: %.4f mm"
+            % (cycle, label, deviation))
+    return rows
+
+
+def repeatability_statistics(cycles):
+    """Split the variation of a study into measurement and docking.
+
+    This is the gauge repeatability and reproducibility decomposition of the
+    AIAG measurement systems analysis manual, in its one-way analysis of
+    variance form: the runs inside a cycle differ by the measurement alone
+    (repeatability), and the cycle means differ by the measurement plus
+    whatever the docking between cycles adds (reproducibility).
+
+    cycles is a list of one list of values per cycle, every cycle holding the
+    same number of runs. Returns a dict holding the grand mean, the pooled
+    within-cycle standard deviation, the standard deviation of the cycle
+    means, the docking component that follows from the two, the range and the
+    largest deviation from the grand mean.
+
+    The docking component is the between-cycle variance component of that
+    decomposition: the observed variance of the cycle means carries the
+    measurement's own variance divided by the number of runs, so that share
+    is subtracted. The manual's convention when the subtraction leaves nothing
+    is followed here: the component is reported as zero and flagged as
+    unresolved, never as a negative variance. Both figures are returned, so
+    the corrected component is always readable next to the raw spread it came
+    from.
+    """
+    if not cycles:
+        raise ValueError("a repeatability study needs at least one cycle")
+    run_count = len(cycles[0])
+    if run_count < 2:
+        raise ValueError(
+            "a repeatability study needs at least 2 runs per cycle, got %d"
+            % (run_count,))
+    for index, runs in enumerate(cycles):
+        if len(runs) != run_count:
+            raise ValueError(
+                "cycle %d holds %d runs and cycle 1 holds %d, and the "
+                "decomposition needs the same number of runs in every cycle"
+                % (index + 1, len(runs), run_count))
+    cycle_count = len(cycles)
+    values = [value for runs in cycles for value in runs]
+    grand_mean = sum(values) / len(values)
+    cycle_means = [sum(runs) / run_count for runs in cycles]
+    within_ss = sum((value - mean) ** 2
+                    for runs, mean in zip(cycles, cycle_means)
+                    for value in runs)
+    within_variance = within_ss / (cycle_count * (run_count - 1))
+    mean_spread = None
+    between = None
+    between_resolved = None
+    if cycle_count > 1:
+        mean_variance = (sum((mean - grand_mean) ** 2 for mean in cycle_means)
+                         / (cycle_count - 1))
+        mean_spread = math.sqrt(mean_variance)
+        component = mean_variance - within_variance / run_count
+        between_resolved = component > 0.0
+        between = math.sqrt(component) if between_resolved else 0.0
+    return {
+        'cycle_count': cycle_count,
+        'run_count': run_count,
+        'mean': grand_mean,
+        'within': math.sqrt(within_variance),
+        'cycle_mean_spread': mean_spread,
+        'between': between,
+        'between_resolved': between_resolved,
+        'range': max(values) - min(values),
+        'max_deviation': max(abs(value - grand_mean) for value in values),
+    }
+
+
+def repeatability_rows(label, stats):
+    """Labeled rows for one axis of a study summary."""
+    rows = [
+        "%s mean: %.4f mm" % (label, stats['mean']),
+        "%s within-cycle spread (the measurement): %.4f mm"
+        % (label, stats['within']),
+    ]
+    if stats['cycle_mean_spread'] is None:
+        rows.append(
+            "%s between-cycle spread (the docking): not measured, the study "
+            "ran one cycle" % (label,))
+    else:
+        rows.append(
+            "%s spread of the cycle means (docking and measurement together): "
+            "%.4f mm" % (label, stats['cycle_mean_spread']))
+        if stats['between_resolved']:
+            rows.append(
+                "%s between-cycle spread (the docking alone): %.4f mm"
+                % (label, stats['between']))
+        else:
+            rows.append(
+                "%s between-cycle spread (the docking alone): 0.0000 mm, the "
+                "cycle means differ by no more than the measurement itself"
+                % (label,))
+    rows.append("%s range: %.4f mm" % (label, stats['range']))
+    rows.append(
+        "%s largest deviation from the mean: %.4f mm"
+        % (label, stats['max_deviation']))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Klippy-facing layer.
 # ---------------------------------------------------------------------------
@@ -965,21 +1313,6 @@ TOOL_PHASES = ('toolchange', 'switch probing', 'measurement', 'apply')
 SWITCH_REQUIRED_OPTIONS = (
     'switch_pin', 'switch_x', 'switch_y', 'switch_probe_z_start')
 
-# Provenance: probe_eddy_current's calibration moves. Each step settles for
-# 0.050 s before its 0.100 s sample window, dwells 0.200 s in place, is
-# approached from 0.500 mm above, and the whole descent is bracketed by a
-# 1.0 s dwell so the sample stream settles before and after it.
-SAMPLE_SETTLE_TIME = 0.050
-SAMPLE_WINDOW_TIME = 0.100
-STEP_DWELL_TIME = 0.200
-Z_APPROACH_HOP = 0.500
-DESCENT_SETTLE_DWELL = 1.000
-
-# Chosen value, not from probe_eddy_current: the bulk sensor delivers 0.100 s
-# batches, so collection runs two batch periods past the end of a move to be
-# sure the batch carrying the last in-move samples has arrived.
-COLLECT_TAIL_TIME = 0.200
-
 # Chosen value, not from probe_eddy_current: half a second at the sensor's
 # 250 Hz sample rate gives about 125 samples, enough for a meaningful spread
 # without making a wiring check feel slow. Exposed as the query_time config
@@ -990,6 +1323,12 @@ QUERY_COLLECT_TIME_DEFAULT = 0.500
 # configured coil position, which is much larger than the coil itself, so the
 # default locate length is three times the regular scan length.
 LOCATE_SCAN_LENGTH_FACTOR = 3.0
+
+# The scan rounds one XY measurement runs, in order, and the label each one
+# reports under. The first round starts from the current center estimate and
+# every round after it re-centers on the result of the one before, so the
+# scan passes end up centered on the response rather than on the estimate.
+XY_MEASUREMENT_ROUNDS = ('coarse', 'refine')
 
 
 class SwitchPinConfig:
@@ -1093,6 +1432,11 @@ class EddyToolCalibration:
             raise config.error("%s: scan_angles: %s" % (self.name, e))
         self.samples_min = config.getint('samples_min', 100, minval=3)
         self.save_csv = config.getboolean('save_csv', False)
+        # The drift log is a different concept from the raw scan dumps: it
+        # holds one line per completed measurement, which is the record a
+        # claim about drift over time rests on, so it is on by default and
+        # not tied to save_csv.
+        self.save_history = config.getboolean('save_history', True)
         self.csv_dir = config.get(
             'csv_dir', os.path.join(STATE_DIR, 'data').replace('\\', '/'))
         try:
@@ -1253,6 +1597,9 @@ class EddyToolCalibration:
         gcode.register_command(
             'EDDY_CALIBRATE_OFFSET', self.cmd_EDDY_CALIBRATE_OFFSET,
             desc=self.cmd_EDDY_CALIBRATE_OFFSET_help)
+        gcode.register_command(
+            'EDDY_REPEATABILITY', self.cmd_EDDY_REPEATABILITY,
+            desc=self.cmd_EDDY_REPEATABILITY_help)
 
     # -- config and persisted state ---------------------------------------
 
@@ -1774,6 +2121,36 @@ class EddyToolCalibration:
 
     # -- contact switch probing -------------------------------------------
 
+    def _step_distances(self):
+        """How far one microstep moves each X and Y stepper, in mm.
+
+        Read off the kinematics rather than worked out from the config, so the
+        figure is the one the machine itself steps by. Returns a list of
+        (stepper section name, millimetres per step). A machine whose steppers
+        cannot be read returns an empty list, which leaves the rows out of the
+        readout: the resolution is a comparison aid beside a measurement, and
+        losing it must not cost the measurement. The reason is logged so it
+        stays visible in klippy.log.
+        """
+        toolhead = self.printer.lookup_object('toolhead', None)
+        if toolhead is None:
+            return []
+        try:
+            steppers = toolhead.get_kinematics().get_steppers()
+        except Exception:
+            logging.exception(
+                "eddy_tool_calibration: could not read the steppers from the "
+                "kinematics, so the step distance rows are left out")
+            return []
+        distances = []
+        for stepper in steppers:
+            name = stepper.get_name()
+            if not name.startswith('stepper_x') and \
+                    not name.startswith('stepper_y'):
+                continue
+            distances.append((name, stepper.get_step_dist()))
+        return distances
+
     def _kin_z_limits(self, gcmd):
         """The kinematic Z travel limits, as (minimum, maximum).
 
@@ -2100,6 +2477,63 @@ class EddyToolCalibration:
         if debug:
             gcmd.respond_info("scan data: %s" % (path,))
 
+    # -- measurement logs -------------------------------------------------
+
+    def _append_csv(self, path, columns, entry):
+        """Append one measurement to a log file, creating it with its header.
+
+        Raises OSError or ValueError, which the callers turn into a gcode
+        error naming the path.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        header_needed = not os.path.exists(path)
+        line = csv_row(columns, entry)
+        with open(path, 'a') as f:
+            if header_needed:
+                f.write(csv_header(columns))
+            f.write(line)
+
+    def _log_entry(self, command, result, offsets):
+        """The fields one completed measurement contributes to a log row.
+
+        offsets is None when the measurement had no baseline to be compared
+        against, which leaves the three offset columns empty rather than zero.
+        """
+        return {
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'command': command,
+            'center_x': result['x'],
+            'center_y': result['y'],
+            'offset_x': None if offsets is None else offsets['x'],
+            'offset_y': None if offsets is None else offsets['y'],
+            'z_crossing': result['z_crossing'],
+            'trigger_z': result['z_trigger'],
+            'offset_z': None if offsets is None else offsets['z'],
+            'temperature': result['temperature'],
+            'samples_used': result['agg']['samples_used'],
+        }
+
+    def _append_history(self, gcmd, tool, entry):
+        """Append one measurement to the tool's drift log.
+
+        The log is what a claim about drift over time would rest on, so a
+        write that fails is reported rather than skipped. It is appended after
+        the result rows are printed, so a measurement that succeeded is
+        reported in full whatever the log does.
+        """
+        if not self.save_history:
+            return
+        path = os.path.join(
+            self._config_dir(), self.csv_dir, history_filename(tool))
+        try:
+            self._append_csv(path, HISTORY_COLUMNS, entry)
+        except (OSError, ValueError) as e:
+            raise gcmd.error(
+                "The measurement above is complete, and it could not be "
+                "appended to the drift log %s: %s. Fix the directory "
+                "permissions, or set save_history to False in the [%s] config "
+                "section." % (path, e, self.name))
+
     # -- measurement ------------------------------------------------------
 
     def _measure_center(self, gcmd, center_x, center_y, length, label, debug):
@@ -2159,19 +2593,16 @@ class EddyToolCalibration:
     def _measure_xy(self, gcmd, debug):
         center_x, center_y = self.center if self.center else (
             self.coil_x, self.coil_y)
-        first_x, first_y, agg1 = self._measure_center(
-            gcmd, center_x, center_y, self.scan_length, "coarse", debug)
-        if debug:
-            gcmd.respond_info(
-                "first pass center x: %.4f\nfirst pass center y: %.4f"
-                % (first_x, first_y))
-        # One iteration re-centered on the first result.
-        refined_x, refined_y, agg2 = self._measure_center(
-            gcmd, first_x, first_y, self.scan_length, "refine", debug)
         agg = self._new_aggregate()
-        self._merge_aggregate(agg, agg1)
-        self._merge_aggregate(agg, agg2)
-        return refined_x, refined_y, agg
+        for label in XY_MEASUREMENT_ROUNDS:
+            center_x, center_y, round_agg = self._measure_center(
+                gcmd, center_x, center_y, self.scan_length, label, debug)
+            self._merge_aggregate(agg, round_agg)
+            if debug:
+                gcmd.respond_info(
+                    "%s center x: %.4f\n%s center y: %.4f"
+                    % (label, center_x, label, center_y))
+        return center_x, center_y, agg
 
     def _measure_z_curve(self, gcmd, center_x, center_y):
         """Stepwise descent over the coil center, returning the Z curve.
@@ -2324,6 +2755,7 @@ class EddyToolCalibration:
             "config coil_x: %.4f" % (self.coil_x,),
             "config coil_y: %.4f" % (self.coil_y,),
         ]
+        rows.extend(step_distance_rows(self._step_distances()))
         rows.extend(self._aggregate_rows(agg))
         gcmd.respond_info("\n".join(rows))
 
@@ -2424,6 +2856,14 @@ class EddyToolCalibration:
         ])
         rows.extend(self._aggregate_rows(agg))
         gcmd.respond_info("\n".join(rows))
+        # The descent of an anchor run defines the anchor rather than being
+        # evaluated against one, so it has no crossing to log; what the run
+        # contributes to the drift record is the trigger plane it pressed.
+        self._append_history(gcmd, tool, self._log_entry(
+            'EDDY_CALIBRATE_Z',
+            {'x': center_x, 'y': center_y, 'z_crossing': None,
+             'z_trigger': trigger_z, 'temperature': temperature, 'agg': agg},
+            None))
 
     cmd_EDDY_CALIBRATE_OFFSET_help = (
         "Measure the tools named by T= over the coil and print their offsets "
@@ -2473,7 +2913,8 @@ class EddyToolCalibration:
             with self._phase(gcmd, tool, 'toolchange', sweeping):
                 self._mount_tool(gcmd, tool)
             with self._phase(gcmd, tool, 'measurement', sweeping):
-                result = self._run_tool_measurement(gcmd, tool, debug)
+                result = self._run_tool_measurement(
+                    gcmd, tool, debug, self.calibrate_z)
             if is_baseline_run:
                 # A fresh T0 run always replaces the session baseline, so the
                 # comparison never mixes results from two different setups.
@@ -2495,10 +2936,14 @@ class EddyToolCalibration:
             self._report_tool_result(gcmd, tool, result, is_baseline_run)
             offsets = None
             if not is_baseline_run:
+                offsets = self._offsets(result, self.calibrate_z)
+            self._append_history(
+                gcmd, tool,
+                self._log_entry('EDDY_CALIBRATE_OFFSET', result, offsets))
+            if offsets is not None:
                 # The baseline tool's offsets are zero by definition, and
                 # applying zeros would overwrite whatever the owner set for it,
                 # so only the other tools reach the apply lines.
-                offsets = self._offsets(result)
                 with self._phase(gcmd, tool, 'apply', sweeping):
                     self._apply_offsets(gcmd, tool, offsets)
         return {'tool': tool, 'offsets': offsets}
@@ -2537,7 +2982,7 @@ class EddyToolCalibration:
             % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in missing),
                ", ".join("T%d" % (t,) for t in missing)))
 
-    def _run_tool_measurement(self, gcmd, tool, debug):
+    def _run_tool_measurement(self, gcmd, tool, debug, include_z):
         center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
         agg = self._new_aggregate()
         self._merge_aggregate(agg, agg_xy)
@@ -2545,7 +2990,7 @@ class EddyToolCalibration:
         z_crossing = None
         z_trigger = None
         temperature = None
-        if self.calibrate_z:
+        if include_z:
             # Read before the descent and reported beside the anchor's own
             # temperature, so a curve measured in the wrong thermal state is
             # visible in the readout rather than only in the offset it moved.
@@ -2614,11 +3059,13 @@ class EddyToolCalibration:
         ])
         return rows
 
-    def _offsets(self, result):
+    def _offsets(self, result, include_z):
         """Offsets of a measured tool against the session baseline.
 
-        The Z entry is None when calibrate_z is False, because no descent ran
-        and there is no measured Z to report.
+        The Z entry is None whenever no descent ran, because there is then no
+        measured Z to report. include_z says whether one did: it is
+        calibrate_z for a calibration run, and a repeatability study may turn
+        the descent off on top of that.
         """
         base = self.baseline
         offsets = {
@@ -2626,7 +3073,7 @@ class EddyToolCalibration:
             'y': result['y'] - base['y'],
             'z': None,
         }
-        if self.calibrate_z:
+        if include_z:
             offsets['z'] = result['z_trigger'] - base['z_trigger']
         return offsets
 
@@ -2640,13 +3087,255 @@ class EddyToolCalibration:
         if is_baseline_run:
             rows.append("offsets: baseline tool, zero by definition")
         else:
-            offsets = self._offsets(result)
+            offsets = self._offsets(result, self.calibrate_z)
             rows.append("baseline tool: T%d" % (self.baseline['tool'],))
             rows.append("offset x: %+.4f" % (offsets['x'],))
             rows.append("offset y: %+.4f" % (offsets['y'],))
             if offsets['z'] is not None:
                 rows.append("offset z: %+.4f" % (offsets['z'],))
+        rows.extend(step_distance_rows(self._step_distances()))
         rows.extend(self._aggregate_rows(result['agg']))
+        gcmd.respond_info("\n".join(rows))
+
+    cmd_EDDY_REPEATABILITY_help = (
+        "Measure one tool over and over and report how far the results "
+        "spread: EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] "
+        "[DEBUG=1]. T, RUNS and CYCLES are all required. Each cycle mounts "
+        "another tool and remounts the measured one before its runs, so the "
+        "runs inside a cycle show the measurement alone and the cycles show "
+        "what the docking adds. A machine with no second tool or no "
+        "toolchange_gcode can still run CYCLES=1, which exercises no docking. "
+        "SKIP_Z defaults to 1 and skips the Z descent even with calibrate_z "
+        "True; SKIP_Z=0 runs it. Every measurement is written to a CSV file "
+        "in csv_dir.")
+
+    def cmd_EDDY_REPEATABILITY(self, gcmd):
+        self._ensure_homed(gcmd)
+        debug = self._debug_flag(gcmd)
+        tool = self._study_tool(gcmd)
+        runs = self._study_count(gcmd, 'RUNS', 2)
+        cycles = self._study_count(gcmd, 'CYCLES', 1)
+        include_z = self._study_include_z(gcmd)
+        state, docking_tool = study_docking(
+            tool, self.tool_count, self.has_toolchange_gcode)
+        if cycles > 1 and state != 'through_tool':
+            raise gcmd.error(
+                "Add tool_count and toolchange_gcode to the [%s] config "
+                "section and restart, or run the study with CYCLES=1. A cycle "
+                "docks the measured tool and mounts it again, which needs a "
+                "second tool to dock through and the lines that mount one."
+                % (self.name,))
+        if include_z:
+            # Checked before any motion: without an anchor the descent has
+            # nothing to be evaluated against.
+            self._require_anchors(gcmd, [tool])
+        gcmd.respond_info("\n".join(study_plan_rows(
+            tool, runs, cycles, include_z, state, docking_tool,
+            self._study_time_estimate(runs * cycles, include_z))))
+        if self.calibrate_z and tool in self.anchors:
+            self._preheat_anchored(gcmd, [tool])
+        path = self._study_csv_path(gcmd, tool)
+        axes = ['x', 'y'] + (['z'] if include_z else [])
+        by_cycle = dict((axis, []) for axis in axes)
+        with self._retreating():
+            # The first cycle measures whatever is mounted, so the tool is
+            # mounted before it starts. Every cycle mounts it again itself, as
+            # the second half of the docking it exercises.
+            self._mount_tool(gcmd, tool)
+            for cycle in range(1, cycles + 1):
+                measured = self._run_study_cycle(
+                    gcmd, tool, cycle, runs, include_z, debug, state,
+                    docking_tool, path, axes)
+                gcmd.respond_info("\n".join(cycle_progress_rows(
+                    cycle, [(axis, measured[axis]) for axis in axes])))
+                for axis in axes:
+                    by_cycle[axis].append(measured[axis])
+        self._report_study(
+            gcmd, tool, runs, cycles, include_z, state, docking_tool, path,
+            axes, by_cycle)
+
+    def _study_tool(self, gcmd):
+        """The one tool a repeatability study measures."""
+        text = gcmd.get('T', None)
+        if text is None:
+            raise gcmd.error(
+                "Add T= to name the tool to measure, as in EDDY_REPEATABILITY "
+                "T=0 RUNS=10 CYCLES=3. A repeatability study measures one "
+                "tool.")
+        try:
+            tools = parse_tool_list(text, self.tool_count, MAX_TOOLS)
+        except ValueError as e:
+            raise gcmd.error(
+                "%s. Give T= one tool number such as T=0." % (e,))
+        if len(tools) != 1:
+            raise gcmd.error(
+                "T=%s names %d tools. Give T= one tool number such as T=0: a "
+                "repeatability study measures one tool." % (text, len(tools)))
+        return tools[0]
+
+    def _study_count(self, gcmd, name, minimum):
+        """A required repetition count of a study, or the error naming it."""
+        value = gcmd.get_int(name, None, minval=minimum)
+        if value is None:
+            raise gcmd.error(
+                "Add %s= to the command, as in EDDY_REPEATABILITY T=0 "
+                "RUNS=10 CYCLES=3. RUNS is how many measurements a cycle "
+                "takes without touching the tool, at least 2, and CYCLES is "
+                "how many times the tool is docked and mounted again first, "
+                "at least 1." % (name,))
+        return value
+
+    def _study_include_z(self, gcmd):
+        """Whether a study runs the Z descent.
+
+        The descent is the slow part of a measurement and a study takes many,
+        so SKIP_Z defaults to 1 and an XY study runs without it. SKIP_Z=0 on a
+        machine that never descends is refused rather than ignored, so a study
+        that was asked for Z data does not quietly return none.
+        """
+        skip_z = gcmd.get_int('SKIP_Z', None, minval=0, maxval=1)
+        if skip_z == 0 and not self.calibrate_z:
+            raise gcmd.error(
+                "Set calibrate_z to True in the [%s] config section and "
+                "restart, or leave SKIP_Z out. SKIP_Z=0 asks for the Z "
+                "descent, and calibrate_z is False, so no descent runs at "
+                "all." % (self.name,))
+        if skip_z is None:
+            skip_z = 1
+        return self.calibrate_z and not skip_z
+
+    def _study_time_estimate(self, measurements, include_z):
+        """Estimated seconds a study spends moving, or None.
+
+        A configuration the estimate cannot be built from returns None, which
+        leaves the row out of the plan: the plan still names the measurement
+        count, and a made up duration would be worse than none. The reason is
+        logged so it stays visible in klippy.log.
+        """
+        try:
+            per_measurement = measurement_time_estimate(
+                len(XY_MEASUREMENT_ROUNDS),
+                len(expand_scan_angles(self.scan_angles, self.pair_scans)),
+                self.scan_length, self.scan_speed, self.scan_safe_z,
+                self.z_speed, len(self.z_targets), self.z_step, include_z)
+        except ValueError:
+            logging.exception(
+                "eddy_tool_calibration: could not estimate the run time of a "
+                "repeatability study, so the plan leaves the row out")
+            return None
+        return per_measurement * measurements
+
+    def _study_csv_path(self, gcmd, tool):
+        """The file this study writes its measurements to.
+
+        The index comes from what is already in the directory, so a study
+        cannot overwrite the data of one that ran before it.
+        """
+        directory = os.path.join(self._config_dir(), self.csv_dir)
+        try:
+            os.makedirs(directory, exist_ok=True)
+            existing = os.listdir(directory)
+        except OSError as e:
+            raise gcmd.error(
+                "Could not prepare the study data directory %s: %s. Fix the "
+                "directory permissions, or point csv_dir at a directory the "
+                "printer host can write." % (directory, e))
+        return os.path.join(directory, next_study_filename(existing, tool))
+
+    @contextlib.contextmanager
+    def _study_step(self, gcmd, phase, cycle, run, path):
+        """Name the cycle and the run a study failed in.
+
+        run is None for the toolchange that opens a cycle, which belongs to
+        the cycle rather than to any one measurement.
+        """
+        if phase not in TOOL_PHASES:
+            raise gcmd.error(
+                "Internal error: the calibration stage %r is not one of %r."
+                % (phase, TOOL_PHASES))
+        try:
+            yield
+        except self.printer.command_error as e:
+            where = ("cycle %d" % (cycle,) if run is None
+                     else "cycle %d run %d" % (cycle, run))
+            raise gcmd.error(
+                "The study stopped during %s of %s: %s. The measurements it "
+                "already took are in %s." % (phase, where, e, path))
+
+    def _exercise_docking(self, gcmd, tool, cycle, state, docking_tool, path):
+        """Dock the measured tool and mount it again, when a partner exists."""
+        if state == 'through_tool':
+            with self._study_step(gcmd, 'toolchange', cycle, None, path):
+                self._mount_tool(gcmd, docking_tool)
+                self._mount_tool(gcmd, tool)
+            return
+        if state in ('no_other_tool', 'no_toolchange_gcode'):
+            return
+        raise gcmd.error(
+            "Internal error: the docking state %r is not one of %r."
+            % (state, DOCKING_STATES))
+
+    def _run_study_cycle(self, gcmd, tool, cycle, runs, include_z, debug,
+                         state, docking_tool, path, axes):
+        """One cycle: dock and remount the tool, then measure it runs times.
+
+        Returns the measured values of the cycle, keyed by axis label. The
+        session baseline is left alone, because a study repeats one
+        measurement rather than replacing what a calibration run established.
+        """
+        self._exercise_docking(gcmd, tool, cycle, state, docking_tool, path)
+        measured = dict((axis, []) for axis in axes)
+        for run in range(1, runs + 1):
+            with self._study_step(gcmd, 'measurement', cycle, run, path):
+                result = self._run_tool_measurement(
+                    gcmd, tool, debug, include_z)
+            offsets = None
+            if self.baseline is not None:
+                offsets = self._offsets(result, include_z)
+            entry = self._log_entry('EDDY_REPEATABILITY', result, offsets)
+            try:
+                self._append_csv(
+                    path, STUDY_COLUMNS,
+                    dict(entry, cycle=cycle, run=run))
+            except (OSError, ValueError) as e:
+                raise gcmd.error(
+                    "Cycle %d run %d is complete, and it could not be written "
+                    "to %s: %s. Fix the directory permissions, or point "
+                    "csv_dir at a directory the printer host can write."
+                    % (cycle, run, path, e))
+            self._append_history(gcmd, tool, entry)
+            measured['x'].append(result['x'])
+            measured['y'].append(result['y'])
+            if include_z:
+                # The reconstructed trigger plane, which is the height a Z
+                # offset is the difference of, so its spread is the spread of
+                # the offset the run would have reported.
+                measured['z'].append(result['z_trigger'])
+        return measured
+
+    def _report_study(self, gcmd, tool, runs, cycles, include_z, state,
+                      docking_tool, path, axes, by_cycle):
+        """The closing summary of a study, as labeled raw-value rows."""
+        rows = [
+            "repeatability summary:",
+            "tool: T%d" % (tool,),
+            "runs per cycle: %d" % (runs,),
+            "cycles: %d" % (cycles,),
+            "measurements: %d" % (runs * cycles,),
+            "z descent: %s" % ("included" if include_z else "skipped",),
+            docking_row(state, docking_tool),
+        ]
+        for axis in axes:
+            try:
+                stats = repeatability_statistics(by_cycle[axis])
+            except ValueError as e:
+                raise gcmd.error(
+                    "The %s results could not be summarised: %s. Re-run the "
+                    "study with RUNS and CYCLES held to one value each."
+                    % (axis, e))
+            rows.extend(repeatability_rows(axis, stats))
+        rows.extend(step_distance_rows(self._step_distances()))
+        rows.append("measurement data: %s" % (path,))
         gcmd.respond_info("\n".join(rows))
 
     def get_status(self, eventtime):
@@ -2669,7 +3358,7 @@ class EddyToolCalibration:
         for tool, result in self.results.items():
             if self.baseline is None or result['session_id'] != self.session_id:
                 continue
-            offsets = self._offsets(result)
+            offsets = self._offsets(result, self.calibrate_z)
             tools[str(tool)] = {
                 'session_id': result['session_id'],
                 'center_x': result['x'],

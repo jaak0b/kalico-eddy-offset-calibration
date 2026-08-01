@@ -59,6 +59,7 @@ pair_scans: True                # forward+reverse averaging (latency cancellatio
 samples_min: 100                # abort fit below this sample count per pass
 query_time: 0.5                 # seconds EDDY_QUERY samples for
 save_csv: False                 # dump raw scan data for analysis
+save_history: True              # append every measurement to the per-tool drift log
 csv_dir: EddyToolCalibration/data # folder, relative to the config dir, for scan CSV files
 # --- fit tuning ---
 fit_window_radius: 1.0          # mm each side of the extremum; coil_inner_diameter / 2
@@ -176,8 +177,42 @@ face height never enters an offset; it only has to be small enough that the
 switch probing and the descent are both reachable.
 
 Display precision in every readout: millimetres to 4 decimals, frequencies to
-3 decimals, temperatures to 1 decimal. Values are printed exactly as measured
-at that precision, never rounded further and never clamped.
+3 decimals, temperatures to 1 decimal. Step distances are the one exception, at
+6 decimals, because a microstep is a few microns and 4 decimals would round most
+machines' resolution away. Values are printed exactly as measured at that
+precision, never rounded further and never clamped.
+
+## Machine resolution
+
+Every readout that prints a fitted center also prints the step distance of each
+X and Y stepper, so a reader can judge a measured spread against the machine's
+own resolution. The figure comes from the kinematics
+(`toolhead.get_kinematics().get_steppers()` and each stepper's
+`get_step_dist()`), never worked out from `rotation_distance`,
+`full_steps_per_rotation` and `microsteps` here, so it is the distance the
+machine itself steps by. Steppers that cannot be read produce no rows at all
+rather than a guess, and never fail the measurement they accompany.
+
+## Measurement logs
+
+Two CSV layouts, both written into `csv_dir`:
+
+- `history_T<n>.csv`, one line per completed measurement of a tool, appended by
+  `EDDY_CALIBRATE_OFFSET`, `EDDY_CALIBRATE_Z` and `EDDY_REPEATABILITY` alike.
+  Columns: `timestamp`, `command`, `center_x`, `center_y`, `offset_x`,
+  `offset_y`, `z_crossing`, `trigger_z`, `offset_z`, `temperature`,
+  `samples_used`. This is the drift log, the record a claim about drift over
+  time rests on. An anchor run leaves `z_crossing` empty, because its descent
+  defines the anchor rather than being evaluated against one; what it
+  contributes is the trigger plane it pressed. A value that was not measured is
+  an empty field, never a zero. The log is governed by `save_history` and not by
+  `save_csv`: the latter dumps the raw samples of each scan pass, a different
+  concept. A write that fails is a gcode error naming the path, raised after the
+  measurement's own rows are printed, so a failed log never costs a measurement
+  that succeeded.
+- `repeatability_T<n>_<index>.csv`, one file per study, holding the same columns
+  with `cycle` and `run` in front. The index is one above the highest already in
+  the directory, so a study never overwrites the data of one that ran before it.
 
 ## Nozzle temperature
 
@@ -259,6 +294,24 @@ reference it; decide during implementation, wrapper preferred.)
   discards that tool's measurements from this session, and anchoring the
   baseline tool clears the session baseline as well, so the next offset run
   measures T0 again.
+- `EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] [DEBUG=1]`:
+  measure one tool repeatedly and report the spread. `T=`, `RUNS=` and `CYCLES=`
+  are all required, with no defaults: what a study is worth depends entirely on
+  how many measurements it took and how many dockings it covered, so neither
+  count is guessed at. A cycle mounts another tool and remounts the measured
+  one, then takes `RUNS` measurements without touching it in between. The tool
+  it docks through is the lowest tool number of the fleet that is not the
+  measured one, so `CYCLES` above 1 needs `tool_count` and `toolchange_gcode`
+  and names both when either is missing. `CYCLES=1` runs anywhere and exercises
+  no docking, which the plan and the summary both say. `SKIP_Z` defaults to 1,
+  which skips the descent even with `calibrate_z: True`; `SKIP_Z=0` with
+  `calibrate_z: False` is an error naming `calibrate_z` rather than a silently
+  ignored parameter. Heating follows `EDDY_CALIBRATE_OFFSET`: the tool's
+  recorded anchor temperature, once before the study rather than per cycle, and
+  nothing at all when the tool has no anchor. The command prints its plan and a
+  rough run time before it moves, each cycle's mean and spread as that cycle
+  ends, and the summary below at the end. A study does not replace the session
+  baseline; it repeats one measurement rather than establishing one.
 - Both calibration commands share one tool rule. `T=` takes one tool number or
   a comma separated list of them with no spaces (`T=0,1,2`); a duplicate, a
   tool outside the machine's range and a malformed entry are each an error
@@ -295,6 +348,22 @@ reference it; decide during implementation, wrapper preferred.)
   their own anchor), which is the switch-anchored reference above.
 - Material independence for XY comes free: symmetry center of any monotonic
   response is amplitude-invariant.
+- Repeatability summary: the gauge repeatability and reproducibility
+  decomposition of the AIAG measurement systems analysis manual, in its one-way
+  analysis of variance form. The runs inside a cycle differ by the measurement
+  alone, so their pooled standard deviation over `cycles * (runs - 1)` degrees
+  of freedom is the within-cycle spread. The cycle means differ by the
+  measurement plus whatever the docking adds, so their standard deviation over
+  `cycles - 1` degrees of freedom is reported as measured, and the docking's own
+  component follows from subtracting the measurement's share of it, the
+  within-cycle variance over the number of runs. Both are printed: the raw
+  spread of the cycle means and the corrected docking component beside it, so
+  the correction is visible rather than assumed. Where the subtraction leaves
+  nothing, the manual's convention is followed and the component is reported as
+  zero, labeled as a docking the data does not resolve, never as a negative
+  variance. The range and the largest deviation from the grand mean are printed
+  alongside, because a worst case is what a user comparing against a contact
+  probe asks about and a standard deviation does not answer.
 
 ## Error handling
 
@@ -308,8 +377,9 @@ LDC1612 status register (drive current miscalibrated).
 
 1. Bring-up on BTT Eddy Coil (bigger coil, same electronics): EDDY_QUERY,
    EDDY_LOCATE, scan curves visually sane (save_csv + offline plot).
-2. Repeatability: EDDY_CALIBRATE_OFFSET x10 on one tool without toolchange;
-   report min/max/stddev per axis. Target: XY stddev < 5 um on crab board.
+2. Repeatability: EDDY_REPEATABILITY on one tool, which reports the
+   within-cycle spread, the between-cycle spread, the range and the largest
+   deviation from the mean per axis. Target: XY stddev < 5 um on crab board.
 3. Cross-check vs contact method (tools_calibrate / owner's pin) on 2+ tools;
    agreement within the contact method's own repeatability.
 4. Dirty-nozzle test: repeat (2) with deliberately filthy nozzle; deltas vs
