@@ -110,8 +110,13 @@ as they are measured; there is no `SAVE_CONFIG` step. Each one records two
 temperatures alongside the anchor height and frequency: the setpoint it was
 heated to, which is `calibration_temp` and is what every later run of that tool
 is heated to, and the reading observed while it was measured, which is
-diagnostic only. `DEBUG=1` prints each press trigger height and each scan
-pass's diagnostic rows.
+diagnostic only. It also records the two sensor settings that frequency is
+only meaningful under, the drive current and the count-to-hertz conversion the
+driver derives from `frequency`. A later run compares both against the driver
+and refuses a reference whose settings have changed since, naming the tool,
+both values and the command that measures it again; running on it instead
+would report a Z offset wrong by an unknown amount. `DEBUG=1` prints each press
+trigger height and each scan pass's diagnostic rows.
 
 #### EDDY_CALIBRATE_OFFSET
 
@@ -259,13 +264,17 @@ Every option and its default. Options shown commented out may be left out.
 #   accepted from 2000000 to 40000000. The default is 12000000, which is the
 #   BTT Eddy family's oscillator. Setting this option at all requires Kalico
 #   from March 2026 or newer. A wrong value here scales every reported
-#   frequency.
+#   frequency. Changing it invalidates every stored Z reference: run
+#   EDDY_CALIBRATE_Z again for each tool afterwards.
 #reg_drive_current:
 #   The LDC1612 DRIVE_CURRENT0 register value, 0 to 31. The driver default
 #   of 15 suits the BTT Eddy coil family. For any other coil, including the
 #   crab board, determine the right value with
 #   LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration and store the
-#   printed value with SAVE_CONFIG.
+#   printed value with SAVE_CONFIG. Changing it invalidates every stored Z
+#   reference: run EDDY_CALIBRATE_Z again for each tool afterwards. A run
+#   that reads a reference taken at another drive current refuses to
+#   measure rather than report an offset the setting has moved.
 #coil_x:
 #coil_y:
 #   Required. Approximate machine X and Y of the coil center. A ruler

@@ -120,8 +120,9 @@ written by `EDDY_CALIBRATE_Z` as soon as a reference is measured.
 The state file holds one JSON object per anchored tool under an `"anchors"`
 key, keyed by decimal tool number as a string, alongside a top-level
 `"version"` field (currently 1). Each entry stores `anchor_height`,
-`anchor_frequency` and `setpoint_temperature`, the three fields an offset run
-reads, plus diagnostic record fields that are never fed back into a
+`anchor_frequency`, `setpoint_temperature`, `freq_conv` and `drive_current`,
+the five fields an offset run reads, plus diagnostic record fields that are
+never fed back into a
 measurement: `observed_temperature`, the reading the heater showed while the
 anchor was taken, and `trigger_z`, `curve_low_z`, `curve_high_z`, `center_x`,
 `center_y` and `updated`, which let a stale anchor be recognised later. The two
@@ -139,6 +140,33 @@ missing a field this build needs, is a config error naming the path and the
 command that rewrites the references from scratch. There is no migration
 path: every field an anchor record carries comes out of one measurement, so a
 record missing one cannot be completed without measuring again.
+
+`freq_conv` and `drive_current` are the sensor settings the anchor frequency
+was measured with: the driver's count-to-hertz conversion, which folds in both
+the CLKIN frequency and the divider the driver derives from it, and the
+LDC1612 drive current register value. A coil's frequency at a given height
+depends on both, so an anchor frequency describes a height only for the
+settings it was taken under. Every read of a stored anchor compares the two
+against what the driver reports now and refuses the anchor on any difference,
+naming the tool, both stored and current values, and `EDDY_CALIBRATE_Z T=<n>`.
+`EDDY_CALIBRATE_OFFSET` and `EDDY_REPEATABILITY` make that comparison before
+they move. Refusing rather than warning is deliberate: the alternative is a Z
+offset wrong by an unknown amount.
+
+The comparison is exact and carries no tolerance. Both are settings rather
+than measurements, the drive current an integer register value and `freq_conv`
+a quotient of an integer clock, so unchanged settings give back an identical
+number and any difference at all is a real change.
+
+What this catches: an `LDC_CALIBRATE_DRIVE_CURRENT` run followed by
+`SAVE_CONFIG`, which writes `reg_drive_current` straight back into this
+plugin's own config section; a hand-edited `frequency`; and a move to a board
+whose clock scales counts differently. What it cannot catch: a change that
+leaves the scale alone. The 12 MHz driver default is paired with a divider of
+2 and so yields the same conversion as a 24 MHz clock, and swapping to a
+different but identically configured coil changes no number either side of the
+comparison. Both stay covered by the standing advice to re-anchor after
+changing hardware.
 
 `coil_z` is the only vertical option in machine coordinates. `scan_height`,
 `z_start` and `z_stop` are heights above the coil top face, so the plugin adds

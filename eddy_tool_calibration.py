@@ -722,19 +722,49 @@ STATE_FILENAME = 'calibration_state.json'
 # The only document version this build reads or writes.
 STATE_VERSION = 1
 
-# The three fields an offset run reads: the anchor pair its descent is
-# evaluated against, and setpoint_temperature, the heater setpoint it has to
-# bring the nozzle back to before it measures. The rest of an anchor record is
-# diagnostic and is never fed back into a measurement:
-# observed_temperature is what the heater read while the anchor was taken,
-# which shows whether the tool did reach its setpoint, and the remaining
-# fields let a stale anchor be recognised after the coil or the switch moves.
+# The five fields an offset run reads: the anchor pair its descent is
+# evaluated against, setpoint_temperature, the heater setpoint it has to
+# bring the nozzle back to before it measures, and freq_conv and
+# drive_current, the sensor settings that pair is only meaningful for. The
+# rest of an anchor record is diagnostic and is never fed back into a
+# measurement: observed_temperature is what the heater read while the anchor
+# was taken, which shows whether the tool did reach its setpoint, and the
+# remaining fields let a stale anchor be recognised after the coil or the
+# switch moves.
 ANCHOR_NUMBER_FIELDS = (
     'anchor_height', 'anchor_frequency', 'setpoint_temperature',
+    'freq_conv', 'drive_current',
     'observed_temperature', 'trigger_z', 'curve_low_z', 'curve_high_z',
     'center_x', 'center_y',
 )
 ANCHOR_TEXT_FIELDS = ('updated',)
+
+
+def anchor_sensor_mismatch(tool, anchor, freq_conv, drive_current):
+    """Refusal text when an anchor's sensor settings are not the live ones.
+
+    A coil's frequency at a given height depends on how hard the coil is
+    driven and on the clock the count is scaled by, so an anchor frequency
+    describes a height only under the settings it was taken with. Returns
+    None when both match.
+    """
+    stored_conv = float(anchor['freq_conv'])
+    stored_current = float(anchor['drive_current'])
+    if (stored_conv == float(freq_conv)
+            and stored_current == float(drive_current)):
+        return None
+    return (
+        "The Z reference for T%d was measured with sensor settings that are "
+        "not the ones in use now, so the frequency it stores no longer "
+        "describes the same height.\n"
+        "frequency conversion when anchored: %s\n"
+        "frequency conversion now: %s\n"
+        "drive current when anchored: %s\n"
+        "drive current now: %s\n"
+        "Run EDDY_CALIBRATE_Z T=%d to measure the reference again with the "
+        "settings in use now."
+        % (int(tool), stored_conv, float(freq_conv), stored_current,
+           float(drive_current), int(tool)))
 
 
 def encode_state(anchors):
@@ -1927,16 +1957,11 @@ class EddyToolCalibration:
         motion_report = self.printer.lookup_object('motion_report', None)
         if motion_report is None:
             raise gcmd.error(
-                "Run this command after the printer has finished starting "
-                "up. The motion report is registered by the printer's "
-                "steppers, so it is missing only before startup completes or "
-                "when no steppers are configured.")
-        dump = motion_report.trapqs.get('toolhead')
-        if dump is None:
-            raise gcmd.error(
-                "The toolhead motion queue is not available yet. Run this "
-                "command after the printer has finished starting up.")
-        return dump
+                "Configure this printer's steppers before calibrating. The "
+                "motion queue is registered by the steppers, and this printer "
+                "has none, so a scan has nothing to read the position of each "
+                "sample from.")
+        return motion_report.trapqs['toolhead']
 
     def _requested_tools(self, gcmd, command):
         """The tools a command runs over, in the order it measures them.
@@ -2067,17 +2092,13 @@ class EddyToolCalibration:
                 "sensor buffer overflows: %d" % (stats['overflows'],))
 
     def _new_collection(self):
-        """Start counting the samples and faults of one collection.
+        """Zeroed sample and fault counters for one collection.
 
-        Both the LDC1612 error count and the bulk reader's overflow count are
-        cumulative for the life of the sensor, so a collection owns only the
-        difference between the counts at its end and at its start. The
-        baselines are read here, before the client is added, because the first
-        delivered batch already carries a batch period of counts.
+        The error and overflow counts come off the delivered batches:
+        ldc1612.py's _start_measurements zeroes both driver counters whenever
+        a client starts a stream, so neither is a lifetime count.
         """
         return {
-            'base_errors': self.sensor.last_error_count,
-            'base_overflows': self.sensor.ffreader.get_last_overflows(),
             'raw_count': 0,
             'dropped_low_freq': 0,
             'dropped_no_position': 0,
@@ -2086,12 +2107,11 @@ class EddyToolCalibration:
             'overflows': 0,
         }
 
-    def _close_collection(self, stats):
-        """Finish a collection, converting the cumulative counts to its own."""
-        stats['errors'] = self.sensor.last_error_count - stats['base_errors']
-        stats['overflows'] = (
-            self.sensor.ffreader.get_last_overflows() - stats['base_overflows'])
-        return stats
+    def _note_batch(self, stats, msg):
+        # ldc1612.py's _process_batch puts the totals since the stream started
+        # on every batch, so the highest value delivered is this collection's.
+        stats['errors'] = max(stats['errors'], msg['errors'])
+        stats['overflows'] = max(stats['overflows'], msg['overflows'])
 
     def _sample_drop_rows(self, stats):
         """Labeled diagnostic rows for the samples a collection discarded."""
@@ -2343,12 +2363,12 @@ class EddyToolCalibration:
         # Every setpoint is already set, so the tools approach them side by
         # side while these waits run one after another.
         for tool, name, heater, setpoint in resolved:
-            self._wait_for_band(tool, name, heater, setpoint)
+            self._wait_for_band(gcmd, tool, name, heater, setpoint)
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.dwell(self.calibration_settle_time)
         toolhead.wait_moves()
 
-    def _wait_for_band(self, tool, name, heater, setpoint):
+    def _wait_for_band(self, gcmd, tool, name, heater, setpoint):
         """Wait until one nozzle reads inside the band around its setpoint.
 
         The polling is printer.wait_while, the same primitive Kalico's own
@@ -2357,6 +2377,8 @@ class EddyToolCalibration:
         never approaches its setpoint is not this plugin's to diagnose: every
         heater is supervised by Kalico's verify_heater, which shuts the printer
         down when one stops approaching, and that shutdown ends this wait.
+        Each poll emits the M105 line heaters.py's cmd_TEMPERATURE_WAIT emits,
+        which front ends read to follow a wait that blocks for minutes.
         """
         # A batch run replays a gcode file against no hardware, so its heaters
         # never move and any wait on a reading would never return. Kalico's own
@@ -2367,11 +2389,15 @@ class EddyToolCalibration:
                 "because this is a batch run with no hardware behind the "
                 "heater %s", tool, setpoint, name)
             return
+        pheaters = self.printer.lookup_object('heaters')
 
         def waiting(eventtime):
             current, _target = heater.get_temp(eventtime)
-            return not temperature_in_band(
-                current, setpoint, self.calibration_temp_band)
+            if temperature_in_band(
+                    current, setpoint, self.calibration_temp_band):
+                return False
+            gcmd.respond_raw(pheaters._get_temp(eventtime))
+            return True
 
         self.printer.wait_while(waiting)
 
@@ -2380,34 +2406,20 @@ class EddyToolCalibration:
     def _step_distances(self):
         """How far one microstep moves each X and Y stepper, in mm.
 
-        Read off the kinematics rather than worked out from the config, so the
-        figure is the one the machine itself steps by. Returns a list of
-        (stepper section name, millimetres per step). A machine whose steppers
-        cannot be read returns an empty list, which leaves the rows out of the
+        Returns a list of (stepper section name, millimetres per step).
+        Kinematics that drive no stepper_x or stepper_y at all, delta, polar
+        and winch among them, report none, which leaves the rows out of the
         readout: the figure is a comparison aid beside a measurement, and
-        losing it must not cost the measurement. Every path that produces no
-        rows logs its reason, so it stays visible in klippy.log.
+        losing it must not cost the measurement.
         """
-        toolhead = self.printer.lookup_object('toolhead', None)
-        if toolhead is None:
-            logging.info(
-                "eddy_tool_calibration: the toolhead is not available, so the "
-                "stepper microstep distance rows are left out")
-            return []
+        toolhead = self.printer.lookup_object('toolhead')
         distances = []
-        try:
-            for stepper in toolhead.get_kinematics().get_steppers():
-                name = stepper.get_name()
-                if not name.startswith('stepper_x') and \
-                        not name.startswith('stepper_y'):
-                    continue
-                distances.append((name, stepper.get_step_dist()))
-        except Exception:
-            logging.exception(
-                "eddy_tool_calibration: could not read the steppers from the "
-                "kinematics, so the stepper microstep distance rows are left "
-                "out")
-            return []
+        for stepper in toolhead.get_kinematics().get_steppers():
+            name = stepper.get_name()
+            if not name.startswith('stepper_x') and \
+                    not name.startswith('stepper_y'):
+                continue
+            distances.append((name, stepper.get_step_dist()))
         if not distances:
             logging.info(
                 "eddy_tool_calibration: the kinematics report no stepper_x or "
@@ -2417,7 +2429,7 @@ class EddyToolCalibration:
 
     # -- contact switch probing -------------------------------------------
 
-    def _kin_z_limits(self, gcmd):
+    def _kin_z_limits(self):
         """The kinematic Z travel limits, as (minimum, maximum).
 
         The single place the plugin reads the machine's vertical limits, so
@@ -2426,16 +2438,11 @@ class EddyToolCalibration:
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
         kin_status = toolhead.get_kinematics().get_status(curtime)
-        if ('axis_minimum' not in kin_status
-                or 'axis_maximum' not in kin_status):
-            raise gcmd.error(
-                "Switch probing works with cartesian kinematics only. The "
-                "configured kinematics report no axis limits.")
         return kin_status['axis_minimum'][2], kin_status['axis_maximum'][2]
 
     def _require_switch_z_range(self, gcmd):
         """Refuse to travel to the switch when the heights are out of range."""
-        minimum_z, maximum_z = self._kin_z_limits(gcmd)
+        minimum_z, maximum_z = self._kin_z_limits()
         travel_z = self.switch_probe_z_start + self.scan_safe_z
         if self.switch_probe_z_start < minimum_z:
             raise gcmd.error(
@@ -2467,35 +2474,19 @@ class EddyToolCalibration:
                 "nozzle presses it at, and the machine Z the press starts "
                 "from." % (", ".join(missing), self.name))
 
-    def _query_switch(self, gcmd):
-        """Refuse to move when the switch already reads triggered.
-
-        A switch that is closed before the nozzle touches it is a fault, so it
-        is reported rather than pressed again: a retry would turn a stuck
-        switch, an inverted pin, or a start height below the trigger point
-        into a silent second attempt.
-        """
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.wait_moves()
-        if self.switch_endstop.query_endstop(toolhead.get_last_move_time()):
-            raise gcmd.error(
-                "The contact switch already reads triggered before the "
-                "nozzle moved. Check that the switch is not stuck closed, "
-                "that switch_pin has the right inverting prefix, and that "
-                "switch_probe_z_start sits above the trigger point.")
-
-    def _probe_switch_once(self, gcmd):
+    def _probe_switch_once(self, gcmd, press):
         """One downward probing move onto the switch, returning its trigger Z.
 
         Ported from tools_calibrate's PrinterProbeMultiAxis: the target is the
         current position lowered by the travel allowance and clamped to the
         kinematic Z minimum, and the move itself is the homing module's
         probing_move, which returns the position computed from step counts at
-        trigger time.
+        trigger time. press is the 1-based position of this press in the
+        sequence.
         """
         phoming = self.printer.lookup_object('homing')
         toolhead = self.printer.lookup_object('toolhead')
-        minimum_z, _maximum_z = self._kin_z_limits(gcmd)
+        minimum_z, _maximum_z = self._kin_z_limits()
         pos = toolhead.get_position()
         target = list(pos)
         requested_z = pos[2] - self.switch_probe_max_travel
@@ -2507,12 +2498,19 @@ class EddyToolCalibration:
         except self.printer.command_error as e:
             reason = str(e)
             if "Probe triggered prior to movement" in reason:
+                if press == 1:
+                    raise gcmd.error(
+                        "The contact switch already read triggered before the "
+                        "first press moved the nozzle. Check that the switch "
+                        "is not stuck closed, that switch_pin has the right "
+                        "inverting prefix, and that switch_probe_z_start sits "
+                        "above the trigger point.")
                 raise gcmd.error(
-                    "The contact switch already read triggered at the start "
-                    "of a press. Check that the switch is not stuck closed, "
+                    "The contact switch still read triggered at the start of "
+                    "press %d. Check that the switch is not stuck closed, "
                     "that switch_pin has the right inverting prefix, and that "
                     "switch_probe_sample_retract_dist lifts the nozzle clear "
-                    "of the trigger point between presses.")
+                    "of the trigger point between presses." % (press,))
             if "No trigger on probe after full movement" in reason:
                 if clamped:
                     raise gcmd.error(
@@ -2552,10 +2550,10 @@ class EddyToolCalibration:
         left standing on the switch while the presses are aggregated.
         """
         toolhead = self.printer.lookup_object('toolhead')
-        _minimum_z, maximum_z = self._kin_z_limits(gcmd)
+        _minimum_z, maximum_z = self._kin_z_limits()
         heights = []
         for press in range(SWITCH_PRESS_COUNT):
-            trigger_z = self._probe_switch_once(gcmd)
+            trigger_z = self._probe_switch_once(gcmd, press + 1)
             heights.append(trigger_z)
             if debug:
                 gcmd.respond_info(
@@ -2598,6 +2596,7 @@ class EddyToolCalibration:
                 return False
             if not msg:
                 return True
+            self._note_batch(stats, msg)
             for print_time, freq, dummy_z in msg['data']:
                 stats['raw_count'] += 1
                 if freq < self.freq_min:
@@ -2612,7 +2611,7 @@ class EddyToolCalibration:
             reactor.pause(reactor.monotonic() + duration)
         finally:
             state['running'] = False
-        return freqs, self._close_collection(stats)
+        return freqs, stats
 
     def _collect_scan(self, gcmd, start_x, start_y, end_x, end_y, scan_z):
         """Run one directional scan pass and return its mapped samples.
@@ -2651,6 +2650,7 @@ class EddyToolCalibration:
                 return False
             if not msg:
                 return True
+            self._note_batch(stats, msg)
             for print_time, freq, dummy_z in msg['data']:
                 stats['raw_count'] += 1
                 if freq < self.freq_min:
@@ -2687,7 +2687,7 @@ class EddyToolCalibration:
                 stats['dropped_no_position'] += 1
                 continue
             samples.append((print_time, freq, pos[0], pos[1]))
-        return samples, self._close_collection(stats)
+        return samples, stats
 
     def _scan_pass(self, gcmd, center_x, center_y, angle_deg, length, scan_z,
                    label, debug):
@@ -2892,6 +2892,7 @@ class EddyToolCalibration:
                 return False
             if not msg:
                 return True
+            self._note_batch(stats, msg)
             msgs.append(msg)
             return True
 
@@ -2927,7 +2928,6 @@ class EddyToolCalibration:
         self._move(center_x, center_y,
                    self._machine_z(self.z_start + Z_APPROACH_HOP),
                    self.z_speed)
-        self._close_collection(stats)
         self._report_sensor_health(gcmd, stats)
         buckets = {}
         step = 0
@@ -3055,7 +3055,6 @@ class EddyToolCalibration:
             with self._phase(gcmd, tool, 'toolchange', sweeping):
                 self._mount_tool(gcmd, tool)
             with self._phase(gcmd, tool, 'switch probing', sweeping):
-                self._query_switch(gcmd)
                 self._move(
                     self.switch_x, self.switch_y, travel_z, self.z_speed)
                 self._move(self.switch_x, self.switch_y,
@@ -3080,6 +3079,8 @@ class EddyToolCalibration:
             'anchor_height': anchor_height,
             'anchor_frequency': anchor_freq,
             'setpoint_temperature': self.calibration_temp,
+            'freq_conv': self.sensor.freq_conv,
+            'drive_current': self.sensor.dccal.get_drive_current(),
             'observed_temperature': observed,
             'trigger_z': trigger_z,
             'curve_low_z': curve[0][0],
@@ -3121,6 +3122,9 @@ class EddyToolCalibration:
         rows.extend([
             "anchor height above trigger plane: %.4f mm" % (anchor_height,),
             "anchor frequency: %.3f Hz" % (anchor_freq,),
+            "sensor frequency conversion: %s Hz per count"
+            % (record['freq_conv'],),
+            "sensor drive current: %d" % (record['drive_current'],),
             "nozzle temperature setpoint: %.1f C"
             % (record['setpoint_temperature'],),
             "nozzle temperature observed: %.1f C"
@@ -3198,7 +3202,7 @@ class EddyToolCalibration:
             with self._phase(gcmd, tool, 'measurement', sweeping):
                 result = self._run_tool_measurement(
                     gcmd, tool, debug, self.calibrate_z,
-                    self._anchored_setpoint(tool))
+                    self._anchored_setpoint(gcmd, tool))
             if is_baseline_run:
                 # A fresh T0 run always replaces the session baseline, so the
                 # comparison never mixes results from two different setups.
@@ -3250,7 +3254,7 @@ class EddyToolCalibration:
         """
         targets = []
         for tool in tools:
-            setpoint = self.anchors[tool]['setpoint_temperature']
+            setpoint = self._anchor(gcmd, tool)['setpoint_temperature']
             warning = temperature_warning(
                 tool, setpoint, self.calibration_temp)
             if warning is not None:
@@ -3260,7 +3264,7 @@ class EddyToolCalibration:
             gcmd, targets,
             'the setpoint EDDY_CALIBRATE_Z recorded for that tool')
 
-    def _anchored_setpoint(self, tool):
+    def _anchored_setpoint(self, gcmd, tool):
         """The setpoint an offset run holds one tool at, or None for no heating.
 
         With calibrate_z False nothing is heated at all, so the measurement
@@ -3268,19 +3272,30 @@ class EddyToolCalibration:
         """
         if not self.calibrate_z:
             return None
-        return self.anchors[tool]['setpoint_temperature']
+        return self._anchor(gcmd, tool)['setpoint_temperature']
+
+    def _anchor(self, gcmd, tool):
+        """One tool's stored anchor, refused when the sensor settings moved."""
+        anchor = self.anchors[tool]
+        mismatch = anchor_sensor_mismatch(
+            tool, anchor, self.sensor.freq_conv,
+            self.sensor.dccal.get_drive_current())
+        if mismatch is not None:
+            raise gcmd.error(mismatch)
+        return anchor
 
     def _require_anchors(self, gcmd, tools):
-        """Refuse to measure Z for a tool that has no stored anchor."""
+        """Refuse to measure Z against an anchor that is missing or stale."""
         missing = sorted(set(t for t in tools if t not in self.anchors))
-        if not missing:
-            return
-        raise gcmd.error(
-            "Run %s first, mounting each of those tools in turn. The Z "
-            "reference for %s is missing, and calibrate_z is True, so a Z "
-            "offset cannot be measured without it."
-            % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in missing),
-               ", ".join("T%d" % (t,) for t in missing)))
+        if missing:
+            raise gcmd.error(
+                "Run %s first, mounting each of those tools in turn. The Z "
+                "reference for %s is missing, and calibrate_z is True, so a Z "
+                "offset cannot be measured without it."
+                % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in missing),
+                   ", ".join("T%d" % (t,) for t in missing)))
+        for tool in sorted(set(tools)):
+            self._anchor(gcmd, tool)
 
     def _measurement_observed_temperature(self, gcmd, tool, include_z):
         """The nozzle reading one measurement is recorded against.
@@ -3349,7 +3364,7 @@ class EddyToolCalibration:
         curve becomes a comparable height, so the printed rows, the reported
         offsets and the status readout all read the same number.
         """
-        anchor = self.anchors[tool]
+        anchor = self._anchor(gcmd, tool)
         try:
             return trigger_plane_from_anchor(
                 curve, anchor['anchor_height'], anchor['anchor_frequency'])
@@ -3370,11 +3385,11 @@ class EddyToolCalibration:
             % (curve[-1][1], curve[0][1]),
         ]
 
-    def _z_rows(self, tool, result):
+    def _z_rows(self, gcmd, tool, result):
         """Every Z row for one tool: curve, anchor, crossing, trigger plane."""
         if not self.calibrate_z:
             return []
-        anchor = self.anchors[tool]
+        anchor = self._anchor(gcmd, tool)
         rows = self._z_curve_rows(result['z_curve'])
         rows.extend([
             "anchor frequency: %.3f Hz" % (anchor['anchor_frequency'],),
@@ -3416,7 +3431,7 @@ class EddyToolCalibration:
             "center x: %.4f" % (result['x'],),
             "center y: %.4f" % (result['y'],),
         ]
-        rows.extend(self._z_rows(tool, result))
+        rows.extend(self._z_rows(gcmd, tool, result))
         if is_baseline_run:
             rows.append("offsets: baseline tool, zero by definition")
         else:
@@ -3504,7 +3519,7 @@ class EddyToolCalibration:
         does not use.
         """
         if heating == 'to_anchor_temperature':
-            return self.anchors[tool]['setpoint_temperature']
+            return self._anchor(gcmd, tool)['setpoint_temperature']
         if heating in ('no_anchor', 'z_calibration_off'):
             return None
         raise gcmd.error(
