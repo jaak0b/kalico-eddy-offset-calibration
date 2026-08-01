@@ -112,15 +112,22 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
    number.
 
 10. **Extend the concept's existing home; never bolt a duplicate beside a symptom.** Before
-    adding or fixing logic, find the module that already owns the concept (search for the
-    concept, not just the symptom site) and extend it. Never compute a value the codebase
-    already derives elsewhere: if a figure is produced in two places, unify on the single
-    source. Reuse Kalico's own machinery (ldc1612 driver, motion_report, EddyCalibration
-    patterns) instead of reimplementing it. Any non-trivial or cross-cutting change gets a short
-    written design first (its canonical home, what it extends, what it must not duplicate) for
-    owner approval before implementation. Interim ("quick fix now, proper fix later") solutions
-    are forbidden in all cases: the correct structure is built immediately, even when it costs a
-    schema change or a larger diff.
+    adding a function, a predicate, a record, a readout row or a derived value, search the file
+    for every identifier the new code touches (attribute names, dict keys, constants, format
+    strings), read every hit, and extend what they show; if the concept has no home, create
+    exactly one. Specifically: never restate the members of a closed set as a literal at a use
+    site, never recompute a value the caller already holds, and never answer inline a question
+    an existing predicate already answers. Read the set, take the argument, call the predicate.
+    When the search finds a twin, unify it in the same change: that is in scope by definition,
+    and twins that disagree are a bug fix, not a cleanup to schedule. Reuse Kalico's own
+    machinery (ldc1612 driver, motion_report, EddyCalibration patterns) instead of
+    reimplementing it. Any non-trivial or cross-cutting change gets a short written design first
+    (its canonical home, what it extends, what it must not duplicate) for owner approval before
+    implementation; a delegating prompt names the home the task must extend whenever one exists.
+    Interim ("quick fix now, proper fix later") solutions are forbidden in all cases: the
+    correct structure is built immediately, even when it costs a schema change or a larger diff.
+    The task reports each definition, record and readout row it added, with the symbol it
+    extended or the searches that returned nothing.
 
 11. **Subagent discipline.** Give every subagent a correct, specific title; never run more than
     1 Fable agent at a time (hard budget limit). Sonnet is fine for parallel design/research
