@@ -162,32 +162,19 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     documented hardware). A wrong-looking example number presented as a default teaches users
     to keep it.
 
-15. **A comment states what the code cannot; three categories only, and a budget.** A new
-    comment or docstring line is allowed ONLY if it is one of: (a) provenance, citing the source
-    file and line of a ported algorithm or a depended-on Kalico behaviour; (b) a physical or API
-    constraint unreadable from the code (hardware behaviour, a measurement assumption, a
-    deliberate deviation and why); (c) the reason an "unhandled" branch exists. Everything else
-    is forbidden, specifically: restating what the next line or block does, arguing that a
-    change is an improvement, narrating what was deleted or added, describing the shape of a
-    fix, and docstrings that paraphrase the function name or signature. Code needing a paragraph
-    to follow gets rewritten, not annotated.
-
-    **Enforcement, because the principle alone does not hold.** Every comment must be able to
-    name which of the three categories justifies it, and a provenance comment must cite the file
-    and line it rests on. A comment whose category cannot be named is deleted, no judgement call
-    and no argument from usefulness. That requirement is what limits volume: a change contains
-    only so many genuine citations, constraints and unhandled branches, so no quota is needed and
-    none is set, since a quota would only invite filling it. Deleting comments that fail the
-    categories is always free. When reviewing, a comment that cannot name its category is a
-    finding like any other.
-
-    **This binds the instructions too, not only the code.** Rationale in a task's instructions
-    is for whoever does the work; copied into the file it becomes exactly the narration this
-    rule forbids, and an instruction not to narrate loses to three paragraphs of narration
-    surrounding it. So: put the reasoning a task needs in a section marked as context that must
-    not reach the code, keep the instruction itself imperative, and make the count of added
-    comment lines part of what the task reports back, so an over-explained result is visible
-    without reading the diff.
+15. **A comment states what the code cannot.** A new comment or docstring line is allowed only
+    as: (a) provenance, citing the source file and line of a ported algorithm or a depended-on
+    Kalico behaviour; (b) a physical or API constraint unreadable from the code (hardware
+    behaviour, a measurement assumption, a deliberate deviation and why); (c) the reason an
+    "unhandled" branch exists. Everything else is forbidden, specifically: restating what the
+    next line or block does, arguing that a change is an improvement, narrating what was deleted
+    or added, describing the shape of a fix, and docstrings that paraphrase the function name or
+    signature. Code needing a paragraph to follow gets rewritten, not annotated. Every comment
+    must be able to name its category, a provenance comment cites its file and line, and a
+    comment that cannot name its category is deleted, no argument from usefulness. This binds
+    task instructions too: a task's rationale belongs in a section marked as context, not
+    instruction; the instruction itself stays imperative; and the task reports how many comment
+    lines it added, so an over-explained result is visible without reading the diff.
 
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
