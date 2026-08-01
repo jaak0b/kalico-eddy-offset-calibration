@@ -182,7 +182,8 @@ def _anchor_record():
     return {
         'anchor_height': 4.2130,
         'anchor_frequency': 12345678.0,
-        'temperature': 149.8,
+        'setpoint_temperature': 150.0,
+        'observed_temperature': 149.7,
         'trigger_z': 1.2340,
         'curve_low_z': 0.5,
         'curve_high_z': 5.0,
@@ -230,22 +231,36 @@ def test_an_unknown_field_inside_an_anchor_is_ignored():
     assert decoded == {0: _anchor_record()}
 
 
-def test_the_round_trip_keeps_the_temperature_the_anchor_was_measured_at():
-    # Arrange: an anchor measured with the nozzle at 149.8 C, the value a
-    # later offset run has to heat that tool back to.
+def test_the_round_trip_keeps_the_setpoint_the_anchor_was_heated_to():
+    # Arrange: an anchor taken with calibration_temp at 150.0 C, the setpoint
+    # a later offset run has to hold that tool at.
     anchors = {1: _anchor_record()}
 
     # Act
     decoded = etc.decode_state(etc.encode_state(anchors))
 
     # Assert
-    assert decoded[1]['temperature'] == pytest.approx(149.8, abs=1e-9)
+    assert decoded[1]['setpoint_temperature'] == pytest.approx(150.0, abs=1e-9)
+
+
+def test_the_round_trip_keeps_the_reading_observed_while_anchoring():
+    # Arrange: the heater read 149.7 C while holding that 150.0 C setpoint,
+    # and the two are separate fields rather than one.
+    anchors = {1: _anchor_record()}
+
+    # Act
+    decoded = etc.decode_state(etc.encode_state(anchors))
+
+    # Assert
+    assert decoded[1]['observed_temperature'] == pytest.approx(
+        149.7, abs=1e-9)
 
 
 def test_a_missing_anchor_field_is_rejected():
     # Arrange: a record with no anchor frequency, which the offset math reads.
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
-            '"temperature": 150.0, "trigger_z": 1.0, "curve_low_z": 0.5, '
+            '"setpoint_temperature": 150.0, "observed_temperature": 149.7, '
+            '"trigger_z": 1.0, "curve_low_z": 0.5, '
             '"curve_high_z": 5.0, "center_x": 1.0, "center_y": 2.0, '
             '"updated": "x"}}}')
 
@@ -253,23 +268,37 @@ def test_a_missing_anchor_field_is_rejected():
         etc.decode_state(text)
 
 
-def test_an_anchor_without_a_temperature_is_rejected():
-    # Arrange: a complete record apart from the temperature, which is what a
-    # state file written before temperatures were recorded looks like.
+def test_an_anchor_without_a_setpoint_is_rejected():
+    # Arrange: what a state file written by a build that recorded one
+    # temperature looks like. The reading it carries is a sample of the
+    # heater's wander, so it cannot stand in for the setpoint a later run
+    # heats to, and the record is refused instead of reinterpreted.
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
-            '"anchor_frequency": 12345678.0, "trigger_z": 1.0, '
+            '"anchor_frequency": 12345678.0, "temperature": 149.7, '
+            '"observed_temperature": 149.7, "trigger_z": 1.0, '
             '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
             '"center_y": 2.0, "updated": "x"}}}')
 
-    with pytest.raises(ValueError, match="missing the temperature"):
+    with pytest.raises(ValueError, match="missing the setpoint_temperature"):
         etc.decode_state(text)
 
 
-def test_an_anchor_temperature_that_is_not_a_number_is_rejected():
+def test_an_anchor_without_the_reading_observed_at_anchor_time_is_rejected():
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
-            '"anchor_frequency": 12345678.0, "temperature": "hot", '
+            '"anchor_frequency": 12345678.0, "setpoint_temperature": 150.0, '
             '"trigger_z": 1.0, "curve_low_z": 0.5, "curve_high_z": 5.0, '
             '"center_x": 1.0, "center_y": 2.0, "updated": "x"}}}')
+
+    with pytest.raises(ValueError, match="missing the observed_temperature"):
+        etc.decode_state(text)
+
+
+def test_an_anchor_setpoint_that_is_not_a_number_is_rejected():
+    text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
+            '"anchor_frequency": 12345678.0, "setpoint_temperature": "hot", '
+            '"observed_temperature": 149.7, "trigger_z": 1.0, '
+            '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
+            '"center_y": 2.0, "updated": "x"}}}')
 
     with pytest.raises(ValueError, match="not a number"):
         etc.decode_state(text)

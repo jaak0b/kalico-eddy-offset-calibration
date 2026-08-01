@@ -301,7 +301,7 @@ def test_the_plan_names_the_docking_tool_and_the_measurement_count():
     ]
 
 
-def test_the_plan_names_the_anchor_temperature_when_the_tool_has_one():
+def test_the_plan_names_the_anchor_setpoint_when_the_tool_has_one():
     rows = etc.study_plan_rows(
         0, 5, 1, True, 'no_other_tool', None, 'to_anchor_temperature', 150.0)
 
@@ -312,7 +312,7 @@ def test_the_plan_names_the_anchor_temperature_when_the_tool_has_one():
         "cycles: 1",
         "measurements: 5",
         "z descent: included",
-        "nozzle heating: held at 150.0 C, the temperature the tool's Z "
+        "nozzle heating: held at 150.0 C, the setpoint the tool's Z "
         "reference was measured at",
         "docking between cycles: not exercised, tool_count names no second "
         "tool to dock through",
@@ -350,7 +350,7 @@ def test_an_unhandled_docking_state_is_rejected():
 # --- heating before a study ------------------------------------------------
 
 
-def test_a_tool_with_a_stored_reference_is_heated_to_its_own_temperature():
+def test_a_tool_with_a_stored_reference_is_heated_to_its_own_setpoint():
     assert etc.study_heating(True, True) == 'to_anchor_temperature'
 
 
@@ -440,14 +440,15 @@ def test_steppers_that_could_not_be_read_produce_no_rows():
 def test_the_drift_log_header_lists_every_column_in_file_order():
     assert etc.csv_header(etc.HISTORY_COLUMNS) == (
         "timestamp,command,center_x,center_y,offset_x,offset_y,z_crossing,"
-        "trigger_z,offset_z,baseline_session,temperature,samples_used\n")
+        "trigger_z,offset_z,baseline_session,setpoint_temperature,"
+        "observed_temperature,samples_used\n")
 
 
 def test_a_study_file_carries_the_cycle_and_run_in_front_of_the_measurement():
     assert etc.csv_header(etc.STUDY_COLUMNS) == (
         "cycle,run,timestamp,command,center_x,center_y,offset_x,offset_y,"
-        "z_crossing,trigger_z,offset_z,baseline_session,temperature,"
-        "samples_used\n")
+        "z_crossing,trigger_z,offset_z,baseline_session,setpoint_temperature,"
+        "observed_temperature,samples_used\n")
 
 
 def test_a_log_row_writes_each_value_at_the_precision_it_is_reported_at():
@@ -462,13 +463,14 @@ def test_a_log_row_writes_each_value_at_the_precision_it_is_reported_at():
         'trigger_z': 2.34567,
         'offset_z': 0.01567,
         'baseline_session': 3,
-        'temperature': 150.04,
+        'setpoint_temperature': 150.0,
+        'observed_temperature': 151.84,
         'samples_used': 6916,
     })
 
     assert row == (
         "2026-08-01T12:00:00Z,EDDY_CALIBRATE_OFFSET,99.0577,-40.5779,0.0224,"
-        "-0.2598,1.2346,2.3457,0.0157,3,150.0,6916\n")
+        "-0.2598,1.2346,2.3457,0.0157,3,150.0,151.8,6916\n")
 
 
 def test_a_value_that_was_not_measured_is_written_as_an_empty_field():
@@ -483,17 +485,43 @@ def test_a_value_that_was_not_measured_is_written_as_an_empty_field():
         'trigger_z': None,
         'offset_z': None,
         'baseline_session': None,
-        'temperature': None,
+        'setpoint_temperature': None,
+        'observed_temperature': None,
         'samples_used': 3458,
     })
 
     assert row == (
-        "2026-08-01T12:00:00Z,EDDY_REPEATABILITY,99.0577,-40.5779,,,,,,,,"
+        "2026-08-01T12:00:00Z,EDDY_REPEATABILITY,99.0577,-40.5779,,,,,,,,,"
+        "3458\n")
+
+
+def test_a_study_of_an_unheated_tool_still_records_the_reading_it_measured():
+    # A study without a stored reference heats nothing, so the row carries no
+    # setpoint and the reading it did take stands on its own.
+    row = etc.csv_row(etc.HISTORY_COLUMNS, {
+        'timestamp': '2026-08-01T12:00:00Z',
+        'command': 'EDDY_REPEATABILITY',
+        'center_x': 99.0577,
+        'center_y': -40.5779,
+        'offset_x': None,
+        'offset_y': None,
+        'z_crossing': None,
+        'trigger_z': None,
+        'offset_z': None,
+        'baseline_session': None,
+        'setpoint_temperature': None,
+        'observed_temperature': 24.6,
+        'samples_used': 3458,
+    })
+
+    assert row == (
+        "2026-08-01T12:00:00Z,EDDY_REPEATABILITY,99.0577,-40.5779,,,,,,,,24.6,"
         "3458\n")
 
 
 def test_a_log_row_missing_a_column_is_rejected():
-    with pytest.raises(ValueError, match="missing the temperature field"):
+    with pytest.raises(
+            ValueError, match="missing the setpoint_temperature field"):
         etc.csv_row(etc.HISTORY_COLUMNS, {
             'timestamp': '2026-08-01T12:00:00Z',
             'command': 'EDDY_CALIBRATE_Z',
@@ -505,6 +533,7 @@ def test_a_log_row_missing_a_column_is_rejected():
             'trigger_z': 3.0,
             'offset_z': None,
             'baseline_session': None,
+            'observed_temperature': 149.7,
             'samples_used': 10,
         })
 

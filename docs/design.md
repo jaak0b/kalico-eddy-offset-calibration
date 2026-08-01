@@ -71,8 +71,9 @@ freq_min: 1000000.0             # Hz; samples below this are discarded as noise
 # --- Z offsets ---
 calibrate_z: False              # run the Z descent and report Z offsets
 # --- nozzle temperature ---
-calibration_temp: 150.0         # C every calibration measurement is taken at
-calibration_settle_time: 30.0   # s dwell after the target is reached
+calibration_temp: 150.0         # C setpoint every calibration measurement is taken at
+calibration_temp_band: 2.0      # C either side of the setpoint that ends the wait
+calibration_settle_time: 30.0   # s dwell after the band is reached
 tool_extruders:                 # heater section names by tool number; default
                                 # is extruder, extruder1, extruder2, ...
 # --- contact switch: these four are required when calibrate_z is True ---
@@ -119,10 +120,16 @@ written by `EDDY_CALIBRATE_Z` as soon as a reference is measured.
 The state file holds one JSON object per anchored tool under an `"anchors"`
 key, keyed by decimal tool number as a string, alongside a top-level
 `"version"` field (currently 1). Each entry stores `anchor_height`,
-`anchor_frequency` and `temperature`, the three fields an offset run reads,
-plus diagnostic record fields (`trigger_z`, `curve_low_z`, `curve_high_z`,
-`center_x`, `center_y`, `updated`) that let a stale anchor be recognised
-later but are never fed back into a measurement. Writes serialise to a
+`anchor_frequency` and `setpoint_temperature`, the three fields an offset run
+reads, plus diagnostic record fields that are never fed back into a
+measurement: `observed_temperature`, the reading the heater showed while the
+anchor was taken, and `trigger_z`, `curve_low_z`, `curve_high_z`, `center_x`,
+`center_y` and `updated`, which let a stale anchor be recognised later. The two
+temperature fields are deliberately separate. `setpoint_temperature` is the
+`calibration_temp` the anchor run heated to and is the only one that controls
+anything; `observed_temperature` is a sample of the wander a hotend shows
+around its setpoint, kept because it tells the owner whether the tool actually
+reached that setpoint. Writes serialise to a
 temporary file and `os.replace` it over the target, so an interrupted write
 cannot leave a truncated state file; a fleet run rewrites the file after each
 tool, so an abort partway through keeps the anchors already measured. A
@@ -210,7 +217,11 @@ Both are refused at load if they name the state file's own directory, and
   `EDDY_CALIBRATE_OFFSET`, `EDDY_CALIBRATE_Z` and `EDDY_REPEATABILITY` alike.
   Columns: `timestamp`, `command`, `center_x`, `center_y`, `offset_x`,
   `offset_y`, `z_crossing`, `trigger_z`, `offset_z`, `baseline_session`,
-  `temperature`, `samples_used`. This is the drift log, the record a claim
+  `setpoint_temperature`, `observed_temperature`, `samples_used`. The two
+  temperature columns are the setpoint the run was held at, empty for a run
+  that heated nothing, and the reading taken while it measured, so a row
+  carries both the thermal state that was asked for and the one the tool was
+  in. This is the drift log, the record a claim
   about drift over time rests on. `timestamp` is UTC in
   `YYYY-MM-DDTHH:MM:SSZ`, so a daylight saving rollback cannot reorder the
   file. `baseline_session` names the session whose baseline measurement the
@@ -243,25 +254,47 @@ machine never received.
 ## Nozzle temperature
 
 How the frequency reads against height depends on how hot the nozzle is, so a
-Z reference is only valid for a measurement taken at the temperature the
-reference was measured at. The plugin holds that temperature itself rather
-than trusting the machine to be in the right state:
+Z reference is only valid for a measurement taken in the thermal state the
+reference was measured in. The reproducible name for that state is the heater
+setpoint, not a reading: a hotend under PID control wanders around its
+setpoint, so a reading taken at any one moment is a sample of that wander and
+aiming a later run at it would chase a value the controller never targets. The
+plugin holds the setpoint itself rather than trusting the machine to be in the
+right state:
 
-- `EDDY_CALIBRATE_Z` heats to `calibration_temp`, waits for the target, dwells
-  `calibration_settle_time`, measures, and records into the anchor what the
-  heater actually read rather than the target it was given.
-- `EDDY_CALIBRATE_OFFSET` reads each tool's recorded temperature out of the
-  state file and heats that tool back to it. It never measures at
-  `calibration_temp`, so an offset run reproduces the thermal state of the
-  anchor it evaluates against by construction.
-- A tool whose recorded temperature differs from `calibration_temp` by more
-  than 1 C is reported as a console warning naming both values. The run still
-  measures at the recorded temperature: the anchor frequency says nothing
-  about any other one. Re-running `EDDY_CALIBRATE_Z` is what moves a tool to a
-  new temperature.
-- `calibration_settle_time` exists because the heater block reaches its target
-  well before the nozzle tip does. Both commands dwell the same time after the
-  target is reached, so both measure the same thermal state.
+- `EDDY_CALIBRATE_Z` heats to `calibration_temp`, waits for the band, dwells
+  `calibration_settle_time`, measures, and records that setpoint into the
+  anchor as `setpoint_temperature`. The reading at that moment goes into
+  `observed_temperature` beside it, printed as its own row and written to the
+  drift log, because a tool that never reached its setpoint is visible there
+  and nowhere else.
+- `EDDY_CALIBRATE_OFFSET` reads each tool's recorded setpoint out of the state
+  file and heats that tool back to it, so an offset run reproduces the setpoint
+  its reference was taken at by construction. Its readout prints the anchor's
+  setpoint, the anchor's observed reading and the reading of this run, so a
+  descent taken in the wrong thermal state is visible in the rows rather than
+  only in the offset it moved.
+- A tool whose recorded setpoint differs from `calibration_temp` at all is
+  reported as a console warning naming both values. Both are setpoints, so they
+  differ only when the option was changed after the tool was anchored, and no
+  margin absorbs that. The run still heats to the recorded setpoint: the anchor
+  frequency says nothing about any other one. Re-running `EDDY_CALIBRATE_Z` is
+  what moves a tool to a new setpoint.
+- A preheat waits until each nozzle reads within `calibration_temp_band` of its
+  setpoint, in either direction, and not until its controller has settled.
+  Kalico's own heater wait is a settle test (near the target and nearly flat),
+  which a hotend drifting around its setpoint can take minutes to satisfy,
+  above all when it has to cool passively into a tight band. A tool already
+  within a degree or two is in the thermal state the measurement needs. The
+  wait polls `printer.wait_while`, the primitive Kalico's own heater wait uses,
+  so a shutdown or a gcode interrupt ends it. It carries no deadline of its
+  own: `verify_heater` already supervises every heater and shuts the printer
+  down when one stops approaching its target, and that shutdown ends the wait,
+  so a second deadline here would only race the machinery that owns the
+  diagnosis.
+- `calibration_settle_time` exists because the heater block reaches its
+  setpoint well before the nozzle tip does. Both commands dwell the same time
+  after the band is reached, so both measure the same thermal state.
 - With `calibrate_z: False` nothing is heated at all. No anchor exists, no
   descent runs, and the XY center is amplitude-invariant.
 
@@ -313,8 +346,9 @@ reference it; decide during implementation, wrapper preferred.)
   the contact switch four times, discards the first press as a warm-up, takes
   the median of the remaining three as the trigger plane, then measures the
   tool's XY center and descent curve and stores the curve midpoint's height
-  above that trigger plane together with the frequency there, and the nozzle
-  temperature it measured at. Written to the state file immediately. Requires
+  above that trigger plane together with the frequency there, the nozzle
+  setpoint it was held at and the reading it observed. Written to the state
+  file immediately. Requires
   `calibrate_z: True` and the switch options.
   A missing `T=` anchors every tool from T0 upward in turn. Anchoring a tool
   discards that tool's measurements from this session, and anchoring the
@@ -336,7 +370,7 @@ reference it; decide during implementation, wrapper preferred.)
   `SKIP_Z` defaults to 1, which skips the descent even with `calibrate_z:
   True`; `SKIP_Z=0` with `calibrate_z: False` is an error naming `calibrate_z`
   rather than a silently ignored parameter. Heating has three cases, and the
-  plan names the one that applies: the tool's recorded anchor temperature, once
+  plan names the one that applies: the tool's recorded anchor setpoint, once
   before the study rather than per cycle, when `calibrate_z` is True and the
   tool has an anchor; no heating when the tool has no anchor, which the plan
   says makes the spread not comparable with an offset run's; and no heating at
@@ -364,9 +398,10 @@ reference it; decide during implementation, wrapper preferred.)
   the tool and the stage that failed, keeping the results and references
   already taken.
 - Heating a list of tools is one parallel preheat before the per-tool loop:
-  every target is set first, then every tool is waited for, then the settle
-  dwell runs once. A tool that has to cool to its target is waited for the same
-  way, which is why the command prints its targets before it starts waiting.
+  every setpoint is set first, then every tool is waited into its band, then
+  the settle dwell runs once. A tool that has to cool into the band is waited
+  for the same way, which is why the command prints each tool's current
+  reading, its setpoint and the band before it starts waiting.
 - All output as labeled raw-value rows, not prose.
 
 ## Algorithm notes (ported from upstream, with provenance)

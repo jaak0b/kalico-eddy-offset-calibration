@@ -35,8 +35,12 @@ work. An eddy-current coil sidesteps both.
   a press on a contact switch next to the coil. The switch's own height never has
   to be known, because it cancels between tools.
 - **The temperature is held for you.** A nozzle reads differently hot and cold,
-  so each reference records the temperature it was measured at, and an offset
-  run heats every tool back to its own recorded value before measuring.
+  so each reference records the setpoint it was heated to, and an offset run
+  holds every tool at its own recorded setpoint before measuring. The setpoint
+  is what makes the thermal state reproducible: a hotend under PID control
+  wanders around it, so the reading at any one moment is a sample of that
+  wander. Each reference also records the reading observed while it was taken,
+  as evidence that the tool did reach its setpoint.
 - The fitting math is ported from chengxg's `tool_eddy_calibration` and Kalico's
   `probe_eddy_current`.
 
@@ -102,10 +106,12 @@ measures the tool's descent curve, and binds the two together. Requires
 hotend, after moving the coil or the switch, or after changing
 `calibration_temp`. References are written to
 `EddyToolCalibration/calibration_state.json` next to the printer config as soon
-as they are measured; there is no `SAVE_CONFIG` step. Each one records the
-nozzle temperature it was measured at, alongside the anchor height and
-frequency. `DEBUG=1` prints each press trigger height and each scan pass's
-diagnostic rows.
+as they are measured; there is no `SAVE_CONFIG` step. Each one records two
+temperatures alongside the anchor height and frequency: the setpoint it was
+heated to, which is `calibration_temp` and is what every later run of that tool
+is heated to, and the reading observed while it was measured, which is
+diagnostic only. `DEBUG=1` prints each press trigger height and each scan
+pass's diagnostic rows.
 
 #### EDDY_CALIBRATE_OFFSET
 
@@ -115,9 +121,11 @@ turn when `T=` is left out. Run `T=0` first: it is the baseline every other tool
 is compared against, and it is not persisted across a restart. T0 is measured
 first whatever order a list gives it in. With `calibrate_z: True` every tool
 involved needs its `EDDY_CALIBRATE_Z` reference first, and the command stops
-before it moves if one is missing; each tool is then heated to the temperature
-its own reference was measured at, all of them together, before the first
-measurement starts. Each non-baseline result is passed to `apply_offsets_gcode`
+before it moves if one is missing; each tool is then heated to the setpoint its
+own reference was taken at, all of them together, before the first measurement
+starts. An offset run reproduces the setpoint the reference was measured at, so
+the descent it compares against that reference was taken with the nozzle held
+the same way. Each non-baseline result is passed to `apply_offsets_gcode`
 when that option is set. A run over more than one tool ends with a per-tool
 summary. `DEBUG=1` prints each scan pass's diagnostic rows.
 
@@ -140,8 +148,8 @@ so a study is XY only and fast. `SKIP_Z=0` includes the descent, which needs
 `calibrate_z: True` and the tool's `EDDY_CALIBRATE_Z` reference.
 
 The tool is heated only when `calibrate_z: True` and it has a stored
-`EDDY_CALIBRATE_Z` reference, in which case it is held at the temperature that
-reference was measured at. The plan row says which of the three cases applies,
+`EDDY_CALIBRATE_Z` reference, in which case it is held at the setpoint that
+reference was taken at. The plan row says which of the three cases applies,
 because a study run cold is not comparable with an offset run.
 
 The command prints its plan before it moves, a progress row naming the cycle
@@ -172,8 +180,9 @@ Read this section before wiring anything.
   nothing else. Leave `calibrate_z` at its default of `False` and no descent
   runs at all, which makes a run faster.
 - Z calibration heats the nozzles and waits. Every listed tool is brought to
-  its calibration temperature before the first measurement, so a run takes
-  minutes longer, and longer still when a tool has to cool down to it.
+  its calibration setpoint before the first measurement, so a run takes minutes
+  longer, and longer still when a tool has to cool down into the band around
+  it.
 - Offsets are not persisted. Each session measures a fresh T0 baseline and
   prints the other tools against it. If you want them applied, write the lines
   in `apply_offsets_gcode`. Only the per-tool Z references are stored on disk.
@@ -343,7 +352,8 @@ Every option and its default. Options shown commented out may be left out.
 #   Append every completed measurement of a tool to history_T<n>.csv in
 #   log_dir: the UTC timestamp, the command, the fitted center, the offsets,
 #   the session of the baseline they were measured against, the Z crossing
-#   and trigger plane, the nozzle temperature and the sample count. This is
+#   and trigger plane, the nozzle setpoint the run was held at, the nozzle
+#   reading observed while it ran, and the sample count. This is
 #   the drift log, one line per measurement, and it is what a claim about
 #   drift over time rests on. It is separate from save_csv, which dumps the
 #   raw samples of each scan pass instead.
@@ -394,13 +404,24 @@ Every option and its default. Options shown commented out may be left out.
 #   probing is reported as failed. A switch that cannot repeat inside its
 #   tolerance has a mechanical cause another press does not fix.
 #calibration_temp: 150.0
-#   Nozzle temperature, in C, that every calibration measurement is taken at.
-#   It must be above 0 when calibrate_z is True: a reference measured cold
-#   could only be compared against a later run measured cold as well. The
+#   Nozzle setpoint, in C, that every calibration measurement is taken at.
+#   EDDY_CALIBRATE_Z heats to it and records it in the tool's reference, and
+#   every later run of that tool is heated to the recorded setpoint, so
+#   changing this option after anchoring is reported as a warning naming both
+#   values. It must be above 0 when calibrate_z is True: a reference measured
+#   cold could only be compared against a later run measured cold as well. The
 #   default is hot enough for the hotend to be in its working state and cool
 #   enough to limit oozing.
+#calibration_temp_band: 2.0
+#   How close to its setpoint, in C, a nozzle has to read before the settle
+#   dwell starts. The band applies in both directions, so a tool that has to
+#   cool only has to fall inside it. Do not set it tight: a hotend under PID
+#   control wanders around its setpoint rather than sitting on it, and the
+#   frequency shift across a couple of degrees is small beside the minutes a
+#   narrow band spends waiting for an exact reading, most of all when the
+#   nozzle has nothing but ambient air to cool it.
 #calibration_settle_time: 30.0
-#   Seconds to dwell after a tool reaches its target, before measuring. The
+#   Seconds to dwell after a tool reaches the band, before measuring. The
 #   heater block reaches temperature well before the nozzle tip does, and both
 #   commands dwell the same time so both measure the same thermal state.
 #tool_extruders:

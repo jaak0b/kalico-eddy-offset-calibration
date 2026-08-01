@@ -606,13 +606,6 @@ def trigger_plane_from_anchor(curve, anchor_height, anchor_frequency):
 
 # --- nozzle temperature ----------------------------------------------------
 
-# How far a tool's recorded anchor temperature may sit from calibration_temp
-# before an offset run warns about it. What an anchor records is the
-# temperature the heater actually read, which settles a fraction either side
-# of the target it was held at, so a margin below the width of that settling
-# would warn on every run.
-CALIBRATION_TEMP_MARGIN = 1.0
-
 
 def default_tool_extruder(tool):
     """Klipper's extruder section name for a tool number.
@@ -660,23 +653,63 @@ def tool_extruder_name(names, tool):
     return names[index]
 
 
-def temperature_warning(tool, recorded, configured):
-    """Warning text when a tool was anchored at another temperature.
+def temperature_warning(tool, anchored_setpoint, configured_setpoint):
+    """Warning text when a tool was anchored at another setpoint.
 
-    Returns None when the two agree. An offset run measures at the recorded
-    temperature either way, because the anchor frequency was measured at that
-    temperature and only a measurement taken at the same temperature can be
+    Both values are setpoints: the one the anchor was measured at and the
+    calibration_temp the config carries now. They differ only when the option
+    was changed after the tool was anchored, so any difference at all is
+    reported rather than absorbed by a margin. An offset run heats to the
+    anchored setpoint either way, because the anchor frequency was measured in
+    that thermal state and only a measurement taken in the same state can be
     compared against it.
     """
-    if abs(float(recorded) - float(configured)) <= CALIBRATION_TEMP_MARGIN:
+    if float(anchored_setpoint) == float(configured_setpoint):
         return None
     return (
-        "warning: T%d was anchored at %.1f C, and calibration_temp is "
-        "%.1f C. This run measures T%d at %.1f C, the temperature its anchor "
-        "was measured at. Run EDDY_CALIBRATE_Z T=%d to anchor the tool at "
-        "calibration_temp instead."
-        % (int(tool), float(recorded), float(configured), int(tool),
-           float(recorded), int(tool)))
+        "warning: T%d was anchored with calibration_temp at %.1f C, and "
+        "calibration_temp is now %.1f C. This run heats T%d to %.1f C, the "
+        "setpoint its anchor was measured at. Run EDDY_CALIBRATE_Z T=%d to "
+        "anchor the tool at the configured setpoint instead."
+        % (int(tool), float(anchored_setpoint), float(configured_setpoint),
+           int(tool), float(anchored_setpoint), int(tool)))
+
+
+def temperature_in_band(reading, setpoint, band):
+    """Whether a nozzle reading counts as being at its setpoint.
+
+    The band applies in both directions, so a nozzle that overshot only has to
+    fall back inside it rather than come to rest on the setpoint. A hotend
+    under PID control wanders around its setpoint instead of sitting on it, so
+    a band narrower than that wander is a wait for a coincidence.
+    """
+    return abs(float(reading) - float(setpoint)) <= float(band)
+
+
+def preheat_plan_rows(entries, band, settle_time):
+    """Labeled rows a preheat prints before it starts waiting.
+
+    entries is a list of (tool, heater section name, current reading,
+    setpoint), one per tool the preheat covers. The rows name what each tool
+    reads now and what it is being taken to, so a wait that turns out long is
+    read against the distance it had to cover.
+    """
+    if not entries:
+        raise ValueError("a preheat plan needs at least one tool")
+    rows = ["heating every listed tool before measuring:"]
+    for tool, name, current, setpoint in entries:
+        rows.append(
+            "T%d heater %s: %.1f C now, %.1f C setpoint"
+            % (int(tool), name, float(current), float(setpoint)))
+    rows.append(
+        "temperature band: %.1f C either side of the setpoint"
+        % (float(band),))
+    rows.append(
+        "settle time after reaching the band: %.1f s" % (float(settle_time),))
+    rows.append(
+        "The command waits for every listed tool to read inside its band, "
+        "including a tool that has to cool into it.")
+    return rows
 
 
 # --- persisted calibration state -------------------------------------------
@@ -690,13 +723,16 @@ STATE_FILENAME = 'calibration_state.json'
 STATE_VERSION = 1
 
 # The three fields an offset run reads: the anchor pair its descent is
-# evaluated against, and the temperature it has to bring the nozzle back to
-# before it measures. The rest of an anchor record is diagnostic: it lets a
-# stale anchor be recognised after the coil or the switch moves, and is never
-# fed back into a measurement.
+# evaluated against, and setpoint_temperature, the heater setpoint it has to
+# bring the nozzle back to before it measures. The rest of an anchor record is
+# diagnostic and is never fed back into a measurement:
+# observed_temperature is what the heater read while the anchor was taken,
+# which shows whether the tool did reach its setpoint, and the remaining
+# fields let a stale anchor be recognised after the coil or the switch moves.
 ANCHOR_NUMBER_FIELDS = (
-    'anchor_height', 'anchor_frequency', 'temperature', 'trigger_z',
-    'curve_low_z', 'curve_high_z', 'center_x', 'center_y',
+    'anchor_height', 'anchor_frequency', 'setpoint_temperature',
+    'observed_temperature', 'trigger_z', 'curve_low_z', 'curve_high_z',
+    'center_x', 'center_y',
 )
 ANCHOR_TEXT_FIELDS = ('updated',)
 
@@ -1021,7 +1057,10 @@ def log_timestamp(seconds=None):
 # precision the console rows show. A value that was not measured is written
 # as an empty field rather than a zero. baseline_session names the session
 # whose baseline measurement the offsets were taken against, so a drift in the
-# baseline is not read as a drift of the tool.
+# baseline is not read as a drift of the tool. The two temperature columns are
+# the heater setpoint the run was held at and the reading taken at measurement
+# time, so a row shows both the thermal state that was asked for and the one
+# the tool was actually in.
 HISTORY_COLUMNS = (
     ('timestamp', '%s'),
     ('command', '%s'),
@@ -1033,7 +1072,8 @@ HISTORY_COLUMNS = (
     ('trigger_z', '%.4f'),
     ('offset_z', '%.4f'),
     ('baseline_session', '%d'),
-    ('temperature', '%.1f'),
+    ('setpoint_temperature', '%.1f'),
+    ('observed_temperature', '%.1f'),
     ('samples_used', '%d'),
 )
 
@@ -1204,15 +1244,15 @@ def study_heating(calibrate_z, has_anchor):
     return 'to_anchor_temperature'
 
 
-def heating_row(state, temperature):
+def heating_row(state, setpoint):
     """The labeled row saying whether a study heats the tool before measuring.
 
-    temperature is what the tool's anchor recorded, and is None wherever no
-    heating runs.
+    setpoint is the heater setpoint the tool's anchor recorded, and is None
+    wherever no heating runs.
     """
     if state == 'to_anchor_temperature':
-        return ("nozzle heating: held at %.1f C, the temperature the tool's Z "
-                "reference was measured at" % (float(temperature),))
+        return ("nozzle heating: held at %.1f C, the setpoint the tool's Z "
+                "reference was measured at" % (float(setpoint),))
     if state == 'no_anchor':
         return ("nozzle heating: none, the tool has no stored Z reference, so "
                 "this spread is not comparable with an offset run's")
@@ -1224,7 +1264,7 @@ def heating_row(state, temperature):
 
 
 def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
-                    heating_state, heating_temperature):
+                    heating_state, heating_setpoint):
     """Labeled rows describing a study before it starts moving."""
     if runs < 2:
         raise ValueError(
@@ -1238,7 +1278,7 @@ def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
         "cycles: %d" % (cycles,),
         "measurements: %d" % (runs * cycles,),
         "z descent: %s" % ("included" if include_z else "skipped",),
-        heating_row(heating_state, heating_temperature),
+        heating_row(heating_state, heating_setpoint),
         docking_row(state, docking_tool, cycles),
     ]
 
@@ -1697,10 +1737,14 @@ class EddyToolCalibration:
             config.get('apply_offsets_gcode', '').strip())
 
         # Nozzle temperature. How the frequency reads against height depends on
-        # how hot the nozzle is, so every measurement is taken at one
-        # temperature: EDDY_CALIBRATE_Z measures at calibration_temp and
-        # records what the heater actually read, and an offset run brings each
-        # tool back to its own recorded temperature before measuring.
+        # how hot the nozzle is, so every measurement is taken in one thermal
+        # state: EDDY_CALIBRATE_Z heats to calibration_temp and records that
+        # setpoint in the anchor, and an offset run heats each tool back to its
+        # own recorded setpoint before measuring. The setpoint is what makes
+        # the state reproducible. A hotend under PID control wanders around its
+        # setpoint rather than sitting on it, so the reading at any one moment
+        # is a sample of that wander, and holding a later run to that sample
+        # would chase a number the controller never aims for.
         self.calibration_temp = config.getfloat(
             'calibration_temp', 150.0, minval=0.0)
         if self.calibrate_z and self.calibration_temp <= 0.0:
@@ -1710,12 +1754,21 @@ class EddyToolCalibration:
                 "only be compared against a later measurement taken cold as "
                 "well, and a nozzle that has been hot does not come back to "
                 "cold inside a calibration run." % (self.name,))
-        # The heater block reaches its target well before the nozzle tip does,
-        # so both commands dwell here after the target is reached and measure
-        # the same thermal state.
+        # How close to its setpoint a nozzle has to read before the settle
+        # dwell starts. The band is what a preheat waits for, in both
+        # directions: a hotend wanders around its setpoint under PID control,
+        # and the frequency shift across a couple of degrees is small beside
+        # the time a tighter band spends waiting for an exact reading, most of
+        # all when a tool has to cool into it with nothing but ambient air to
+        # do the work.
+        self.calibration_temp_band = config.getfloat(
+            'calibration_temp_band', 2.0, above=0.0)
+        # The heater block reaches its setpoint well before the nozzle tip
+        # does, so both commands dwell here after the band is reached and
+        # measure the same thermal state.
         self.calibration_settle_time = config.getfloat(
             'calibration_settle_time', 30.0, minval=0.0)
-        # A fleet preheat sets targets on tools that are not mounted, so the
+        # A fleet preheat sets a setpoint on tools that are not mounted, so the
         # heater of every tool has to be nameable without mounting it.
         try:
             self.tool_extruders = parse_tool_extruders(
@@ -2211,7 +2264,7 @@ class EddyToolCalibration:
     def _tool_heater(self, tool, error):
         """The heater holding one tool's nozzle, as (section name, heater).
 
-        A fleet preheat sets a target on tools that are not mounted, so the
+        A fleet preheat sets a setpoint on tools that are not mounted, so the
         heater is looked up by section name rather than through whichever
         extruder happens to be active. error builds the exception the caller
         needs: a gcode error inside a command, a startup error at connect.
@@ -2227,7 +2280,7 @@ class EddyToolCalibration:
             raise error(
                 "Configure a hotend before calibrating. This printer carries "
                 "no heater at all, so the nozzle cannot be brought to the "
-                "calibration temperature.")
+                "calibration setpoint.")
         try:
             return name, pheaters.lookup_heater(name)
         except self.printer.config_error as e:
@@ -2239,62 +2292,88 @@ class EddyToolCalibration:
                 "naming: extruder for T0, extruder1 for T1, and so on."
                 % (tool, name, e))
 
-    def _tool_temperature(self, gcmd, tool):
-        """What one tool's heater reads right now, in degrees Celsius."""
+    def _observed_temperature(self, gcmd, tool):
+        """What one tool's heater reads right now, in degrees Celsius.
+
+        This is the reading, not the setpoint: it says what thermal state the
+        tool is in at this moment, and it is recorded as evidence rather than
+        reproduced by a later run.
+        """
         _name, heater = self._tool_heater(tool, gcmd.error)
         current, _target = heater.get_temp(
             self.printer.get_reactor().monotonic())
         return current
 
     def _preheat(self, gcmd, targets, source):
-        """Bring every listed tool to its target and let the nozzles settle.
+        """Bring every listed tool to its setpoint and let the nozzles settle.
 
-        targets is a list of (tool, temperature). Every target is set before
-        any waiting starts, so the tools heat side by side rather than one
-        after another, and the settle dwell then runs once for all of them.
-        The waiting itself is Kalico's own heater wait, the one M109 uses, so
-        a tool that has to cool to its target is waited for the same way.
+        targets is a list of (tool, setpoint). Every setpoint is set before any
+        waiting starts, so the tools heat side by side rather than one after
+        another, and the settle dwell then runs once for all of them. The wait
+        ends when a nozzle reads inside calibration_temp_band of its setpoint,
+        in either direction, rather than when its controller has settled: a
+        hotend that is already within a degree or two of its setpoint is in the
+        thermal state the measurement needs, and waiting for the controller to
+        come to rest there can take minutes with no measurable gain.
         """
         if not targets:
             raise gcmd.error(
                 "Internal error: a preheat was asked to heat no tools.")
         resolved = []
-        for tool, temperature in targets:
+        for tool, setpoint in targets:
             name, heater = self._tool_heater(tool, gcmd.error)
-            resolved.append((tool, name, heater, float(temperature)))
+            resolved.append((tool, name, heater, float(setpoint)))
         pheaters = self.printer.lookup_object('heaters')
         eventtime = self.printer.get_reactor().monotonic()
-        rows = ["heating every listed tool before measuring:"]
-        for tool, name, heater, temperature in resolved:
+        entries = []
+        for tool, name, heater, setpoint in resolved:
             current, _target = heater.get_temp(eventtime)
-            rows.append(
-                "T%d heater %s: %.1f C now, %.1f C target"
-                % (tool, name, current, temperature))
-        rows.append(
-            "settle time after reaching target: %.1f s"
-            % (self.calibration_settle_time,))
-        rows.append(
-            "The command waits for every listed tool to reach its target, "
-            "including a tool that has to cool down to it.")
-        gcmd.respond_info("\n".join(rows))
-        for tool, name, heater, temperature in resolved:
+            entries.append((tool, name, current, setpoint))
+        gcmd.respond_info("\n".join(preheat_plan_rows(
+            entries, self.calibration_temp_band,
+            self.calibration_settle_time)))
+        for tool, name, heater, setpoint in resolved:
             try:
-                pheaters.set_temperature(heater, temperature, False)
+                pheaters.set_temperature(heater, setpoint, False)
             except self.printer.command_error as e:
                 raise gcmd.error(
                     "T%d could not be held at %.1f C by the heater %s: %s. "
-                    "That temperature comes from %s."
-                    % (tool, temperature, name, e, source))
-        # Every target is already set, so the tools are heating side by side
-        # while these waits run one after another. Setting the same target
-        # again is what carries the wait: it is the only heater wait Kalico
-        # offers a module, and re-setting a target a heater already holds
-        # changes nothing about it.
-        for tool, name, heater, temperature in resolved:
-            pheaters.set_temperature(heater, temperature, True)
+                    "That setpoint comes from %s."
+                    % (tool, setpoint, name, e, source))
+        # Every setpoint is already set, so the tools approach them side by
+        # side while these waits run one after another.
+        for tool, name, heater, setpoint in resolved:
+            self._wait_for_band(tool, name, heater, setpoint)
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.dwell(self.calibration_settle_time)
         toolhead.wait_moves()
+
+    def _wait_for_band(self, tool, name, heater, setpoint):
+        """Wait until one nozzle reads inside the band around its setpoint.
+
+        The polling is printer.wait_while, the same primitive Kalico's own
+        heater wait uses, so the reactor keeps running and a shutdown or a
+        gcode interrupt ends the wait as it would end any other. A heater that
+        never approaches its setpoint is not this plugin's to diagnose: every
+        heater is supervised by Kalico's verify_heater, which shuts the printer
+        down when one stops approaching, and that shutdown ends this wait.
+        """
+        # A batch run replays a gcode file against no hardware, so its heaters
+        # never move and any wait on a reading would never return. Kalico's own
+        # heater wait skips itself there for the same reason.
+        if self.printer.get_start_args().get('debugoutput') is not None:
+            logging.info(
+                "eddy_tool_calibration: not waiting for T%d to reach %.1f C, "
+                "because this is a batch run with no hardware behind the "
+                "heater %s", tool, setpoint, name)
+            return
+
+        def waiting(eventtime):
+            current, _target = heater.get_temp(eventtime)
+            return not temperature_in_band(
+                current, setpoint, self.calibration_temp_band)
+
+        self.printer.wait_while(waiting)
 
     # -- machine resolution -----------------------------------------------
 
@@ -2674,7 +2753,9 @@ class EddyToolCalibration:
         offsets that are written are differences against the session baseline,
         so the row carries the session that baseline belongs to: a baseline
         that moved between two sessions is then visible as such rather than
-        read as a drift of the tool.
+        read as a drift of the tool. Both temperature columns come from the
+        measurement: the setpoint it was held at, empty when it heated nothing,
+        and the reading taken while it ran.
         """
         return {
             'timestamp': log_timestamp(),
@@ -2687,7 +2768,8 @@ class EddyToolCalibration:
             'trigger_z': result['z_trigger'],
             'offset_z': None if offsets is None else offsets['z'],
             'baseline_session': None if offsets is None else self.session_id,
-            'temperature': result['temperature'],
+            'setpoint_temperature': result['setpoint_temperature'],
+            'observed_temperature': result['observed_temperature'],
             'samples_used': result['agg']['samples_used'],
         }
 
@@ -2945,10 +3027,12 @@ class EddyToolCalibration:
     cmd_EDDY_CALIBRATE_Z_help = (
         "One-time Z reference setup for the tools named by T=, or for every "
         "tool when T= is left out. Presses the contact switch and binds the "
-        "result to the eddy sensor's reading, at calibration_temp. Run it "
-        "after changing a nozzle or a hotend, after moving the coil or the "
-        "switch, or after changing calibration_temp. This is the setup step, "
-        "not the routine offset measurement; that is EDDY_CALIBRATE_OFFSET. "
+        "result to the eddy sensor's reading, at calibration_temp, which is "
+        "recorded as the setpoint every later run of that tool is heated to. "
+        "Run it after changing a nozzle or a hotend, after moving the coil or "
+        "the switch, or after changing calibration_temp. This is the setup "
+        "step, not the routine offset measurement; that is "
+        "EDDY_CALIBRATE_OFFSET. "
         "Add DEBUG=1 to print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_CALIBRATE_Z(self, gcmd):
@@ -2981,11 +3065,13 @@ class EddyToolCalibration:
                 self._move(
                     self.switch_x, self.switch_y, travel_z, self.z_speed)
             with self._phase(gcmd, tool, 'measurement', sweeping):
-                # What the heater actually reads, not the target it was given,
-                # because that is the state a later offset run has to
-                # reproduce before its descent can be compared against this
-                # one.
-                temperature = self._tool_temperature(gcmd, tool)
+                # The reading beside the setpoint the tool was held at. It is
+                # recorded as evidence that the tool did reach its setpoint,
+                # and it is the setpoint itself that a later offset run
+                # reproduces: a hotend wanders around its setpoint, so this
+                # reading is one sample of that wander and aiming a later run
+                # at it would chase a value the controller never targets.
+                observed = self._observed_temperature(gcmd, tool)
                 center_x, center_y, agg = self._measure_xy(gcmd, debug)
                 curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
         self._merge_aggregate(agg, agg_z)
@@ -2993,7 +3079,8 @@ class EddyToolCalibration:
         record = {
             'anchor_height': anchor_height,
             'anchor_frequency': anchor_freq,
-            'temperature': temperature,
+            'setpoint_temperature': self.calibration_temp,
+            'observed_temperature': observed,
             'trigger_z': trigger_z,
             'curve_low_z': curve[0][0],
             'curve_high_z': curve[-1][0],
@@ -3034,7 +3121,10 @@ class EddyToolCalibration:
         rows.extend([
             "anchor height above trigger plane: %.4f mm" % (anchor_height,),
             "anchor frequency: %.3f Hz" % (anchor_freq,),
-            "nozzle temperature: %.1f C" % (temperature,),
+            "nozzle temperature setpoint: %.1f C"
+            % (record['setpoint_temperature'],),
+            "nozzle temperature observed: %.1f C"
+            % (record['observed_temperature'],),
             "state file: %s" % (self._state_path(),),
         ])
         rows.extend(step_distance_rows(self._step_distances()))
@@ -3050,7 +3140,9 @@ class EddyToolCalibration:
             self._log_entry(
                 'EDDY_CALIBRATE_Z',
                 {'x': center_x, 'y': center_y, 'z_crossing': None,
-                 'z_trigger': trigger_z, 'temperature': temperature,
+                 'z_trigger': trigger_z,
+                 'setpoint_temperature': record['setpoint_temperature'],
+                 'observed_temperature': record['observed_temperature'],
                  'agg': agg},
                 None),
             "The Z reference for T%d is measured and saved to the state file."
@@ -3061,7 +3153,7 @@ class EddyToolCalibration:
         "relative to T0, or measure every tool in turn when T= is left out. "
         "T=0 measures the baseline every other tool is compared against, and "
         "it is measured first whatever order T= lists it in. With "
-        "calibrate_z True each tool is heated to the temperature its "
+        "calibrate_z True each tool is heated to the setpoint its "
         "EDDY_CALIBRATE_Z reference was measured at. Add DEBUG=1 to print "
         "each scan pass's diagnostic rows.")
 
@@ -3105,7 +3197,8 @@ class EddyToolCalibration:
                 self._mount_tool(gcmd, tool)
             with self._phase(gcmd, tool, 'measurement', sweeping):
                 result = self._run_tool_measurement(
-                    gcmd, tool, debug, self.calibrate_z)
+                    gcmd, tool, debug, self.calibrate_z,
+                    self._anchored_setpoint(tool))
             if is_baseline_run:
                 # A fresh T0 run always replaces the session baseline, so the
                 # comparison never mixes results from two different setups.
@@ -3146,26 +3239,36 @@ class EddyToolCalibration:
         return {'tool': tool, 'offsets': offsets}
 
     def _preheat_anchored(self, gcmd, tools):
-        """Heat every listed tool to the temperature its anchor was taken at.
+        """Heat every listed tool to the setpoint its anchor was taken at.
 
-        An offset run never measures at calibration_temp. It reproduces the
-        thermal state each anchor was taken in, so the descent it compares
-        against that anchor was measured at the same nozzle temperature. A
-        tool anchored at another temperature than calibration_temp is
-        measured at its own and reported here, rather than measured at a
-        temperature its anchor says nothing about.
+        An offset run reproduces the thermal state each anchor was taken in by
+        heating to the same setpoint, so the descent it compares against that
+        anchor was measured with the nozzle held the same way. A tool whose
+        anchor carries another setpoint than calibration_temp is heated to its
+        own and reported here, rather than to a setpoint its anchor says
+        nothing about.
         """
         targets = []
         for tool in tools:
-            recorded = self.anchors[tool]['temperature']
+            setpoint = self.anchors[tool]['setpoint_temperature']
             warning = temperature_warning(
-                tool, recorded, self.calibration_temp)
+                tool, setpoint, self.calibration_temp)
             if warning is not None:
                 gcmd.respond_info(warning)
-            targets.append((tool, recorded))
+            targets.append((tool, setpoint))
         self._preheat(
             gcmd, targets,
-            'the temperature EDDY_CALIBRATE_Z recorded for that tool')
+            'the setpoint EDDY_CALIBRATE_Z recorded for that tool')
+
+    def _anchored_setpoint(self, tool):
+        """The setpoint an offset run holds one tool at, or None for no heating.
+
+        With calibrate_z False nothing is heated at all, so the measurement
+        carries no setpoint rather than a number nothing was held to.
+        """
+        if not self.calibrate_z:
+            return None
+        return self.anchors[tool]['setpoint_temperature']
 
     def _require_anchors(self, gcmd, tools):
         """Refuse to measure Z for a tool that has no stored anchor."""
@@ -3179,8 +3282,8 @@ class EddyToolCalibration:
             % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in missing),
                ", ".join("T%d" % (t,) for t in missing)))
 
-    def _measurement_temperature(self, gcmd, tool, include_z):
-        """The nozzle temperature one measurement is recorded against.
+    def _measurement_observed_temperature(self, gcmd, tool, include_z):
+        """The nozzle reading one measurement is recorded against.
 
         Every measurement carries it, because the log row is read against the
         thermal state the run was in whether or not a descent evaluated an
@@ -3191,9 +3294,9 @@ class EddyToolCalibration:
         logged so it stays visible in klippy.log.
         """
         if include_z:
-            return self._tool_temperature(gcmd, tool)
+            return self._observed_temperature(gcmd, tool)
         try:
-            return self._tool_temperature(gcmd, tool)
+            return self._observed_temperature(gcmd, tool)
         except self.printer.command_error:
             logging.exception(
                 "eddy_tool_calibration: could not read the nozzle temperature "
@@ -3201,7 +3304,13 @@ class EddyToolCalibration:
                 % (tool,))
             return None
 
-    def _run_tool_measurement(self, gcmd, tool, debug, include_z):
+    def _run_tool_measurement(self, gcmd, tool, debug, include_z, setpoint):
+        """Measure one tool, recorded against the setpoint it was held at.
+
+        setpoint is what the caller heated this tool to before the measurement
+        started, and None when it heated nothing, so the measurement carries
+        the thermal state that was asked for as well as the one it read.
+        """
         center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
         agg = self._new_aggregate()
         self._merge_aggregate(agg, agg_xy)
@@ -3209,9 +3318,10 @@ class EddyToolCalibration:
         z_crossing = None
         z_trigger = None
         # Read before any descent and reported beside the anchor's own
-        # temperature, so a curve measured in the wrong thermal state is
+        # temperatures, so a curve measured in the wrong thermal state is
         # visible in the readout rather than only in the offset it moved.
-        temperature = self._measurement_temperature(gcmd, tool, include_z)
+        observed = self._measurement_observed_temperature(
+            gcmd, tool, include_z)
         if include_z:
             curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
             self._merge_aggregate(agg, agg_z)
@@ -3222,7 +3332,8 @@ class EddyToolCalibration:
             'z_curve': curve,
             'z_crossing': z_crossing,
             'z_trigger': z_trigger,
-            'temperature': temperature,
+            'setpoint_temperature': setpoint,
+            'observed_temperature': observed,
             'agg': agg,
             # Both stamped by the caller, which publishes the result only once
             # the session baseline it belongs to is in place.
@@ -3269,8 +3380,12 @@ class EddyToolCalibration:
             "anchor frequency: %.3f Hz" % (anchor['anchor_frequency'],),
             "anchor height above trigger plane: %.4f mm"
             % (anchor['anchor_height'],),
-            "anchor temperature: %.1f C" % (anchor['temperature'],),
-            "nozzle temperature: %.1f C" % (result['temperature'],),
+            "anchor temperature setpoint: %.1f C"
+            % (anchor['setpoint_temperature'],),
+            "anchor temperature observed: %.1f C"
+            % (anchor['observed_temperature'],),
+            "nozzle temperature observed: %.1f C"
+            % (result['observed_temperature'],),
             "z crossing (machine Z): %.4f mm" % (result['z_crossing'],),
             "switch trigger plane (machine Z): %.4f mm"
             % (result['z_trigger'],),
@@ -3341,9 +3456,13 @@ class EddyToolCalibration:
             # Checked before any motion: without an anchor the descent has
             # nothing to be evaluated against.
             self._require_anchors(gcmd, [tool])
+        # The one setpoint the study holds the tool at, resolved once: the plan
+        # names it, the preheat waits for it, and every measurement is recorded
+        # against it.
+        setpoint = self._heating_setpoint(gcmd, heating, tool)
         gcmd.respond_info("\n".join(study_plan_rows(
             tool, runs, cycles, include_z, state, docking_tool, heating,
-            self._heating_temperature(gcmd, heating, tool))))
+            setpoint)))
         # Resolved before anything is heated, so a directory that cannot be
         # written fails in a second rather than after minutes of heating.
         log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
@@ -3361,8 +3480,8 @@ class EddyToolCalibration:
             # where a calibration run's would.
             with self._retreating():
                 measured = self._run_study_cycle(
-                    gcmd, tool, cycle, cycles, runs, include_z, debug, state,
-                    docking_tool, log, axes)
+                    gcmd, tool, cycle, cycles, runs, include_z, setpoint,
+                    debug, state, docking_tool, log, axes)
             try:
                 rows = cycle_progress_rows(
                     cycle, [(axis, measured[axis]) for axis in axes])
@@ -3377,15 +3496,15 @@ class EddyToolCalibration:
             gcmd, tool, runs, cycles, include_z, state, docking_tool,
             log['path'], axes, by_cycle)
 
-    def _heating_temperature(self, gcmd, heating, tool):
-        """The temperature a study heats the tool to, or None when it does not.
+    def _heating_setpoint(self, gcmd, heating, tool):
+        """The setpoint a study heats the tool to, or None when it does not.
 
-        The tool's anchor is the only place a study takes a temperature from,
-        so a state that heats nothing reports no temperature rather than a
-        number the run does not use.
+        The tool's anchor is the only place a study takes a setpoint from, so
+        a state that heats nothing reports none rather than a number the run
+        does not use.
         """
         if heating == 'to_anchor_temperature':
-            return self.anchors[tool]['temperature']
+            return self.anchors[tool]['setpoint_temperature']
         if heating in ('no_anchor', 'z_calibration_off'):
             return None
         raise gcmd.error(
@@ -3393,10 +3512,10 @@ class EddyToolCalibration:
             % (heating, HEATING_STATES))
 
     def _study_preheat(self, gcmd, heating, tool):
-        """Heat the measured tool to its anchor temperature, where it has one.
+        """Heat the measured tool to its anchor setpoint, where it has one.
 
         A tool with no anchor and a machine with Z calibration off are both
-        measured as they are: there is no recorded temperature to reproduce.
+        measured as they are: there is no recorded setpoint to reproduce.
         """
         if heating == 'to_anchor_temperature':
             self._preheat_anchored(gcmd, [tool])
@@ -3520,7 +3639,7 @@ class EddyToolCalibration:
             % (state, DOCKING_STATES))
 
     def _run_study_cycle(self, gcmd, tool, cycle, cycles, runs, include_z,
-                         debug, state, docking_tool, log, axes):
+                         setpoint, debug, state, docking_tool, log, axes):
         """One cycle: dock and remount the tool, then measure it runs times.
 
         Returns the measured values of the cycle, keyed by axis label. The
@@ -3541,7 +3660,7 @@ class EddyToolCalibration:
                 measurement_progress_row(cycle, cycles, run, runs))
             with self._study_step(gcmd, 'measurement', cycle, run, log):
                 result = self._run_tool_measurement(
-                    gcmd, tool, debug, include_z)
+                    gcmd, tool, debug, include_z, setpoint)
             offsets = None
             if reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
                 offsets = self._offsets(result, include_z)
@@ -3605,7 +3724,8 @@ class EddyToolCalibration:
             anchors[str(tool)] = {
                 'anchor_height': record['anchor_height'],
                 'anchor_frequency': record['anchor_frequency'],
-                'temperature': record['temperature'],
+                'setpoint_temperature': record['setpoint_temperature'],
+                'observed_temperature': record['observed_temperature'],
                 'trigger_z': record['trigger_z'],
                 'updated': record['updated'],
             }
