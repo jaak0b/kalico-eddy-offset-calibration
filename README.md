@@ -171,15 +171,12 @@ Read this section before wiring anything.
 
 ## Install
 
-Replace `OWNER` below with the real account once the repository is published.
-**The URL below is a placeholder and does not resolve yet.**
-
 On the printer host:
 
 ```
 cd ~
-git clone https://github.com/OWNER/eddy_tool_calibration
-cd eddy_tool_calibration
+git clone https://github.com/jaak0b/kalico-eddy-offset-calibration
+cd kalico-eddy-offset-calibration
 ./install.sh
 ```
 
@@ -463,13 +460,13 @@ unmeasured here. Sources: the
 
 ## Moonraker
 
-Available once the repository is public. Replace `OWNER` with the real account:
+Add to moonraker.conf:
 
 ```
 [update_manager eddy_tool_calibration]
 type: git_repo
-path: ~/eddy_tool_calibration
-origin: https://github.com/OWNER/eddy_tool_calibration
+path: ~/kalico-eddy-offset-calibration
+origin: https://github.com/jaak0b/kalico-eddy-offset-calibration
 primary_branch: main
 is_system_service: False
 ```
