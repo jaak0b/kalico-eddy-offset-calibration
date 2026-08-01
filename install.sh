@@ -5,7 +5,7 @@
 #
 # Usage: ./install.sh [KALICO_DIR]
 # KALICO_DIR can also be given via the KALICO_DIR environment variable.
-# Defaults to $HOME/kalico; falls back to $HOME/klipper if that is not found.
+# Defaults to $HOME/klipper, Kalico's documented clone location.
 
 set -e
 
@@ -20,13 +20,10 @@ fi
 TARGET_DIR="${1:-${KALICO_DIR:-}}"
 
 if [ -z "$TARGET_DIR" ]; then
-    if [ -d "$HOME/kalico" ]; then
-        TARGET_DIR="$HOME/kalico"
-    elif [ -d "$HOME/klipper" ]; then
+    if [ -d "$HOME/klipper" ]; then
         TARGET_DIR="$HOME/klipper"
-        echo "install.sh: note: \$HOME/kalico not found, falling back to \$HOME/klipper" >&2
     else
-        echo "install.sh: cannot find \$HOME/kalico or \$HOME/klipper; pass the Kalico directory as an argument or set KALICO_DIR" >&2
+        echo "install.sh: cannot find \$HOME/klipper; pass the Kalico directory as an argument or set KALICO_DIR" >&2
         exit 1
     fi
 fi

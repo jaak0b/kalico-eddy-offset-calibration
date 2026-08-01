@@ -158,8 +158,7 @@ cd kalico-eddy-offset-calibration
 ```
 
 `install.sh` symlinks the plugin into your Kalico checkout, so a `git pull`
-updates it. Pass the checkout directory as an argument if it is not `~/kalico`
-or `~/klipper`.
+updates it. Pass the checkout directory as an argument if it is not `~/klipper`.
 
 Add the config section, then restart klippy so it loads the module:
 

@@ -20,7 +20,7 @@ eddy_nozzle_probe/
   eddy_tool_calibration.py    # the plugin (single module, ~600-800 lines)
   reference/
     tool_eddy_calibration.py  # upstream file, unmodified, for algorithm reference
-  install.sh                  # symlink into ~/kalico/klippy/plugins/
+  install.sh                  # symlink into ~/klipper/klippy/plugins/
   docs/ examples/ tests/
 ```
 
