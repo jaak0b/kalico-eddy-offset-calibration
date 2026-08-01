@@ -564,6 +564,7 @@ def test_a_log_timestamp_does_not_shift_with_the_local_time_zone():
 
 
 TWO_COLUMNS = (('cycle', '%d'), ('center_x', '%.4f'))
+THREE_COLUMNS = (('cycle', '%d'), ('center_x', '%.4f'), ('center_y', '%.4f'))
 
 
 def test_a_new_log_file_is_written_its_header_first(tmp_path):
@@ -589,28 +590,45 @@ def test_a_second_row_goes_under_the_header_already_there(tmp_path):
     path = tmp_path / "history_T0.csv"
     path.write_text("cycle,center_x\n1,99.0577\n")
 
-    etc.append_csv(str(path), TWO_COLUMNS, {'cycle': 2, 'center_x': 99.0600})
+    rotated = etc.append_csv(
+        str(path), TWO_COLUMNS, {'cycle': 2, 'center_x': 99.0600})
 
+    assert rotated is None
     assert path.read_text() == (
         "cycle,center_x\n1,99.0577\n2,99.0600\n")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["history_T0.csv"]
 
 
-def test_a_log_file_whose_header_names_other_columns_is_refused(tmp_path):
+def test_a_log_file_whose_header_names_other_columns_is_rotated_aside(
+        tmp_path):
     path = tmp_path / "history_T0.csv"
     path.write_text("cycle,centre_x\n1,99.0577\n")
 
-    with pytest.raises(ValueError, match="Move that file aside"):
-        etc.append_csv(str(path), TWO_COLUMNS, {'cycle': 2, 'center_x': 1.0})
+    rotated = etc.append_csv(
+        str(path), TWO_COLUMNS, {'cycle': 2, 'center_x': 1.0})
+
+    assert rotated == str(tmp_path / "history_T0.1.csv")
+    assert path.read_text() == "cycle,center_x\n2,1.0000\n"
+    assert (tmp_path / "history_T0.1.csv").read_text() == (
+        "cycle,centre_x\n1,99.0577\n")
 
 
-def test_a_refused_log_file_is_left_exactly_as_it_was(tmp_path):
+def test_a_second_mismatch_rotates_to_a_name_distinct_from_the_first(
+        tmp_path):
     path = tmp_path / "history_T0.csv"
     path.write_text("cycle,centre_x\n1,99.0577\n")
 
-    with pytest.raises(ValueError):
-        etc.append_csv(str(path), TWO_COLUMNS, {'cycle': 2, 'center_x': 1.0})
+    etc.append_csv(str(path), TWO_COLUMNS, {'cycle': 2, 'center_x': 1.0})
+    second_rotation = etc.append_csv(
+        str(path), THREE_COLUMNS,
+        {'cycle': 3, 'center_x': 2.0, 'center_y': 3.0})
 
-    assert path.read_text() == "cycle,centre_x\n1,99.0577\n"
+    assert second_rotation == str(tmp_path / "history_T0.2.csv")
+    assert path.read_text() == "cycle,center_x,center_y\n3,2.0000,3.0000\n"
+    assert (tmp_path / "history_T0.1.csv").read_text() == (
+        "cycle,centre_x\n1,99.0577\n")
+    assert (tmp_path / "history_T0.2.csv").read_text() == (
+        "cycle,center_x\n2,1.0000\n")
 
 
 # --- what a measurement reports --------------------------------------------

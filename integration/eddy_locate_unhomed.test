@@ -1,0 +1,8 @@
+# EDDY_LOCATE is registered and refuses to scan before the printer is homed.
+# An unregistered command would be answered with "Unknown command" and the run
+# would end successfully, which is what SHOULD_FAIL detects here.
+CONFIG printer.cfg
+DICTIONARY linuxprocess.dict
+SHOULD_FAIL
+
+EDDY_LOCATE

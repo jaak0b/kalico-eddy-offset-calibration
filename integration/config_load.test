@@ -1,0 +1,12 @@
+# The plugin's config section is accepted, the LDC1612 sensor and the contact
+# switch endstop are built against the simulated MCU, and the printer reaches
+# Ready and moves.
+CONFIG printer.cfg
+DICTIONARY linuxprocess.dict
+
+G28
+G1 F6000
+G1 X10 Y10
+G1 Z5
+G1 X200 Y20 Z3
+M400

@@ -1,0 +1,7 @@
+# EDDY_CALIBRATE_Z is registered, accepts the switch configuration, and
+# refuses to probe before the printer is homed.
+CONFIG printer.cfg
+DICTIONARY linuxprocess.dict
+SHOULD_FAIL
+
+EDDY_CALIBRATE_Z T=0

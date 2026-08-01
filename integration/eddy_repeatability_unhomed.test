@@ -1,0 +1,7 @@
+# EDDY_REPEATABILITY is registered and refuses to run a study before the
+# printer is homed.
+CONFIG printer.cfg
+DICTIONARY linuxprocess.dict
+SHOULD_FAIL
+
+EDDY_REPEATABILITY T=0

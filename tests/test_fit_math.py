@@ -229,6 +229,79 @@ def test_rejects_a_pass_with_no_response_contrast():
         etc.detect_peak_type(freqs, EDGE_MARGIN)
 
 
+# --- weighted quadratic solve ----------------------------------------------
+
+
+def test_solves_a_hand_worked_quadratic_from_three_unit_weight_samples():
+    # Arrange: y = 2x^2 - 3x + 5 sampled at x = -1, 0 and 1 with weight 1, so
+    # y reads 10, 5 and 4. The power sums of those three samples, worked out
+    # by hand: w = 3, wx = 0, wx2 = 2, wx3 = 0, wx4 = 2,
+    # wy = 10 + 5 + 4 = 19, wxy = -10 + 0 + 4 = -6, wx2y = 10 + 0 + 4 = 14.
+
+    # Act
+    a, b, c = etc.solve_weighted_quadratic(
+        3.0, 0.0, 2.0, 0.0, 2.0, 19.0, -6.0, 14.0)
+
+    # Assert: eliminating by hand, the middle equation 2b = -6 gives b = -3,
+    # and 2a + 2c = 14 with 2a + 3c = 19 give c = 5 and a = 2, the parabola
+    # the samples were generated from. Every entry is exact in binary floating
+    # point, so the solve is exact to round-off and the tolerance is a
+    # thousand times that round-off.
+    assert a == pytest.approx(2.0, abs=1e-12)
+    assert b == pytest.approx(-3.0, abs=1e-12)
+    assert c == pytest.approx(5.0, abs=1e-12)
+
+
+def test_solves_a_hand_worked_quadratic_from_asymmetric_weighted_samples():
+    # Arrange: y = x^2 - 4x + 7 sampled at x = 0, 1 and 2 with weights 1, 2
+    # and 3, so y reads 7, 4 and 3. Every sample sits on one side of the
+    # origin, the shape a fit window clipped by the start of a pass has. The
+    # power sums, worked out by hand: w = 1 + 2 + 3 = 6, wx = 0 + 2 + 6 = 8,
+    # wx2 = 0 + 2 + 12 = 14, wx3 = 0 + 2 + 24 = 26, wx4 = 0 + 2 + 48 = 50,
+    # wy = 7 + 8 + 9 = 24, wxy = 0 + 8 + 18 = 26, wx2y = 0 + 8 + 36 = 44.
+
+    # Act
+    a, b, c = etc.solve_weighted_quadratic(
+        6.0, 8.0, 14.0, 26.0, 50.0, 24.0, 26.0, 44.0)
+
+    # Assert: three samples at three distinct x lie on exactly one parabola,
+    # and an exact fit returns it under any positive weighting, so the seeded
+    # coefficients 1, -4 and 7 come back whatever the weights are.
+    assert a == pytest.approx(1.0, abs=1e-12)
+    assert b == pytest.approx(-4.0, abs=1e-12)
+    assert c == pytest.approx(7.0, abs=1e-12)
+
+
+def test_solves_a_hand_worked_least_squares_fit_no_parabola_passes_through():
+    # Arrange: five unit-weight samples at x = -2, -1, 0, 1 and 2 reading
+    # y = 0, 0, 1, 0 and 0, which no parabola passes through, so the solve is
+    # a genuine least-squares compromise rather than an interpolation. The
+    # power sums, worked out by hand: w = 5, wx = 0, wx2 = 10, wx3 = 0,
+    # wx4 = 34, wy = 1, wxy = 0, wx2y = 0.
+
+    # Act
+    a, b, c = etc.solve_weighted_quadratic(
+        5.0, 0.0, 10.0, 0.0, 34.0, 1.0, 0.0, 0.0)
+
+    # Assert: the normal equations reduce by hand to 10b = 0, so b = 0, and
+    # 34a + 10c = 0 with 10a + 5c = 1 give a = -1/7 and c = 17/35, written
+    # below as their decimal expansions.
+    assert a == pytest.approx(-0.14285714285714285, abs=1e-12)
+    assert b == pytest.approx(0.0, abs=1e-12)
+    assert c == pytest.approx(0.4857142857142857, abs=1e-12)
+
+
+def test_rejects_normal_equations_that_have_no_single_solution():
+    # Arrange: three samples that all sit at the same x, which leaves every
+    # x moment zero (w = 3, wx = wx2 = wx3 = wx4 = 0) and no parabola
+    # determined. Their y sums are wy = 12, wxy = 0, wx2y = 0.
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="singular"):
+        etc.solve_weighted_quadratic(
+            3.0, 0.0, 0.0, 0.0, 0.0, 12.0, 0.0, 0.0)
+
+
 # --- scan angle normalization ----------------------------------------------
 
 
@@ -479,6 +552,67 @@ def test_scan_endpoints_at_45_degrees():
 def test_rejects_a_scan_length_of_zero():
     with pytest.raises(ValueError, match="scan length"):
         etc.scan_endpoints(10.0, 20.0, 45.0, 0.0)
+
+
+# --- descent sample bucketing ----------------------------------------------
+
+
+def test_each_descent_step_keeps_the_samples_taken_inside_its_own_window():
+    # Arrange: two descent steps, the first sampling from 1.00 s to 1.10 s at
+    # a measured height of 0.500 mm and the second from 1.30 s to 1.40 s at
+    # 0.400 mm. Two samples land in the first window and one in the second;
+    # the other three arrive before, between and after the windows, while the
+    # toolhead is moving.
+    windows = [(1.00, 1.10, 0.500), (1.30, 1.40, 0.400)]
+    samples = [(0.90, 100.0), (1.05, 110.0), (1.09, 120.0),
+               (1.20, 130.0), (1.35, 140.0), (1.90, 150.0)]
+
+    # Act
+    buckets, dropped = etc.bucket_samples_by_window(windows, samples)
+
+    # Assert
+    assert buckets == {0.500: [110.0, 120.0], 0.400: [140.0]}
+    assert dropped == 3
+
+
+def test_a_sample_taken_on_either_edge_of_a_window_belongs_to_that_step():
+    # Arrange: one window from 2.00 s to 2.50 s, with a sample at each edge.
+    windows = [(2.00, 2.50, 0.300)]
+    samples = [(2.00, 10.0), (2.50, 20.0)]
+
+    # Act
+    buckets, dropped = etc.bucket_samples_by_window(windows, samples)
+
+    # Assert: the window is closed at both ends, so both samples count.
+    assert buckets == {0.300: [10.0, 20.0]}
+    assert dropped == 0
+
+
+def test_a_step_that_received_no_samples_is_absent_from_the_buckets():
+    # Arrange: three descent steps, the middle one sampled during a gap in
+    # the sensor stream. A caller counts the buckets against the steps to see
+    # that gap, so the empty step must not appear at all.
+    windows = [(1.00, 1.10, 0.500), (1.30, 1.40, 0.400), (1.60, 1.70, 0.300)]
+    samples = [(1.05, 111.0), (1.65, 333.0)]
+
+    # Act
+    buckets, dropped = etc.bucket_samples_by_window(windows, samples)
+
+    # Assert
+    assert buckets == {0.500: [111.0], 0.300: [333.0]}
+    assert dropped == 0
+
+
+def test_a_descent_that_produced_no_samples_at_all_fills_no_bucket():
+    # Arrange
+    windows = [(1.00, 1.10, 0.500), (1.30, 1.40, 0.400)]
+
+    # Act
+    buckets, dropped = etc.bucket_samples_by_window(windows, [])
+
+    # Assert
+    assert buckets == {}
+    assert dropped == 0
 
 
 # --- Z curve ---------------------------------------------------------------

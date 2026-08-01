@@ -124,6 +124,41 @@ def find_extremum_index(freqs, peak_type, edge_margin):
     return best_idx
 
 
+def determinant_3x3(rows):
+    (a, b, c), (d, e, f), (g, h, i) = rows
+    return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+
+
+def replace_column(rows, column, values):
+    return [row[:column] + [value] + row[column + 1:]
+            for row, value in zip(rows, values)]
+
+
+def solve_weighted_quadratic(w, wx, wx2, wx3, wx4, wy, wxy, wx2y):
+    """Coefficients (a, b, c) of y = a*x^2 + b*x + c, solved by Cramer's rule
+    from the weighted power sums of the samples.
+
+    Deliberate deviation from upstream's _refine_peak_position, whose b
+    determinant (reference/tool_eddy_calibration.py:834-836) is expanded
+    wrongly. It reduces to the correct value only when the fit window is
+    symmetric about the extremum sample (wx = wx3 = 0), and a window clipped by
+    the start or the end of a pass is not symmetric, so upstream returns a
+    meaningless vertex there.
+    """
+    matrix = [[wx4, wx3, wx2],
+              [wx3, wx2, wx],
+              [wx2, wx, w]]
+    moments = [wx2y, wxy, wy]
+    det = determinant_3x3(matrix)
+    if abs(det) < FIT_DET_EPSILON:
+        raise ValueError(
+            "quadratic fit normal equations are singular, the response in "
+            "the fit window carries no curvature")
+    return tuple(
+        determinant_3x3(replace_column(matrix, column, moments)) / det
+        for column in range(3))
+
+
 def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
                       vertex_limit):
     """Ported from upstream's _refine_peak_position: a Gaussian-weighted
@@ -164,32 +199,7 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
     wy = sum(wi * y for wi, y in zip(ws, ys))
     wxy = sum(wi * x * y for wi, x, y in zip(ws, xs, ys))
     wx2y = sum(wi * x * x * y for wi, x, y in zip(ws, xs, ys))
-    # Cramer's rule on the weighted normal equations
-    #   [[wx4, wx3, wx2], [wx3, wx2, wx], [wx2, wx, w]] * [a, b, c]
-    #       = [wx2y, wxy, wy]
-    # Every determinant below is the cofactor expansion along the first row of
-    # the matrix with the matching column replaced by the right-hand side.
-    #
-    # Deliberate deviation from upstream: upstream's det_b expansion is wrong.
-    # It reduces to the correct value only when the fit window is symmetric
-    # about the extremum sample (wx = wx3 = 0), and a window clipped by the
-    # start or the end of a pass is not symmetric, so upstream returns a
-    # meaningless vertex there. The expansion below is the correct one.
-    det = (wx4 * (wx2 * w - wx * wx)
-           - wx3 * (wx3 * w - wx2 * wx)
-           + wx2 * (wx3 * wx - wx2 * wx2))
-    if abs(det) < FIT_DET_EPSILON:
-        raise ValueError(
-            "quadratic fit normal equations are singular, the response in "
-            "the fit window carries no curvature")
-    det_a = (wx2y * (wx2 * w - wx * wx)
-             - wx3 * (wxy * w - wy * wx)
-             + wx2 * (wxy * wx - wy * wx2))
-    det_b = (wx4 * (wxy * w - wx * wy)
-             - wx2y * (wx3 * w - wx2 * wx)
-             + wx2 * (wx3 * wy - wx2 * wxy))
-    a = det_a / det
-    b = det_b / det
+    a, b, _c = solve_weighted_quadratic(w, wx, wx2, wx3, wx4, wy, wxy, wx2y)
     if abs(a) < FIT_CURVATURE_EPSILON:
         raise ValueError(
             "quadratic fit is flat, the response in the fit window carries "
@@ -415,6 +425,33 @@ def z_descent_targets(z_start, z_stop, z_step):
             "the %.4f mm span from z_start to z_stop is not a whole number of "
             "%.4f mm steps" % (span, z_step))
     return [z_start - i * z_step for i in range(steps)] + [float(z_stop)]
+
+
+def bucket_samples_by_window(windows, samples):
+    """Gather the samples each time window holds, returning (buckets, dropped).
+    buckets maps the key of every window that received samples to the values it
+    received, and dropped counts the samples that fell between or outside the
+    windows.
+
+    windows is a list of (start_time, end_time, key) and samples a list of
+    (time, value). Both ascend in time and the windows do not overlap, so one
+    walk down each sequence places every sample.
+    """
+    buckets = {}
+    dropped = 0
+    index = 0
+    for start, end, key in windows:
+        while index < len(samples) and samples[index][0] < start:
+            index += 1
+            dropped += 1
+        inside = []
+        while index < len(samples) and samples[index][0] <= end:
+            inside.append(samples[index][1])
+            index += 1
+        if inside:
+            buckets.setdefault(key, []).extend(inside)
+    dropped += len(samples) - index
+    return buckets, dropped
 
 
 def build_z_curve(points):
@@ -1047,29 +1084,50 @@ def csv_row(columns, entry):
     return ",".join(fields) + "\n"
 
 
+def rotated_log_path(path):
+    """The sibling name an outdated log file is renamed to.
+
+    history_T0.csv becomes history_T0.1.csv, history_T0.2.csv and so on: the
+    smallest suffix not already on disk.
+    """
+    root, ext = os.path.splitext(path)
+    index = 1
+    while True:
+        candidate = "%s.%d%s" % (root, index, ext)
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
+
 def append_csv(path, columns, entry):
     """Append one measurement to a log file, creating it with its header.
 
-    Raises OSError or ValueError, which the callers turn into a gcode error
-    naming what was already completed.
+    Returns the path the old file was renamed to when its header no longer
+    matched columns (see rotated_log_path), or None when no rotation was
+    needed.
+
+    Raises OSError, which the callers turn into a gcode error naming what was
+    already completed. ValueError still propagates from csv_row, for an entry
+    with an unknown or missing field.
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     header = csv_header(columns)
     header_needed = True
+    rotated_to = None
     if os.path.exists(path) and os.path.getsize(path) > 0:
         header_needed = False
         with open(path, 'r') as f:
             first_line = f.readline()
         if first_line != header:
-            raise ValueError(
-                "%s already holds the columns %s, and this log writes %s. "
-                "Move that file aside, and the command writes a new one."
-                % (path, first_line.strip(), header.strip()))
+            rotated_to = rotated_log_path(path)
+            os.rename(path, rotated_to)
+            header_needed = True
     line = csv_row(columns, entry)
     with open(path, 'a') as f:
         if header_needed:
             f.write(header)
         f.write(line)
+    return rotated_to
 
 
 def history_filename(tool):
@@ -2341,27 +2399,33 @@ class EddyToolCalibration:
             state['running'] = False
         return freqs, stats
 
+    def _resolve_positions_after_moves(self, dump, timed, stats):
+        """Wait for the motion queue to drain, then map each sample's
+        print_time to the position the toolhead held at that time.
+
+        The wait comes first because motion_report reads the trapq's history
+        list alone, and a move reaches that list only when the toolhead's flush
+        loop finalizes it. Queried while the move still executes, the lookup
+        finds the newest already-finalized move and returns its end position,
+        the scan start point: a real tuple, not None, so the pass would "find"
+        its extremum at the scan start. Once the queue has drained the whole
+        move is in history, retained for MOVE_HISTORY_EXPIRE (30 s in
+        toolhead.py, far longer than a pass), so a None result again means the
+        timestamp lies outside known motion.
+        """
+        self.printer.lookup_object('toolhead').wait_moves()
+        samples = []
+        for print_time, freq in timed:
+            pos, velocity = dump.get_trapq_position(print_time)
+            if pos is None:
+                stats['dropped_no_position'] += 1
+                continue
+            samples.append((print_time, freq, pos[0], pos[1]))
+        return samples
+
     def _collect_scan(self, gcmd, start_x, start_y, end_x, end_y, scan_z):
-        """Run one directional scan pass and return its mapped samples.
-
-        Returns (samples, stats) where samples is a list of
-        (print_time, frequency, x, y). Positions come from the toolhead motion
-        queue at each sample's own timestamp rather than from an assumed
-        constant velocity, so acceleration ramps map correctly.
-
-        They are resolved only after the scan move has completed, never inside
-        the sensor callback. motion_report's get_trapq_position reads the
-        trapq through trapq_extract_old, which walks the trapq's history list
-        alone, and a move reaches that list only when the toolhead's flush
-        loop calls trapq_finalize_moves with a free time past the move's end.
-        A query made while the move is still executing therefore finds the
-        newest already-finalized move, clamps move_time to that move's own
-        duration and returns its end position, the scan start point: a real
-        tuple, not None, so the pass would "find" its extremum at the scan
-        start. Queried after wait_moves() the whole move is in history,
-        retained for MOVE_HISTORY_EXPIRE (30 s in toolhead.py, far longer than
-        a pass), so every timestamp maps correctly and a None result again
-        means the timestamp lies outside known motion.
+        """Run one directional scan pass, returning (samples, stats) with
+        samples a list of (print_time, frequency, x, y).
         """
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
@@ -2402,16 +2466,9 @@ class EddyToolCalibration:
         finally:
             state['running'] = False
         toolhead.manual_move([None, None, safe_z], self.z_speed)
-        toolhead.wait_moves()
         in_window = [s for s in collected if move_start <= s[0] <= move_end]
         stats['dropped_outside_move'] = len(collected) - len(in_window)
-        samples = []
-        for print_time, freq in in_window:
-            pos, velocity = dump.get_trapq_position(print_time)
-            if pos is None:
-                stats['dropped_no_position'] += 1
-                continue
-            samples.append((print_time, freq, pos[0], pos[1]))
+        samples = self._resolve_positions_after_moves(dump, in_window, stats)
         return samples, stats
 
     def _scan_pass(self, gcmd, center_x, center_y, angle_deg, length, scan_z,
@@ -2504,7 +2561,7 @@ class EddyToolCalibration:
         path = os.path.join(
             self._config_dir(), self.log_dir, history_filename(tool))
         try:
-            append_csv(path, HISTORY_COLUMNS, entry)
+            rotated_to = append_csv(path, HISTORY_COLUMNS, entry)
         except ValueError as e:
             raise gcmd.error(
                 "%s Only the drift log write failed: %s" % (completed, e))
@@ -2514,6 +2571,9 @@ class EddyToolCalibration:
                 "%s. Fix the directory permissions, or set save_history to "
                 "False in the [%s] config section."
                 % (completed, path, e, self.name))
+        if rotated_to is not None:
+            gcmd.respond_info(
+                "drift log rotated: %s -> %s" % (path, rotated_to))
 
     # -- measurement ------------------------------------------------------
 
@@ -2614,7 +2674,7 @@ class EddyToolCalibration:
                    self._machine_z(self.z_start + Z_APPROACH_HOP),
                    self.z_speed)
         self.sensor.add_client(handle_batch)
-        times = []
+        step_windows = []
         try:
             toolhead.dwell(DESCENT_SETTLE_DWELL)
             for target in self.z_targets:
@@ -2633,7 +2693,8 @@ class EddyToolCalibration:
                     for s in kin.get_steppers()
                 }
                 kin_pos = kin.calc_position(kin_spos)
-                times.append((start_query_time, end_query_time, kin_pos[2]))
+                step_windows.append(
+                    (start_query_time, end_query_time, kin_pos[2]))
             toolhead.dwell(DESCENT_SETTLE_DWELL)
             toolhead.wait_moves()
             reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
@@ -2643,24 +2704,20 @@ class EddyToolCalibration:
                    self._machine_z(self.z_start + Z_APPROACH_HOP),
                    self.z_speed)
         self._report_sensor_health(gcmd, stats)
-        buckets = {}
-        step = 0
+        readings = []
         for msg in msgs:
             for query_time, freq, dummy_z in msg['data']:
                 stats['raw_count'] += 1
                 if freq < self.freq_min:
                     stats['dropped_low_freq'] += 1
                     continue
-                while step < len(times) and query_time > times[step][1]:
-                    step += 1
-                if step < len(times) and query_time >= times[step][0]:
-                    buckets.setdefault(times[step][2], []).append(freq)
-                else:
-                    stats['dropped_outside_move'] += 1
-        if len(buckets) != len(times):
+                readings.append((query_time, freq))
+        buckets, outside = bucket_samples_by_window(step_windows, readings)
+        stats['dropped_outside_move'] += outside
+        if len(buckets) != len(step_windows):
             raise gcmd.error(
                 "The descent produced sensor data for %d of %d steps. %s\n%s"
-                % (len(buckets), len(times),
+                % (len(buckets), len(step_windows),
                    self._descent_gap_cause(stats),
                    "\n".join(self._sample_drop_rows(stats))))
         points = [(z, sum(freqs) / len(freqs))
@@ -2907,23 +2964,7 @@ class EddyToolCalibration:
                 result = self._run_tool_measurement(
                     gcmd, tool, debug, self.calibrate_z,
                     self._anchored_setpoint(gcmd, tool))
-            if is_baseline_run:
-                # A fresh T0 run always replaces the session baseline, so the
-                # comparison never mixes results from two different setups.
-                self.session_id += 1
-                self.baseline = {
-                    'tool': tool,
-                    'x': result['x'],
-                    'y': result['y'],
-                    'z_curve': result['z_curve'],
-                    'z_trigger': result['z_trigger'],
-                }
-            # The new baseline and the result measured against it are published
-            # together, with nothing in between, so a status read never pairs a
-            # fresh measurement with the baseline it replaced.
-            result['session_id'] = self.session_id
-            result['measured_time'] = self.printer.get_reactor().monotonic()
-            self.results[tool] = result
+            self._publish_measurement(tool, result, is_baseline_run)
             self._report_tool_result(gcmd, tool, result, is_baseline_run)
             offsets = None
             if reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
@@ -2942,6 +2983,27 @@ class EddyToolCalibration:
                 "The measurement of T%d is complete and reported above."
                 % (tool,))
         return {'tool': tool, 'offsets': offsets}
+
+    def _publish_measurement(self, tool, result, is_baseline_run):
+        """Store the session id, the baseline and the result as one unit.
+
+        A baseline run replaces the session baseline, so a comparison never
+        mixes results from two different setups. Nothing between the three
+        stores yields to the reactor, so a status read never pairs a fresh
+        measurement with the baseline it replaced.
+        """
+        if is_baseline_run:
+            self.session_id += 1
+            self.baseline = {
+                'tool': tool,
+                'x': result['x'],
+                'y': result['y'],
+                'z_curve': result['z_curve'],
+                'z_trigger': result['z_trigger'],
+            }
+        result['session_id'] = self.session_id
+        result['measured_time'] = self.printer.get_reactor().monotonic()
+        self.results[tool] = result
 
     def _preheat_anchored(self, gcmd, tools):
         """Heat every listed tool to the setpoint its anchor was taken at.
@@ -3175,11 +3237,15 @@ class EddyToolCalibration:
         gcmd.respond_info("\n".join(study_plan_rows(
             tool, runs, cycles, include_z, state, docking_tool, heating,
             setpoint)))
+        axes = study_axes(include_z)
+        try:
+            fields = [(axis, study_axis_field(axis)) for axis in axes]
+        except ValueError as e:
+            raise gcmd.error("Internal error: %s." % (e,))
         # Resolved before anything is heated, so a directory that cannot be
         # written fails in a second rather than after minutes of heating.
         log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
         self._study_preheat(gcmd, heating, tool)
-        axes = study_axes(include_z)
         by_cycle = dict((axis, []) for axis in axes)
         with self._retreating():
             # The first cycle measures whatever is mounted, so the tool is
@@ -3191,7 +3257,7 @@ class EddyToolCalibration:
             with self._retreating():
                 measured = self._run_study_cycle(
                     gcmd, tool, cycle, cycles, runs, include_z, setpoint,
-                    debug, state, docking_tool, log, axes)
+                    debug, state, docking_tool, log, fields)
             try:
                 rows = cycle_progress_rows(
                     cycle, [(axis, measured[axis]) for axis in axes])
@@ -3326,21 +3392,16 @@ class EddyToolCalibration:
             % (state, DOCKING_STATES))
 
     def _run_study_cycle(self, gcmd, tool, cycle, cycles, runs, include_z,
-                         setpoint, debug, state, docking_tool, log, axes):
+                         setpoint, debug, state, docking_tool, log, fields):
         """One cycle: dock and remount the tool, then measure it runs times.
 
-        Returns the measured values of the cycle, keyed by axis label. The
-        session baseline is left alone: a study repeats one measurement rather
-        than replacing what a calibration run established.
+        fields pairs every axis with the result field it reads. Returns the
+        measured values of the cycle, keyed by axis label. The session baseline
+        is left alone: a study repeats one measurement rather than replacing
+        what a calibration run established.
         """
-        # Resolved before the cycle moves, so an axis this build cannot read
-        # is refused rather than found partway through a run.
-        try:
-            fields = [(axis, study_axis_field(axis)) for axis in axes]
-        except ValueError as e:
-            raise gcmd.error("Internal error: %s." % (e,))
         self._exercise_docking(gcmd, tool, cycle, state, docking_tool, log)
-        measured = dict((axis, []) for axis in axes)
+        measured = dict((axis, []) for axis, _field in fields)
         for run in range(1, runs + 1):
             gcmd.respond_info(
                 measurement_progress_row(cycle, cycles, run, runs))

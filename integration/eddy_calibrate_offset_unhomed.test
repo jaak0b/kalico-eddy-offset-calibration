@@ -1,0 +1,7 @@
+# EDDY_CALIBRATE_OFFSET is registered and refuses to measure before the
+# printer is homed.
+CONFIG printer.cfg
+DICTIONARY linuxprocess.dict
+SHOULD_FAIL
+
+EDDY_CALIBRATE_OFFSET T=0
