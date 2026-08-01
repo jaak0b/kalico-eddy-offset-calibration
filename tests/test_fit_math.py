@@ -615,6 +615,51 @@ def test_a_descent_that_produced_no_samples_at_all_fills_no_bucket():
     assert dropped == 0
 
 
+# --- scan pass sample window ------------------------------------------------
+
+
+def test_a_scan_pass_keeps_the_samples_taken_while_the_move_ran():
+    # Arrange: a scan move running from 5.00 s to 5.60 s. Two samples arrive
+    # while the toolhead still settles, three during the move, and one after
+    # it has stopped.
+    samples = [(4.80, 100.0), (4.95, 110.0),
+               (5.10, 120.0), (5.30, 130.0), (5.50, 140.0),
+               (5.80, 150.0)]
+
+    # Act
+    inside, dropped = etc.samples_in_window(5.00, 5.60, samples)
+
+    # Assert: the samples come back whole, so the caller still holds the time
+    # each frequency was read at.
+    assert inside == [(5.10, 120.0), (5.30, 130.0), (5.50, 140.0)]
+    assert dropped == 3
+
+
+def test_a_scan_sample_taken_on_either_end_of_the_move_counts():
+    # Arrange: one sample at the first moment of the move and one at the last.
+    samples = [(2.00, 10.0), (2.50, 20.0)]
+
+    # Act
+    inside, dropped = etc.samples_in_window(2.00, 2.50, samples)
+
+    # Assert
+    assert inside == [(2.00, 10.0), (2.50, 20.0)]
+    assert dropped == 0
+
+
+def test_a_scan_pass_whose_samples_all_missed_the_move_keeps_none():
+    # Arrange: every sample arrived after the move had stopped, which is what
+    # a pass too short for the sensor's batch period looks like.
+    samples = [(9.10, 10.0), (9.20, 20.0)]
+
+    # Act
+    inside, dropped = etc.samples_in_window(5.00, 5.60, samples)
+
+    # Assert
+    assert inside == []
+    assert dropped == 2
+
+
 # --- Z curve ---------------------------------------------------------------
 
 

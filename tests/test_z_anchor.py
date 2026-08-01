@@ -95,6 +95,67 @@ def test_the_anchor_sits_at_the_curve_midpoint_above_the_trigger_plane():
     assert anchor_freq == pytest.approx(70.0, abs=1e-9)
 
 
+def test_the_stored_record_carries_the_anchor_and_the_run_that_measured_it():
+    # Arrange: the same descent from 1.0 mm to 4.0 mm and the same 0.4000 mm
+    # trigger plane as above, so the anchor pair is 2.1000 mm above the
+    # trigger plane at 70 Hz. The run held the nozzle at a 150.0 C setpoint
+    # while the heater read 149.7 C, with the sensor converting counts at
+    # 0.08940696716308594 Hz on drive current 15, over a coil found at
+    # X 349.8721, Y 5.0413.
+    curve = etc.build_z_curve([(1.0, 100.0), (2.0, 80.0), (4.0, 40.0)])
+
+    # Act
+    record = etc.anchor_record(
+        curve, 0.4000, 150.0, 149.7, 0.08940696716308594, 15, 349.8721,
+        5.0413)
+
+    # Assert
+    assert record['anchor_height'] == pytest.approx(2.1000, abs=1e-9)
+    assert record['anchor_frequency'] == pytest.approx(70.0, abs=1e-9)
+    assert record['trigger_z'] == pytest.approx(0.4000, abs=1e-9)
+    assert record['setpoint_temperature'] == pytest.approx(150.0, abs=1e-9)
+    assert record['observed_temperature'] == pytest.approx(149.7, abs=1e-9)
+    assert record['curve_low_z'] == pytest.approx(1.0, abs=1e-9)
+    assert record['curve_high_z'] == pytest.approx(4.0, abs=1e-9)
+    assert record['center_x'] == pytest.approx(349.8721, abs=1e-9)
+    assert record['center_y'] == pytest.approx(5.0413, abs=1e-9)
+
+
+def test_a_stored_record_survives_the_state_file_as_it_was_built():
+    # Arrange: a record built by the run rather than written out by hand, so a
+    # field the encoder demands and the run never fills fails here.
+    curve = etc.build_z_curve([(1.0, 100.0), (2.0, 80.0), (4.0, 40.0)])
+    record = etc.anchor_record(
+        curve, 0.4000, 150.0, 149.7, 0.08940696716308594, 15, 349.8721,
+        5.0413)
+
+    # Act
+    decoded = etc.decode_state(etc.encode_state({2: record}))
+
+    # Assert
+    assert decoded[2] == record
+
+
+def test_the_status_readout_withholds_the_sensor_settings_of_an_anchor():
+    # Arrange: a full anchor record as EDDY_CALIBRATE_Z stores it.
+    record = _anchor_record()
+
+    # Act
+    published = etc.anchor_status(record)
+
+    # Assert: a macro reads the anchor pair, the temperatures and the trigger
+    # plane. freq_conv, drive_current, the curve bounds and the coil center
+    # are diagnostics of the run that measured the anchor.
+    assert published == {
+        'anchor_height': 4.2130,
+        'anchor_frequency': 12345678.0,
+        'setpoint_temperature': 150.0,
+        'observed_temperature': 149.7,
+        'trigger_z': 1.2340,
+        'updated': '2026-08-01T14:03:22',
+    }
+
+
 def test_the_stored_anchor_reconstructs_the_trigger_plane_it_was_built_from():
     # Arrange: the same curve and the same 0.4000 mm trigger plane, with the
     # anchor values that were worked out by hand above.

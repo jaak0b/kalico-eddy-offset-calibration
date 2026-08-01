@@ -326,6 +326,23 @@ def test_an_unhandled_docking_state_is_rejected():
         etc.docking_row('sometimes', 1, 1)
 
 
+def test_a_study_with_a_partner_tool_docks_between_its_cycles():
+    assert etc.study_docks('through_tool') is True
+
+
+def test_a_study_with_no_partner_tool_does_not_dock():
+    assert etc.study_docks('no_other_tool') is False
+
+
+def test_a_study_without_toolchange_lines_does_not_dock():
+    assert etc.study_docks('no_toolchange_gcode') is False
+
+
+def test_an_unhandled_docking_state_is_not_taken_for_no_docking():
+    with pytest.raises(ValueError, match="unhandled docking state"):
+        etc.study_docks('sometimes')
+
+
 # --- heating before a study ------------------------------------------------
 
 
@@ -339,6 +356,23 @@ def test_a_tool_without_a_stored_reference_is_not_heated():
 
 def test_nothing_is_heated_with_z_calibration_off():
     assert etc.study_heating(False, True) == 'z_calibration_off'
+
+
+def test_a_study_held_at_an_anchor_setpoint_heats_the_measured_tool():
+    assert etc.study_heats('to_anchor_temperature') is True
+
+
+def test_a_study_of_a_tool_without_a_reference_heats_nothing():
+    assert etc.study_heats('no_anchor') is False
+
+
+def test_a_study_with_z_calibration_off_heats_nothing():
+    assert etc.study_heats('z_calibration_off') is False
+
+
+def test_an_unhandled_heating_state_is_not_taken_for_no_heating():
+    with pytest.raises(ValueError, match="unhandled heating state"):
+        etc.study_heats('warming_up')
 
 
 # --- choosing the docking tool ---------------------------------------------

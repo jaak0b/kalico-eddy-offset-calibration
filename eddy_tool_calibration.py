@@ -454,6 +454,17 @@ def bucket_samples_by_window(windows, samples):
     return buckets, dropped
 
 
+def samples_in_window(start, end, samples):
+    """Gather the samples one time window holds, as (inside, dropped).
+
+    Each sample is a sequence whose first element is its time, and the samples
+    come back whole rather than reduced to a single value.
+    """
+    buckets, dropped = bucket_samples_by_window(
+        [(start, end, 'window')], [(sample[0], sample) for sample in samples])
+    return buckets.get('window', []), dropped
+
+
 def build_z_curve(points):
     """points is a list of (z, frequency). Returns the list sorted by ascending
     Z. Ported from probe_eddy_current's calibration validation: frequency must
@@ -694,18 +705,62 @@ STATE_FILENAME = 'calibration_state.json'
 
 STATE_VERSION = 1
 
-# The five fields an offset run reads back: the anchor pair its descent is
-# evaluated against, the setpoint it has to bring the nozzle back to before
-# it measures, and freq_conv and drive_current, the sensor settings that pair
-# is only meaningful for. The rest of an anchor record is diagnostic and is
-# never fed back into a measurement.
-ANCHOR_NUMBER_FIELDS = (
-    'anchor_height', 'anchor_frequency', 'setpoint_temperature',
-    'freq_conv', 'drive_current',
-    'observed_temperature', 'trigger_z', 'curve_low_z', 'curve_high_z',
-    'center_x', 'center_y',
+# Every field of an anchor record, the type the state file stores it as, and
+# whether get_status publishes it. The five an offset run reads back are the
+# anchor pair its descent is evaluated against, the setpoint it has to bring
+# the nozzle back to before it measures, and freq_conv and drive_current, the
+# sensor settings that pair is only meaningful for. The rest is diagnostic and
+# is never fed back into a measurement.
+ANCHOR_FIELDS = (
+    ('anchor_height', float, True),
+    ('anchor_frequency', float, True),
+    ('setpoint_temperature', float, True),
+    ('freq_conv', float, False),
+    ('drive_current', float, False),
+    ('observed_temperature', float, True),
+    ('trigger_z', float, True),
+    ('curve_low_z', float, False),
+    ('curve_high_z', float, False),
+    ('center_x', float, False),
+    ('center_y', float, False),
+    ('updated', str, True),
 )
-ANCHOR_TEXT_FIELDS = ('updated',)
+ANCHOR_NUMBER_FIELDS = tuple(
+    name for name, convert, _status in ANCHOR_FIELDS if convert is float)
+ANCHOR_TEXT_FIELDS = tuple(
+    name for name, convert, _status in ANCHOR_FIELDS if convert is str)
+ANCHOR_STATUS_FIELDS = tuple(
+    name for name, _convert, status in ANCHOR_FIELDS if status)
+
+
+def anchor_record(curve, trigger_z, setpoint_temperature,
+                  observed_temperature, freq_conv, drive_current,
+                  center_x, center_y):
+    """The Z reference one EDDY_CALIBRATE_Z run stores for a tool.
+
+    curve is the descent the run measured and trigger_z the machine Z of the
+    switch trigger plane it pressed, which together fix the anchor pair.
+    """
+    anchor_height, anchor_frequency = switch_anchor(curve, trigger_z)
+    return {
+        'anchor_height': anchor_height,
+        'anchor_frequency': anchor_frequency,
+        'setpoint_temperature': setpoint_temperature,
+        'freq_conv': freq_conv,
+        'drive_current': drive_current,
+        'observed_temperature': observed_temperature,
+        'trigger_z': trigger_z,
+        'curve_low_z': curve[0][0],
+        'curve_high_z': curve[-1][0],
+        'center_x': center_x,
+        'center_y': center_y,
+        'updated': log_timestamp(),
+    }
+
+
+def anchor_status(record):
+    """The fields of an anchor record a macro reads through get_status."""
+    return dict((name, record[name]) for name in ANCHOR_STATUS_FIELDS)
 
 
 def anchor_sensor_mismatch(tool, anchor, freq_conv, drive_current):
@@ -745,18 +800,12 @@ def encode_state(anchors):
     for tool in sorted(anchors):
         record = anchors[tool]
         entry = {}
-        for field in ANCHOR_NUMBER_FIELDS:
+        for field, convert, _status in ANCHOR_FIELDS:
             if field not in record:
                 raise ValueError(
                     "the anchor for T%d is missing the %s field"
                     % (tool, field))
-            entry[field] = float(record[field])
-        for field in ANCHOR_TEXT_FIELDS:
-            if field not in record:
-                raise ValueError(
-                    "the anchor for T%d is missing the %s field"
-                    % (tool, field))
-            entry[field] = str(record[field])
+            entry[field] = convert(record[field])
         document['anchors'][str(tool)] = entry
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
@@ -1195,9 +1244,22 @@ def study_docking(tool, tool_count, has_toolchange_gcode):
     return 'no_other_tool', None
 
 
+def study_docks(state):
+    """Whether a docking state means the study docks between its cycles."""
+    if state == 'through_tool':
+        return True
+    if state == 'no_other_tool':
+        return False
+    if state == 'no_toolchange_gcode':
+        return False
+    raise ValueError(
+        "unhandled docking state %r, expected one of %r"
+        % (state, DOCKING_STATES))
+
+
 def docking_row(state, docking_tool, cycles):
     """The labeled row saying whether a study exercised the docking."""
-    if state == 'through_tool':
+    if study_docks(state):
         return ("docking between cycles: each cycle mounts T%d and remounts "
                 "the measured tool" % (int(docking_tool),))
     if state == 'no_other_tool':
@@ -1226,6 +1288,19 @@ def study_heating(calibrate_z, has_anchor):
     if not has_anchor:
         return 'no_anchor'
     return 'to_anchor_temperature'
+
+
+def study_heats(state):
+    """Whether a heating state means the tool is heated before measuring."""
+    if state == 'to_anchor_temperature':
+        return True
+    if state == 'no_anchor':
+        return False
+    if state == 'z_calibration_off':
+        return False
+    raise ValueError(
+        "unhandled heating state %r, expected one of %r"
+        % (state, HEATING_STATES))
 
 
 # What each axis of a study reads off one measurement. The Z figure is the
@@ -1713,6 +1788,12 @@ class EddyToolCalibration:
     def _state_path(self):
         return os.path.join(self._config_dir(), STATE_DIR, STATE_FILENAME)
 
+    def _data_dir(self):
+        return os.path.join(self._config_dir(), self.csv_dir)
+
+    def _log_dir(self):
+        return os.path.join(self._config_dir(), self.log_dir)
+
     def _load_state(self, config):
         """Read the persisted anchors. A missing file means none are set."""
         path = self._state_path()
@@ -1821,13 +1902,32 @@ class EddyToolCalibration:
             "tool in toolchange_gcode."
             % (" and ".join(missing), self.name, command))
 
+    def _internal_error(self, gcmd, reason):
+        """The error a caller raises for a member of a closed set this build
+        does not handle.
+
+        Klipper's dispatcher catches only its own command errors, so an
+        exception of any other kind leaving a handler shuts the printer down
+        instead of printing a message.
+        """
+        return gcmd.error("Internal error: %s." % (reason,))
+
+    def _require_phase(self, gcmd, phase):
+        if phase not in TOOL_PHASES:
+            raise self._internal_error(
+                gcmd, "the calibration stage %r is not one of %r"
+                % (phase, TOOL_PHASES))
+
+    def _study_heats(self, gcmd, heating):
+        try:
+            return study_heats(heating)
+        except ValueError as e:
+            raise self._internal_error(gcmd, e)
+
     @contextlib.contextmanager
     def _phase(self, gcmd, tool, phase, sweeping):
         """Name the tool and the stage that a fleet run's failure came from."""
-        if phase not in TOOL_PHASES:
-            raise gcmd.error(
-                "Internal error: the calibration stage %r is not one of %r."
-                % (phase, TOOL_PHASES))
+        self._require_phase(gcmd, phase)
         if not sweeping:
             yield
             return
@@ -2335,11 +2435,16 @@ class EddyToolCalibration:
 
     # -- sample collection ------------------------------------------------
 
-    def _collect_stationary(self, duration):
-        """Collect samples without moving. Returns (freqs, stats)."""
-        reactor = self.printer.get_reactor()
-        toolhead = self.printer.lookup_object('toolhead')
-        freqs = []
+    @contextlib.contextmanager
+    def _collecting(self):
+        """Stream sensor samples for as long as the block runs.
+
+        Yields (samples, stats): the (print_time, frequency) samples that read
+        at or above freq_min, and the counters of the collection. A callback
+        that returns False unregisters its client (bulk_sensor.py:97-104), so
+        the stream ends with the block.
+        """
+        samples = []
         stats = self._new_collection()
         state = {'running': True}
 
@@ -2354,16 +2459,23 @@ class EddyToolCalibration:
                 if freq < self.freq_min:
                     stats['dropped_low_freq'] += 1
                     continue
-                freqs.append(freq)
+                samples.append((print_time, freq))
             return True
 
         self.sensor.add_client(handle_batch)
         try:
-            toolhead.wait_moves()
-            reactor.pause(reactor.monotonic() + duration)
+            yield samples, stats
         finally:
             state['running'] = False
-        return freqs, stats
+
+    def _collect_stationary(self, duration):
+        """Collect samples without moving. Returns (freqs, stats)."""
+        reactor = self.printer.get_reactor()
+        toolhead = self.printer.lookup_object('toolhead')
+        with self._collecting() as (samples, stats):
+            toolhead.wait_moves()
+            reactor.pause(reactor.monotonic() + duration)
+        return [freq for _print_time, freq in samples], stats
 
     def _resolve_positions_after_moves(self, dump, timed, stats):
         """Wait for the motion queue to drain, then map each sample's
@@ -2396,29 +2508,10 @@ class EddyToolCalibration:
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
         dump = self._get_trapq(gcmd)
-        collected = []
-        stats = self._new_collection()
-        state = {'running': True}
-
-        def handle_batch(msg):
-            if not state['running']:
-                return False
-            if not msg:
-                return True
-            self._note_batch(stats, msg)
-            for print_time, freq, dummy_z in msg['data']:
-                stats['raw_count'] += 1
-                if freq < self.freq_min:
-                    stats['dropped_low_freq'] += 1
-                    continue
-                collected.append((print_time, freq))
-            return True
-
         safe_z = scan_z + self.scan_safe_z
         self._move(start_x, start_y, safe_z, self.z_speed)
         self._move(start_x, start_y, scan_z, self.z_speed)
-        self.sensor.add_client(handle_batch)
-        try:
+        with self._collecting() as (collected, stats):
             reactor.pause(reactor.monotonic() + SAMPLE_SETTLE_TIME)
             move_start = toolhead.get_last_move_time()
             toolhead.manual_move([end_x, end_y, None], self.scan_speed)
@@ -2429,11 +2522,9 @@ class EddyToolCalibration:
             move_end = toolhead.get_last_move_time()
             toolhead.wait_moves()
             reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
-        finally:
-            state['running'] = False
         toolhead.manual_move([None, None, safe_z], self.z_speed)
-        in_window = [s for s in collected if move_start <= s[0] <= move_end]
-        stats['dropped_outside_move'] = len(collected) - len(in_window)
+        in_window, outside = samples_in_window(move_start, move_end, collected)
+        stats['dropped_outside_move'] += outside
         samples = self._resolve_positions_after_moves(dump, in_window, stats)
         return samples, stats
 
@@ -2474,7 +2565,7 @@ class EddyToolCalibration:
         return result, stats
 
     def _save_csv(self, gcmd, label, samples, debug):
-        directory = os.path.join(self._config_dir(), self.csv_dir)
+        directory = self._data_dir()
         path = os.path.join(
             directory, "eddy_scan_%s.csv" % (label.replace(' ', '_'),))
         try:
@@ -2522,8 +2613,7 @@ class EddyToolCalibration:
         """
         if not self.save_history:
             return
-        path = os.path.join(
-            self._config_dir(), self.log_dir, history_filename(tool))
+        path = os.path.join(self._log_dir(), history_filename(tool))
         try:
             rotated_to = append_csv(path, HISTORY_COLUMNS, entry)
         except ValueError as e:
@@ -2635,25 +2725,11 @@ class EddyToolCalibration:
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
         kin = toolhead.get_kinematics()
-        msgs = []
-        stats = self._new_collection()
-        state = {'running': True}
-
-        def handle_batch(msg):
-            if not state['running']:
-                return False
-            if not msg:
-                return True
-            self._note_batch(stats, msg)
-            msgs.append(msg)
-            return True
-
         self._move(center_x, center_y,
                    self._machine_z(self.z_start + Z_APPROACH_HOP),
                    self.z_speed)
-        self.sensor.add_client(handle_batch)
         step_windows = []
-        try:
+        with self._collecting() as (readings, stats):
             toolhead.dwell(DESCENT_SETTLE_DWELL)
             for target in self.z_targets:
                 toolhead.manual_move(
@@ -2676,20 +2752,10 @@ class EddyToolCalibration:
             toolhead.dwell(DESCENT_SETTLE_DWELL)
             toolhead.wait_moves()
             reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
-        finally:
-            state['running'] = False
         self._move(center_x, center_y,
                    self._machine_z(self.z_start + Z_APPROACH_HOP),
                    self.z_speed)
         self._report_sensor_health(gcmd, stats)
-        readings = []
-        for msg in msgs:
-            for query_time, freq, dummy_z in msg['data']:
-                stats['raw_count'] += 1
-                if freq < self.freq_min:
-                    stats['dropped_low_freq'] += 1
-                    continue
-                readings.append((query_time, freq))
         buckets, outside = bucket_samples_by_window(step_windows, readings)
         stats['dropped_outside_move'] += outside
         if len(buckets) != len(step_windows):
@@ -2803,21 +2869,10 @@ class EddyToolCalibration:
                 center_x, center_y, agg = self._measure_xy(gcmd, debug)
                 curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
         self._merge_aggregate(agg, agg_z)
-        anchor_height, anchor_freq = switch_anchor(curve, trigger_z)
-        record = {
-            'anchor_height': anchor_height,
-            'anchor_frequency': anchor_freq,
-            'setpoint_temperature': self.calibration_temp,
-            'freq_conv': self._sensor_freq_conv(),
-            'drive_current': self.sensor.dccal.get_drive_current(),
-            'observed_temperature': observed,
-            'trigger_z': trigger_z,
-            'curve_low_z': curve[0][0],
-            'curve_high_z': curve[-1][0],
-            'center_x': center_x,
-            'center_y': center_y,
-            'updated': log_timestamp(),
-        }
+        record = anchor_record(
+            curve, trigger_z, self.calibration_temp, observed,
+            self._sensor_freq_conv(), self.sensor.dccal.get_drive_current(),
+            center_x, center_y)
         previous = self.anchors.get(tool)
         self.anchors[tool] = record
         try:
@@ -2847,8 +2902,9 @@ class EddyToolCalibration:
         ]
         rows.extend(self._z_curve_rows(curve))
         rows.extend([
-            "anchor height above trigger plane: %.4f mm" % (anchor_height,),
-            "anchor frequency: %.3f Hz" % (anchor_freq,),
+            "anchor height above trigger plane: %.4f mm"
+            % (record['anchor_height'],),
+            "anchor frequency: %.3f Hz" % (record['anchor_frequency'],),
             "sensor frequency conversion: %s Hz per count"
             % (record['freq_conv'],),
             "sensor drive current: %d" % (record['drive_current'],),
@@ -2868,11 +2924,10 @@ class EddyToolCalibration:
             gcmd, tool,
             self._log_entry(
                 'EDDY_CALIBRATE_Z',
-                {'x': center_x, 'y': center_y, 'z_crossing': None,
-                 'z_trigger': trigger_z,
-                 'setpoint_temperature': record['setpoint_temperature'],
-                 'observed_temperature': record['observed_temperature'],
-                 'agg': agg},
+                self._measurement_result(
+                    center_x, center_y, curve, None, trigger_z,
+                    record['setpoint_temperature'],
+                    record['observed_temperature'], agg),
                 None),
             "The Z reference for T%d is measured and saved to the state file."
             % (tool,))
@@ -3069,7 +3124,14 @@ class EddyToolCalibration:
             curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
             self._merge_aggregate(agg, agg_z)
             z_trigger, z_crossing = self._trigger_plane(gcmd, tool, curve)
-        result = {
+        return self._measurement_result(
+            center_x, center_y, curve, z_crossing, z_trigger, setpoint,
+            observed, agg)
+
+    def _measurement_result(self, center_x, center_y, curve, z_crossing,
+                            z_trigger, setpoint, observed, agg):
+        """The record one measurement of a tool leaves behind."""
+        return {
             'x': center_x,
             'y': center_y,
             'z_curve': curve,
@@ -3083,7 +3145,6 @@ class EddyToolCalibration:
             'session_id': None,
             'measured_time': None,
         }
-        return result
 
     def _trigger_plane(self, gcmd, tool, curve):
         """Machine Z of the switch trigger plane this descent reconstructs.
@@ -3207,7 +3268,7 @@ class EddyToolCalibration:
         try:
             fields = [(axis, study_axis_field(axis)) for axis in axes]
         except ValueError as e:
-            raise gcmd.error("Internal error: %s." % (e,))
+            raise self._internal_error(gcmd, e)
         # Resolved before anything is heated, so a directory that cannot be
         # written fails in a second rather than after minutes of heating.
         log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
@@ -3232,24 +3293,14 @@ class EddyToolCalibration:
 
     def _heating_setpoint(self, gcmd, heating, tool):
         """The setpoint a study heats the tool to, or None when it does not."""
-        if heating == 'to_anchor_temperature':
-            return self._anchor(gcmd, tool)['setpoint_temperature']
-        if heating in ('no_anchor', 'z_calibration_off'):
+        if not self._study_heats(gcmd, heating):
             return None
-        raise gcmd.error(
-            "Internal error: the heating state %r is not one of %r."
-            % (heating, HEATING_STATES))
+        return self._anchor(gcmd, tool)['setpoint_temperature']
 
     def _study_preheat(self, gcmd, heating, tool):
         """Heat the measured tool to its anchor setpoint, where it has one."""
-        if heating == 'to_anchor_temperature':
+        if self._study_heats(gcmd, heating):
             self._preheat_anchored(gcmd, [tool])
-            return
-        if heating in ('no_anchor', 'z_calibration_off'):
-            return
-        raise gcmd.error(
-            "Internal error: the heating state %r is not one of %r."
-            % (heating, HEATING_STATES))
 
     def _study_tool(self, gcmd):
         """The one tool a repeatability study measures."""
@@ -3299,7 +3350,7 @@ class EddyToolCalibration:
         return self.calibrate_z and not skip_z
 
     def _study_csv_path(self, gcmd, tool):
-        directory = os.path.join(self._config_dir(), self.log_dir)
+        directory = self._log_dir()
         try:
             os.makedirs(directory, exist_ok=True)
             name = next_study_filename(os.listdir(directory), tool)
@@ -3318,10 +3369,7 @@ class EddyToolCalibration:
         cycle rather than to any one measurement. log carries the study file
         and how many rows have reached it.
         """
-        if phase not in TOOL_PHASES:
-            raise gcmd.error(
-                "Internal error: the calibration stage %r is not one of %r."
-                % (phase, TOOL_PHASES))
+        self._require_phase(gcmd, phase)
         try:
             yield
         except self.printer.command_error as e:
@@ -3338,16 +3386,15 @@ class EddyToolCalibration:
 
     def _exercise_docking(self, gcmd, tool, cycle, state, docking_tool, log):
         """Dock the measured tool and mount it again, when a partner exists."""
-        if state == 'through_tool':
-            with self._study_step(gcmd, 'toolchange', cycle, None, log):
-                self._mount_tool(gcmd, docking_tool)
-                self._mount_tool(gcmd, tool)
+        try:
+            docks = study_docks(state)
+        except ValueError as e:
+            raise self._internal_error(gcmd, e)
+        if not docks:
             return
-        if state in ('no_other_tool', 'no_toolchange_gcode'):
-            return
-        raise gcmd.error(
-            "Internal error: the docking state %r is not one of %r."
-            % (state, DOCKING_STATES))
+        with self._study_step(gcmd, 'toolchange', cycle, None, log):
+            self._mount_tool(gcmd, docking_tool)
+            self._mount_tool(gcmd, tool)
 
     def _run_study_cycle(self, gcmd, tool, cycle, cycles, runs, include_z,
                          setpoint, debug, state, docking_tool, log, fields):
@@ -3414,14 +3461,7 @@ class EddyToolCalibration:
         """
         anchors = {}
         for tool, record in self.anchors.items():
-            anchors[str(tool)] = {
-                'anchor_height': record['anchor_height'],
-                'anchor_frequency': record['anchor_frequency'],
-                'setpoint_temperature': record['setpoint_temperature'],
-                'observed_temperature': record['observed_temperature'],
-                'trigger_z': record['trigger_z'],
-                'updated': record['updated'],
-            }
+            anchors[str(tool)] = anchor_status(record)
         tools = {}
         for tool, result in self.results.items():
             if result['session_id'] != self.session_id:
