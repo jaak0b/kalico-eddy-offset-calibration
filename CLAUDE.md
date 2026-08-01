@@ -153,14 +153,23 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     documented hardware). A wrong-looking example number presented as a default teaches users
     to keep it.
 
-15. **A comment states what the code cannot.** Write one only for provenance (a ported
-    algorithm and its source), a constraint invisible in the code (a hardware or API behaviour,
-    a physical assumption, a deliberate deviation and why), or an "unhandled" branch's reason.
-    Never restate what the next line does, never justify a change to a reviewer, never document
-    the edit rather than the code, and never write a docstring that only repeats the function
-    signature in prose. Code that needs a paragraph to be followed should be rewritten, not
-    annotated. The test: would this sentence still earn its place for someone reading the file
-    a year from now with no knowledge of how it came to be written? If not, delete it.
+15. **A comment states what the code cannot; three categories only, and a budget.** A new
+    comment or docstring line is allowed ONLY if it is one of: (a) provenance, citing the source
+    file and line of a ported algorithm or a depended-on Kalico behaviour; (b) a physical or API
+    constraint unreadable from the code (hardware behaviour, a measurement assumption, a
+    deliberate deviation and why); (c) the reason an "unhandled" branch exists. Everything else
+    is forbidden, specifically: restating what the next line or block does, arguing that a
+    change is an improvement, narrating what was deleted or added, describing the shape of a
+    fix, and docstrings that paraphrase the function name or signature. Code needing a paragraph
+    to follow gets rewritten, not annotated.
+
+    **Enforcement, because the principle alone does not hold.** Every task that edits code
+    carries an explicit budget of new comment lines, stated in the task's instructions and
+    proportional to its size (a bug fix gets a handful; a new subsystem rarely needs more than
+    25). Deleting comments that fail the three categories is always free and never counts
+    against a budget. The rationale in a task's instructions is for whoever does the work, not
+    for the file: never copy the reasoning behind an assignment into the code it produces. When
+    reviewing, treat an over-budget or narrating comment as a finding like any other.
 
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
