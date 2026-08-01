@@ -6,7 +6,8 @@ Status: draft for owner review. Target: Kalico plugin (`klippy/plugins/`), GPLv3
 
 One plugin, one config section, calibrating per-tool XYZ nozzle offsets against a
 bed-mounted LDC1612 eddy sensor board. Offsets are reported to the console only;
-no toolchanger integration or persistence in v1.
+the plugin persists its own Z references, and there is no toolchanger
+integration in v1.
 
 Out of scope for v1: channel-2 (big coil) support, pressure-advance experiments,
 Z homing/bed meshing (Kalico's probe_eddy_current already covers that use case),
@@ -58,7 +59,7 @@ pair_scans: True                # forward+reverse averaging (latency cancellatio
 samples_min: 100                # abort fit below this sample count per pass
 query_time: 0.5                 # seconds EDDY_QUERY samples for
 save_csv: False                 # dump raw scan data for analysis
-csv_dir: EddyToolCalibration     # folder name, relative to the config dir, for scan CSV files
+csv_dir: EddyToolCalibration/data # folder, relative to the config dir, for scan CSV files
 # --- fit tuning ---
 fit_window_radius: 1.0          # mm each side of the extremum; coil_inner_diameter / 2
 fit_sigma_fraction: 0.5         # Gaussian weight sigma as a fraction of the window
@@ -66,10 +67,23 @@ fit_vertex_limit: 0.5           # reject a vertex past this fraction of the wind
 edge_margin: 0.15               # fraction of each pass treated as edge
 freq_min: 1000000.0             # Hz; samples below this are discarded as noise
 # --- Z offsets ---
-z_offset_mode: identical_hotends # or mixed_hotends; leave out to skip Z entirely
-# --- per-tool Z anchors, written by EDDY_SET_Z_REF (mixed_hotends only) ---
-z_ref_t0: 0.2000:12345678.000   # "<z>:<reference frequency>", one per tool 0 to 15
+calibrate_z: False              # run the Z descent and report Z offsets
+# --- contact switch, required when calibrate_z is True ---
+switch_pin: ^PA1                # endstop pin, invert and pullup prefixes allowed
+switch_x: 340.0                 # machine X of the nozzle over the switch
+switch_y: 5.0                   # machine Y of the nozzle over the switch
+switch_probe_z_start: 3.0       # machine Z the probing move starts from
+switch_probe_speed: 5.0         # mm/s
+switch_probe_lift_speed: 5.0    # default: switch_probe_speed
+switch_probe_max_travel: 4.0    # mm below switch_probe_z_start
+switch_probe_sample_retract_dist: 2.0  # mm
+switch_probe_tolerance: 0.020   # mm, spread across the counted presses
 ```
+
+Per-tool Z references are not config options. They live in
+`EddyToolCalibration/calibration_state.json` next to the printer config,
+written by `EDDY_CALIBRATE_Z` as soon as a reference is measured. See
+`docs/z-probe-design.md` for the state file schema and the anchor math.
 
 `coil_z` is the only vertical option in machine coordinates. `scan_height`,
 `z_start` and `z_stop` are heights above the coil top face, so the plugin adds
@@ -77,42 +91,31 @@ z_ref_t0: 0.2000:12345678.000   # "<z>:<reference frequency>", one per tool 0 to
 breaks that (a `z_stop` at or below the face, or a `scan_height` at or below
 the face or at or above `z_start`) is a config error at load, never clamped.
 Measured Z is the other direction: the descent curve stores the machine Z the
-kinematics report,
-so the curve range, the `EDDY_SET_Z_REF` `Z=` anchor and the reported crossing
-are all machine Z.
+kinematics report, so the curve range, the switch trigger plane and the
+reported crossing are all machine Z.
 
-## Z offset modes
+Active gcode offsets do not affect any measurement. The plugin commands and
+reads machine coordinates, below the gcode transform, so calibration is valid
+in whatever state the printer is in.
 
-`z_offset_mode` decides how the Z offset between two tools is derived. It has
-no default, and the three cases are handled separately end to end:
+## Z offsets
 
-- **Omitted**: no Z descent runs at all. `EDDY_CALIBRATE_TOOL` measures XY
-  only, the readout carries no Z rows, and `EDDY_SET_Z_REF` is an error
-  naming the option. The descent is the slowest part of a calibration and its
-  output is unread without a mode, so skipping it saves that time outright.
-- **`identical_hotends`**: one shared reference frequency serves every tool.
-  It is the baseline tool's own frequency at the midpoint by height of its
-  measured Z range, evaluated on that curve. The baseline crosses it at that
-  midpoint by construction; every other tool's crossing is the height at
-  which its own curve reaches the same frequency, and the Z offset is the
-  difference between the two crossings. No anchor, no contact measurement,
-  and nothing to persist in config.
+`calibrate_z` decides whether a Z descent runs at all:
 
-  The assumption: every tool carries an identical hotend assembly, nozzle,
-  heater block and shroud alike, because the coil responds to all the metal
-  near it and not to the nozzle tip alone. Identical assemblies produce
-  identical frequency-vs-height curves, so equal frequency means equal
-  distance. Whether that holds on a given machine is measurable: anchor two
-  tools once with `EDDY_SET_Z_REF` under `mixed_hotends` and compare the
-  anchored offset against the shared-reference offset for the same pair.
-  Per-tool anchors are rejected in this mode, in config and in the command,
-  because an anchored tool would be compared against a different reference
-  frequency from the rest.
-- **`mixed_hotends`**: each tool is anchored on its own with
-  `EDDY_SET_Z_REF`, so tools with different hotends or nozzle materials each
-  get their own frequency reference. A Z offset needs both the baseline tool
-  and the measured tool anchored; without them the readout says which tool
-  lacks a reference and names the command.
+- **False** (the default): no descent runs. `EDDY_CALIBRATE_OFFSET` measures
+  XY only and the readout carries no Z rows. The descent is the slowest part
+  of a calibration, so skipping it saves that time outright.
+- **True**: each tool carries its own Z reference, measured once by
+  `EDDY_CALIBRATE_Z` against a contact switch mounted near the coil. The
+  reference is the height of the tool's own curve midpoint above the switch
+  trigger plane, plus the frequency there, so tools with different hotends or
+  nozzle materials each get their own frequency reference and the comparison
+  stays material-independent. The switch's own height cancels out of every
+  offset. `EDDY_CALIBRATE_OFFSET` refuses to run, before any motion, for a
+  tool that has no stored reference.
+
+The anchor math, the state file schema and the error paths are specified in
+`docs/z-probe-design.md`.
 
 Display precision in every readout: millimetres to 4 decimals, frequencies to
 3 decimals. Values are printed exactly as measured at that precision, never
@@ -129,7 +132,7 @@ reference it; decide during implementation, wrapper preferred.)
 - `EDDY_LOCATE [DEBUG=1]`: coarse raster over the configured coil position,
   finds and stores the refined coil center for the session; prints it.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_CALIBRATE_TOOL T=<n> [DEBUG=1]`: full XY(+Z) measurement for the
+- `EDDY_CALIBRATE_OFFSET T=<n> [DEBUG=1]`: full XY(+Z) measurement for the
   mounted tool. `T=` is required; a missing `T=` is a gcode error. `T=0`
   measures the baseline and always replaces the session baseline with its
   result, reporting its own offsets as zero by definition. `T=1` to `T=15`
@@ -142,17 +145,17 @@ reference it; decide during implementation, wrapper preferred.)
   2. Z: hold the XY center, descend from z_start to z_stop stepwise, both
      heights above the coil top face (probe_eddy_current
      calibration-move pattern: step, dwell, window-average samples), producing a
-     freq-vs-Z curve; report the Z at which frequency crosses the reference
-     frequency the configured `z_offset_mode` supplies. With `z_offset_mode`
-     left out, this whole step is skipped and no descent runs.
+     freq-vs-Z curve; report the Z at which frequency crosses the tool's own
+     stored anchor frequency, and the switch trigger plane that implies. With
+     `calibrate_z: False` this whole step is skipped and no descent runs.
   3. Print labeled results: raw center, the Z curve rows when a descent ran,
      and offsets relative to the T0 baseline.
-- `EDDY_SET_Z_REF [T=<n>] Z=<machine Z>`: one-time per-tool anchor: after the
-  owner measures true Z by their existing method (paper/pin), this binds the
-  measured frequency curve to reality; stored in memory and printed so the owner
-  can persist it in config (`z_ref_t<n>:` option) for reuse. `Z=` is a machine
-  coordinate, the frame the descent curve is measured in, not a height above
-  the coil top face. Requires `z_offset_mode: mixed_hotends`.
+- `EDDY_CALIBRATE_Z T=<n> [DEBUG=1]`: one-time per-tool Z reference. Presses
+  the contact switch four times, discards the first press as a warm-up, takes
+  the median of the remaining three as the trigger plane, then measures the
+  tool's XY center and descent curve and stores the curve midpoint's height
+  above that trigger plane together with the frequency there. Written to the
+  state file immediately. Requires `calibrate_z: True` and the switch options.
 - All output as labeled raw-value rows, not prose.
 
 ## Algorithm notes (ported from upstream, with provenance)
@@ -170,7 +173,7 @@ reference it; decide during implementation, wrapper preferred.)
 - Z curve: piecewise handling like probe_eddy_current's EddyCalibration; we fit
   the descent curve and evaluate the reference-frequency crossing. Per-tool
   reference makes the method material-independent for Z (brass vs steel each get
-  their own anchor); that is the `mixed_hotends` mode above.
+  their own anchor), which is the switch-anchored reference above.
 - Material independence for XY comes free: symmetry center of any monotonic
   response is amplitude-invariant.
 
@@ -186,10 +189,10 @@ LDC1612 status register (drive current miscalibrated).
 
 1. Bring-up on BTT Eddy Coil (bigger coil, same electronics): EDDY_QUERY,
    EDDY_LOCATE, scan curves visually sane (save_csv + offline plot).
-2. Repeatability: EDDY_CALIBRATE_TOOL x10 on one tool without toolchange;
+2. Repeatability: EDDY_CALIBRATE_OFFSET x10 on one tool without toolchange;
    report min/max/stddev per axis. Target: XY stddev < 5 um on crab board.
 3. Cross-check vs contact method (tools_calibrate / owner's pin) on 2+ tools;
    agreement within the contact method's own repeatability.
 4. Dirty-nozzle test: repeat (2) with deliberately filthy nozzle; deltas vs
    clean runs are the headline metric of the whole project.
-5. Kalico-update smoke: EDDY_QUERY + one EDDY_CALIBRATE_TOOL after each update.
+5. Kalico-update smoke: EDDY_QUERY + one EDDY_CALIBRATE_OFFSET after each update.

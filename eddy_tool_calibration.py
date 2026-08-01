@@ -12,9 +12,10 @@
 # Free Software Foundation, either version 3 of the License, or (at your
 # option) any later version. See LICENSE for the full text.
 
-"""Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_TOOL
-and EDDY_SET_Z_REF gcode commands for eddy-current based per-tool nozzle
-offset calibration. See docs/design.md for the full design and config schema.
+"""Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_Z
+and EDDY_CALIBRATE_OFFSET gcode commands for eddy-current based per-tool
+nozzle offset calibration. See docs/design.md and docs/z-probe-design.md for
+the full design and config schema.
 
 Constraint: this module must import cleanly on a machine without klippy
 installed (unit tests run standalone). Any import of klippy modules
@@ -22,8 +23,11 @@ installed (unit tests run standalone). Any import of klippy modules
 method body, never at module scope.
 """
 
+import json
 import math
 import os
+import tempfile
+import time
 
 # ---------------------------------------------------------------------------
 # Framework-agnostic math.
@@ -531,6 +535,193 @@ def z_curve_shared_reference(curve):
     return mid_z, z_curve_freq_at(curve, mid_z)
 
 
+# --- contact switch anchoring ----------------------------------------------
+
+# The switch is pressed four times and the first press is discarded. A first
+# press on a cold or unseated switch travels differently from the rest, so it
+# is a warm-up rather than a measurement, and it is dropped by its position in
+# the sequence rather than by any test on its value. The remaining three give
+# an unambiguous median with no even-count rule to pick.
+SWITCH_PRESS_COUNT = 4
+SWITCH_PRESS_DISCARDED = 1
+
+
+def aggregate_switch_presses(heights, tolerance):
+    """Median trigger height of the counted presses of one switch probing.
+
+    heights holds the trigger height of every press in the order it was made.
+    Returns (median, counted, spread), where counted holds the presses that
+    were kept. Raises ValueError when the counted presses disagree by more
+    than tolerance: a switch that cannot repeat inside its tolerance has a
+    mechanical cause that another press does not fix.
+    """
+    if len(heights) != SWITCH_PRESS_COUNT:
+        raise ValueError(
+            "switch probing needs %d presses, got %d"
+            % (SWITCH_PRESS_COUNT, len(heights)))
+    if tolerance <= 0.0:
+        raise ValueError(
+            "switch probe tolerance must be greater than 0, got %r"
+            % (tolerance,))
+    counted = [float(h) for h in heights[SWITCH_PRESS_DISCARDED:]]
+    ordered = sorted(counted)
+    median = ordered[len(ordered) // 2]
+    press_spread = ordered[-1] - ordered[0]
+    if press_spread > tolerance:
+        raise ValueError(
+            "the counted presses triggered at %s mm, a spread of %.4f mm, "
+            "above the %.4f mm tolerance"
+            % (", ".join("%.4f" % (h,) for h in counted), press_spread,
+               tolerance))
+    return median, counted, press_spread
+
+
+def switch_anchor(curve, trigger_z):
+    """Anchor height above a trigger plane, and the frequency there.
+
+    The anchor is taken at the midpoint by height of the tool's own measured
+    descent, the height furthest from both ends of that descent, so a later
+    descent keeps the widest margin on either side to still bracket the anchor
+    frequency. What is returned is the height above the switch trigger plane
+    rather than a machine Z, so the switch's own height cancels out of every
+    comparison between two tools.
+    """
+    anchor_z, anchor_freq = z_curve_shared_reference(curve)
+    return anchor_z - float(trigger_z), anchor_freq
+
+
+def trigger_plane_from_anchor(curve, anchor_height, anchor_frequency):
+    """Machine Z of the trigger plane a stored anchor implies for a curve.
+
+    Finds the height at which a freshly measured curve reaches the stored
+    anchor frequency, then subtracts the stored height above the trigger
+    plane. Returns (trigger_z, crossing_z). Raises ValueError when the stored
+    frequency lies outside the measured curve.
+    """
+    crossing = z_curve_z_at_freq(curve, anchor_frequency)
+    return crossing - float(anchor_height), crossing
+
+
+# --- persisted calibration state -------------------------------------------
+
+# Directory next to the printer config that holds everything this plugin
+# writes, and the state file inside it.
+STATE_DIR = 'EddyToolCalibration'
+STATE_FILENAME = 'calibration_state.json'
+
+# The only document version this build reads or writes.
+STATE_VERSION = 1
+
+# The two fields the offset math reads. The rest of an anchor record is
+# diagnostic: it lets a stale anchor be recognised after the coil or the
+# switch moves, and is never fed back into a measurement.
+ANCHOR_NUMBER_FIELDS = (
+    'anchor_height', 'anchor_frequency', 'trigger_z', 'curve_low_z',
+    'curve_high_z', 'center_x', 'center_y',
+)
+ANCHOR_TEXT_FIELDS = ('updated',)
+
+
+def encode_state(anchors):
+    """Serialise per-tool anchors to the state file's JSON document.
+
+    anchors maps an integer tool number to an anchor record. Tool numbers
+    become decimal strings because JSON object keys are strings.
+    """
+    document = {'version': STATE_VERSION, 'anchors': {}}
+    for tool in sorted(anchors):
+        record = anchors[tool]
+        entry = {}
+        for field in ANCHOR_NUMBER_FIELDS:
+            if field not in record:
+                raise ValueError(
+                    "the anchor for T%d is missing the %s field"
+                    % (tool, field))
+            entry[field] = float(record[field])
+        for field in ANCHOR_TEXT_FIELDS:
+            if field not in record:
+                raise ValueError(
+                    "the anchor for T%d is missing the %s field"
+                    % (tool, field))
+            entry[field] = str(record[field])
+        document['anchors'][str(tool)] = entry
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
+
+def decode_state(text):
+    """Parse a state document into anchors keyed by integer tool number.
+
+    Fields inside an anchor that this build does not know are ignored, so a
+    later version can add record fields without stranding an older build. An
+    unrecognised top-level version is not ignored: the document's layout is
+    what the version names, and reading it as version 1 would misread it.
+    """
+    try:
+        document = json.loads(text)
+    except ValueError as e:
+        raise ValueError("the state file is not valid JSON: %s" % (e,))
+    if not isinstance(document, dict):
+        raise ValueError(
+            "the state file holds a %s where a JSON object was expected"
+            % (type(document).__name__,))
+    version = document.get('version')
+    if version != STATE_VERSION:
+        raise ValueError(
+            "the state file carries version %r, and this plugin reads "
+            "version %d" % (version, STATE_VERSION))
+    raw_anchors = document.get('anchors', {})
+    if not isinstance(raw_anchors, dict):
+        raise ValueError(
+            "the state file's anchors entry holds a %s where a JSON object "
+            "was expected" % (type(raw_anchors).__name__,))
+    anchors = {}
+    for key, record in raw_anchors.items():
+        try:
+            tool = int(key)
+        except ValueError:
+            raise ValueError(
+                "the state file holds the anchor key %r, which is not a tool "
+                "number" % (key,))
+        if not isinstance(record, dict):
+            raise ValueError(
+                "the anchor for T%d holds a %s where a JSON object was "
+                "expected" % (tool, type(record).__name__))
+        entry = {}
+        for field in ANCHOR_NUMBER_FIELDS:
+            if field not in record:
+                raise ValueError(
+                    "the anchor for T%d is missing the %s field"
+                    % (tool, field))
+            try:
+                entry[field] = float(record[field])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "the anchor for T%d holds %r in its %s field, which is "
+                    "not a number" % (tool, record[field], field))
+        for field in ANCHOR_TEXT_FIELDS:
+            if field not in record:
+                raise ValueError(
+                    "the anchor for T%d is missing the %s field"
+                    % (tool, field))
+            entry[field] = str(record[field])
+        anchors[tool] = entry
+    return anchors
+
+
+def validate_csv_dir(csv_dir):
+    """Reject a scan dump directory that would sit on the state file's own.
+
+    The dumps are cleared out from time to time, and the saved references must
+    not go with them, so the two never share a directory.
+    """
+    if os.path.normpath(csv_dir) == os.path.normpath(STATE_DIR):
+        raise ValueError(
+            "csv_dir %r is the directory the calibration state file lives in. "
+            "Point csv_dir at a subdirectory such as %s instead, so clearing "
+            "the scan dumps cannot take the saved Z references with it."
+            % (csv_dir, os.path.join(STATE_DIR, 'data').replace('\\', '/')))
+
+
 def fit_half_window_samples(sample_rate, scan_speed, window_radius):
     """Fit half window in samples for a scan speed and window radius in mm."""
     if sample_rate <= 0.0:
@@ -561,25 +752,17 @@ def spread(values):
 # Klippy-facing layer.
 # ---------------------------------------------------------------------------
 
-# Tool indices accepted by T= and by the z_ref_t<n> config options.
+# Tool indices accepted by T=.
 MAX_TOOLS = 16
 
 # The tool every other tool's offsets are measured against.
 BASELINE_TOOL = 0
 
-# Values accepted by the z_offset_mode config option. The option has no
-# default: leaving it out measures the Z curve but reports no Z offset.
-#
-# identical_hotends rests on a physical assumption about the machine: every
-# tool carries the same hotend assembly, nozzle, heater block and shroud
-# alike, because the coil responds to all the metal near it and not to the
-# nozzle tip alone. Identical assemblies produce identical frequency-vs-height
-# curves, so equal frequency means equal distance and one reference frequency
-# serves every tool. mixed_hotends drops that assumption and anchors each tool
-# separately with EDDY_SET_Z_REF.
-Z_OFFSET_MODE_IDENTICAL = 'identical_hotends'
-Z_OFFSET_MODE_MIXED = 'mixed_hotends'
-Z_OFFSET_MODES = (Z_OFFSET_MODE_IDENTICAL, Z_OFFSET_MODE_MIXED)
+# The switch options EDDY_CALIBRATE_Z cannot run without. They are read at
+# load but their absence is not a load error, because a machine that only
+# wants XY offsets never needs them.
+SWITCH_REQUIRED_OPTIONS = (
+    'switch_pin', 'switch_x', 'switch_y', 'switch_probe_z_start')
 
 # Provenance: probe_eddy_current's calibration moves. Each step settles for
 # 0.050 s before its 0.100 s sample window, dwells 0.200 s in place, is
@@ -608,9 +791,42 @@ QUERY_COLLECT_TIME_DEFAULT = 0.500
 LOCATE_SCAN_LENGTH_FACTOR = 3.0
 
 
+class SwitchPinConfig:
+    """Read-only config view presenting switch_pin under the name pin.
+
+    tools_calibrate's endstop wrapper reads a single option named pin. Our own
+    section names it switch_pin so the option stays descriptive next to the
+    other switch options, and this view is what bridges the two names. Any
+    other option is refused rather than passed through, so a future upstream
+    change that starts reading a second option fails here instead of silently
+    picking up one of our unrelated options.
+    """
+
+    def __init__(self, config, pin):
+        self._config = config
+        self._pin = pin
+
+    def get_printer(self):
+        return self._config.get_printer()
+
+    def get_name(self):
+        return self._config.get_name()
+
+    def has_section(self, section):
+        return self._config.has_section(section)
+
+    def get(self, option, *args, **kwargs):
+        if option == 'pin':
+            return self._pin
+        raise self._config.error(
+            "%s: the contact switch endstop asked for the option %r, which "
+            "this config view does not carry."
+            % (self._config.get_name(), option))
+
+
 class EddyToolCalibration:
-    """Klippy extra: EDDY_QUERY / EDDY_LOCATE / EDDY_CALIBRATE_TOOL /
-    EDDY_SET_Z_REF gcode commands.
+    """Klippy extra: EDDY_QUERY / EDDY_LOCATE / EDDY_CALIBRATE_Z /
+    EDDY_CALIBRATE_OFFSET gcode commands.
     """
 
     def __init__(self, config):
@@ -670,7 +886,12 @@ class EddyToolCalibration:
             raise config.error("%s: scan_angles: %s" % (self.name, e))
         self.samples_min = config.getint('samples_min', 100, minval=3)
         self.save_csv = config.getboolean('save_csv', False)
-        self.csv_dir = config.get('csv_dir', 'EddyToolCalibration')
+        self.csv_dir = config.get(
+            'csv_dir', os.path.join(STATE_DIR, 'data').replace('\\', '/'))
+        try:
+            validate_csv_dir(self.csv_dir)
+        except ValueError as e:
+            raise config.error("%s: %s" % (self.name, e))
         self.query_time = config.getfloat(
             'query_time', QUERY_COLLECT_TIME_DEFAULT, above=0.0)
 
@@ -692,45 +913,44 @@ class EddyToolCalibration:
         self.freq_min = config.getfloat(
             'freq_min', FREQ_MIN_DEFAULT, minval=0.0)
 
-        # How the Z offset between two tools is derived, or None to skip Z
-        # offsets entirely and report the measured curve alone.
-        self.z_offset_mode = config.get('z_offset_mode', None)
-        if (self.z_offset_mode is not None
-                and self.z_offset_mode not in Z_OFFSET_MODES):
-            raise config.error(
-                "%s: z_offset_mode must read %s. Leave the option out to "
-                "measure the Z curve without reporting a Z offset."
-                % (self.name, " or ".join(Z_OFFSET_MODES)))
+        # Options this plugin no longer has. A removed option is refused at
+        # load rather than ignored, so a config that means something it can no
+        # longer do says so instead of quietly measuring something else.
+        self._reject_removed_options(config)
 
-        # Per-tool Z anchors persisted in config as "z_ref_t<n>: <z>:<freq>".
-        self.z_refs = {}
-        for tool in range(MAX_TOOLS):
-            raw = config.get('z_ref_t%d' % (tool,), None)
-            if raw is None:
-                continue
-            parts = raw.split(':')
-            if len(parts) != 2:
-                raise config.error(
-                    "%s: z_ref_t%d must read \"<z>:<frequency>\""
-                    % (self.name, tool))
-            try:
-                self.z_refs[tool] = (float(parts[0]), float(parts[1]))
-            except ValueError:
-                raise config.error(
-                    "%s: z_ref_t%d must read \"<z>:<frequency>\""
-                    % (self.name, tool))
-        if self.z_refs and self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
-            raise config.error(
-                "%s: remove the z_ref_t%d option, or set z_offset_mode to "
-                "%s. In %s mode every tool shares one reference frequency, "
-                "so a per-tool anchor is never read."
-                % (self.name, sorted(self.z_refs)[0], Z_OFFSET_MODE_MIXED,
-                   Z_OFFSET_MODE_IDENTICAL))
+        # Whether the Z descent runs at all. The descent is the slow part of a
+        # calibration, so it stays off until Z offsets are wanted.
+        self.calibrate_z = config.getboolean('calibrate_z', False)
+
+        # Contact switch. switch_x, switch_y and switch_probe_z_start are
+        # machine coordinates, not heights above the coil top face, because
+        # the switch is a separate fixture with no fixed relation to the coil.
+        self.switch_pin = config.get('switch_pin', None)
+        self.switch_x = config.getfloat('switch_x', None)
+        self.switch_y = config.getfloat('switch_y', None)
+        self.switch_probe_z_start = config.getfloat(
+            'switch_probe_z_start', None)
+        # Guards match the ones the toolchanger probing tools apply.
+        self.switch_probe_speed = config.getfloat(
+            'switch_probe_speed', 5.0, above=0.0)
+        self.switch_probe_lift_speed = config.getfloat(
+            'switch_probe_lift_speed', self.switch_probe_speed, above=0.0)
+        self.switch_probe_max_travel = config.getfloat(
+            'switch_probe_max_travel', 4.0, above=0.0)
+        self.switch_probe_sample_retract_dist = config.getfloat(
+            'switch_probe_sample_retract_dist', 2.0, above=0.0)
+        self.switch_probe_tolerance = config.getfloat(
+            'switch_probe_tolerance', 0.020, above=0.0)
 
         # Session state.
         self.center = None
         self.baseline = None
         self.results = {}
+        self.session_id = 0
+        self.last_tool = None
+
+        # Persisted per-tool Z anchors, keyed by integer tool number.
+        self.anchors = self._load_state(config)
 
         # The LDC1612 driver reads its i2c options, frequency and
         # reg_drive_current straight off the config section handed to it, and
@@ -740,6 +960,16 @@ class EddyToolCalibration:
         from klippy.extras import ldc1612
         self.sensor = ldc1612.LDC1612(config)
 
+        # The contact switch endstop, reused from the toolchanger probing
+        # tools. It reads only the pin, allows the pin to be shared with an
+        # existing [tools_calibrate] section, and registers no commands and no
+        # pin chip of its own, so nothing here collides with that section.
+        self.switch_endstop = None
+        if self.switch_pin is not None:
+            from klippy.extras import tools_calibrate
+            self.switch_endstop = tools_calibrate.ProbeEndstopWrapper(
+                SwitchPinConfig(config, self.switch_pin), 'z')
+
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command(
             'EDDY_QUERY', self.cmd_EDDY_QUERY,
@@ -748,11 +978,90 @@ class EddyToolCalibration:
             'EDDY_LOCATE', self.cmd_EDDY_LOCATE,
             desc=self.cmd_EDDY_LOCATE_help)
         gcode.register_command(
-            'EDDY_CALIBRATE_TOOL', self.cmd_EDDY_CALIBRATE_TOOL,
-            desc=self.cmd_EDDY_CALIBRATE_TOOL_help)
+            'EDDY_CALIBRATE_Z', self.cmd_EDDY_CALIBRATE_Z,
+            desc=self.cmd_EDDY_CALIBRATE_Z_help)
         gcode.register_command(
-            'EDDY_SET_Z_REF', self.cmd_EDDY_SET_Z_REF,
-            desc=self.cmd_EDDY_SET_Z_REF_help)
+            'EDDY_CALIBRATE_OFFSET', self.cmd_EDDY_CALIBRATE_OFFSET,
+            desc=self.cmd_EDDY_CALIBRATE_OFFSET_help)
+
+    # -- config and persisted state ---------------------------------------
+
+    def _reject_removed_options(self, config):
+        """Refuse a config that still carries an option this plugin dropped."""
+        if config.get('z_offset_mode', None) is not None:
+            raise config.error(
+                "%s: remove z_offset_mode and set calibrate_z instead. Every "
+                "tool now carries its own Z reference, measured by "
+                "EDDY_CALIBRATE_Z against a contact switch, so the mode that "
+                "assumed every tool has an identical hotend is gone."
+                % (self.name,))
+        for tool in range(MAX_TOOLS):
+            if config.get('z_ref_t%d' % (tool,), None) is None:
+                continue
+            raise config.error(
+                "%s: remove z_ref_t%d and run EDDY_CALIBRATE_Z T=%d once per "
+                "tool. References are stored in %s now. The old value cannot "
+                "be converted: it is a machine Z tied to a coil position and "
+                "a hand measurement, and the new reference is a height above "
+                "the switch trigger plane, which only the switch measurement "
+                "defines."
+                % (self.name, tool, tool, self._state_path()))
+
+    def _config_dir(self):
+        """Directory the printer config lives in, the root of our own files."""
+        config_file = self.printer.get_start_args()['config_file']
+        return os.path.dirname(os.path.abspath(config_file))
+
+    def _state_path(self):
+        return os.path.join(self._config_dir(), STATE_DIR, STATE_FILENAME)
+
+    def _load_state(self, config):
+        """Read the persisted anchors. A missing file means none are set."""
+        path = self._state_path()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, 'r') as f:
+                text = f.read()
+        except OSError as e:
+            raise config.error(
+                "%s: could not read %s: %s. Fix the file permissions, or "
+                "delete the file to start over and re-run EDDY_CALIBRATE_Z "
+                "for each tool." % (self.name, path, e))
+        try:
+            return decode_state(text)
+        except ValueError as e:
+            raise config.error(
+                "%s: %s (%s). Delete the file to start over and re-run "
+                "EDDY_CALIBRATE_Z for each tool." % (self.name, e, path))
+
+    def _write_state(self, gcmd):
+        """Persist the anchors, replacing the state file atomically.
+
+        The document is written to a temporary file in the same directory and
+        moved over the target, so an interrupted write cannot leave a
+        truncated state file behind.
+        """
+        path = self._state_path()
+        directory = os.path.dirname(path)
+        try:
+            os.makedirs(directory, exist_ok=True)
+            handle, temp_path = tempfile.mkstemp(
+                dir=directory, prefix=STATE_FILENAME, suffix='.tmp')
+            try:
+                with os.fdopen(handle, 'w') as f:
+                    f.write(encode_state(self.anchors))
+                os.replace(temp_path, path)
+            except Exception:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+        except OSError as e:
+            raise gcmd.error(
+                "Could not write the calibration state to %s: %s. Fix the "
+                "directory permissions and run EDDY_CALIBRATE_Z again. The "
+                "reference was not kept, because a reference that did not "
+                "persist would be gone at the next restart." % (path, e))
 
     # -- helpers ----------------------------------------------------------
 
@@ -781,15 +1090,13 @@ class EddyToolCalibration:
                 "command after the printer has finished starting up.")
         return dump
 
-    def _tool_index(self, gcmd):
-        return gcmd.get_int('T', 0, minval=0, maxval=MAX_TOOLS - 1)
-
-    def _required_tool_index(self, gcmd):
+    def _required_tool_index(self, gcmd, command):
         tool = gcmd.get_int('T', None, minval=0, maxval=MAX_TOOLS - 1)
         if tool is None:
             raise gcmd.error(
-                "Add T= to name the tool being measured, for example "
-                "EDDY_CALIBRATE_TOOL T=0.")
+                "Add T= to name the tool being measured, for example %s T=0. "
+                "Mount that tool before running the command."
+                % (command,))
         return tool
 
     def _report_sensor_health(self, gcmd, stats):
@@ -940,6 +1247,125 @@ class EddyToolCalibration:
             toolhead.manual_move([x, y, None], self.travel_speed)
             toolhead.manual_move([None, None, z], z_speed)
         toolhead.wait_moves()
+
+    # -- contact switch probing -------------------------------------------
+
+    def _require_switch_config(self, gcmd):
+        """Refuse to probe until every option the switch needs is present."""
+        if not self.calibrate_z:
+            raise gcmd.error(
+                "Set calibrate_z to True in the [%s] config section and "
+                "restart. Z calibration is off, so there is nothing for a Z "
+                "reference to be used by." % (self.name,))
+        missing = [name for name in SWITCH_REQUIRED_OPTIONS
+                   if getattr(self, name) is None]
+        if missing:
+            raise gcmd.error(
+                "Add %s to the [%s] config section and restart. Probing the "
+                "contact switch needs the switch pin, the machine X and Y the "
+                "nozzle presses it at, and the machine Z the press starts "
+                "from." % (", ".join(missing), self.name))
+
+    def _query_switch(self, gcmd):
+        """Refuse to move when the switch already reads triggered.
+
+        A switch that is closed before the nozzle touches it is a fault, so it
+        is reported rather than pressed again: a retry would turn a stuck
+        switch, an inverted pin, or a start height below the trigger point
+        into a silent second attempt.
+        """
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.wait_moves()
+        if self.switch_endstop.query_endstop(toolhead.get_last_move_time()):
+            raise gcmd.error(
+                "The contact switch already reads triggered before the "
+                "nozzle moved. Check that the switch is not stuck closed, "
+                "that switch_pin has the right inverting prefix, and that "
+                "switch_probe_z_start sits above the trigger point.")
+
+    def _probe_switch_once(self, gcmd):
+        """One downward probing move onto the switch, returning its trigger Z.
+
+        Ported from tools_calibrate's PrinterProbeMultiAxis: the target is the
+        current position lowered by the travel allowance and clamped to the
+        kinematic Z minimum, and the move itself is the homing module's
+        probing_move, which returns the position computed from step counts at
+        trigger time.
+        """
+        phoming = self.printer.lookup_object('homing')
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        kin_status = toolhead.get_kinematics().get_status(curtime)
+        if ('axis_minimum' not in kin_status
+                or 'axis_maximum' not in kin_status):
+            raise gcmd.error(
+                "Switch probing works with cartesian kinematics only. The "
+                "configured kinematics report no axis limits.")
+        pos = toolhead.get_position()
+        target = list(pos)
+        target[2] = max(pos[2] - self.switch_probe_max_travel,
+                        kin_status['axis_minimum'][2])
+        try:
+            epos = phoming.probing_move(
+                self.switch_endstop, target, self.switch_probe_speed)
+        except self.printer.command_error as e:
+            reason = str(e)
+            if "Probe triggered prior to movement" in reason:
+                raise gcmd.error(
+                    "The contact switch already read triggered at the start "
+                    "of a press. Check that the switch is not stuck closed, "
+                    "that switch_pin has the right inverting prefix, and that "
+                    "switch_probe_sample_retract_dist lifts the nozzle clear "
+                    "of the trigger point between presses.")
+            if "No trigger on probe after full movement" in reason:
+                raise gcmd.error(
+                    "The nozzle travelled %.4f mm down from machine Z %.4f "
+                    "without triggering the contact switch. Check switch_x, "
+                    "switch_y and switch_probe_z_start against where the "
+                    "switch actually sits, and raise switch_probe_max_travel "
+                    "if the nozzle stops short of it."
+                    % (pos[2] - target[2], pos[2]))
+            raise gcmd.error(
+                "The switch probing move failed: %s. The nozzle was at "
+                "machine Z %.4f and was moving to %.4f."
+                % (reason, pos[2], target[2]))
+        return epos[2]
+
+    def _probe_switch(self, gcmd, debug):
+        """Press the switch and return (trigger_z, counted, spread).
+
+        Ported from tools_calibrate's run_probe sample loop, with its
+        aggregation replaced: the presses are a fixed four, the first is
+        discarded as a warm-up, and the median of the remaining three is the
+        result. A spread above switch_probe_tolerance is an error rather than
+        a retry, because a switch that cannot repeat inside its tolerance has
+        a mechanical cause another press does not fix.
+        """
+        toolhead = self.printer.lookup_object('toolhead')
+        heights = []
+        for press in range(SWITCH_PRESS_COUNT):
+            trigger_z = self._probe_switch_once(gcmd)
+            heights.append(trigger_z)
+            if debug:
+                gcmd.respond_info(
+                    "switch press %d trigger (machine Z): %.4f mm"
+                    % (press + 1, trigger_z))
+            if press < SWITCH_PRESS_COUNT - 1:
+                toolhead.manual_move(
+                    [None, None,
+                     trigger_z + self.switch_probe_sample_retract_dist],
+                    self.switch_probe_lift_speed)
+                toolhead.wait_moves()
+        try:
+            median, counted, press_spread = aggregate_switch_presses(
+                heights, self.switch_probe_tolerance)
+        except ValueError as e:
+            raise gcmd.error(
+                "The contact switch did not repeat: %s. Check the switch "
+                "mounting and the nozzle for debris, or raise "
+                "switch_probe_tolerance if your switch cannot do better."
+                % (e,))
+        return median, counted, press_spread
 
     # -- sample collection ------------------------------------------------
 
@@ -1330,89 +1756,165 @@ class EddyToolCalibration:
         rows.extend(self._aggregate_rows(agg))
         gcmd.respond_info("\n".join(rows))
 
-    cmd_EDDY_CALIBRATE_TOOL_help = (
-        "Run the full XY and Z eddy-current measurement for the tool named "
-        "by T= and print its offsets relative to T0. T=0 measures the "
-        "baseline every other tool is compared against, so run it first. "
-        "Add DEBUG=1 to print each scan pass's diagnostic rows.")
+    cmd_EDDY_CALIBRATE_Z_help = (
+        "One-time Z reference setup for the tool named by T=. Presses the "
+        "contact switch and binds the result to the eddy sensor's reading. "
+        "Run it after changing a nozzle or a hotend, or after moving the coil "
+        "or the switch. This is the setup step, not the routine offset "
+        "measurement; that is EDDY_CALIBRATE_OFFSET. Add DEBUG=1 to print "
+        "each scan pass's diagnostic rows.")
 
-    def cmd_EDDY_CALIBRATE_TOOL(self, gcmd):
+    def cmd_EDDY_CALIBRATE_Z(self, gcmd):
+        self._require_switch_config(gcmd)
         self._ensure_homed(gcmd)
-        tool = self._required_tool_index(gcmd)
+        tool = self._required_tool_index(gcmd, 'EDDY_CALIBRATE_Z')
+        debug = self._debug_flag(gcmd)
+        self._query_switch(gcmd)
+        travel_z = self.switch_probe_z_start + self.scan_safe_z
+        self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
+        self._move(self.switch_x, self.switch_y, self.switch_probe_z_start,
+                   self.z_speed)
+        trigger_z, counted, press_spread = self._probe_switch(gcmd, debug)
+        self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
+        center_x, center_y, agg = self._measure_xy(gcmd, debug)
+        curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
+        self._merge_aggregate(agg, agg_z)
+        anchor_height, anchor_freq = switch_anchor(curve, trigger_z)
+        record = {
+            'anchor_height': anchor_height,
+            'anchor_frequency': anchor_freq,
+            'trigger_z': trigger_z,
+            'curve_low_z': curve[0][0],
+            'curve_high_z': curve[-1][0],
+            'center_x': center_x,
+            'center_y': center_y,
+            'updated': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        }
+        previous = self.anchors.get(tool)
+        self.anchors[tool] = record
+        try:
+            self._write_state(gcmd)
+        except Exception:
+            # An anchor that did not persist would be gone at the next
+            # restart, so the in-memory state goes back to what it was.
+            if previous is None:
+                del self.anchors[tool]
+            else:
+                self.anchors[tool] = previous
+            raise
+        rows = [
+            "tool: T%d" % (tool,),
+            "counted press triggers (machine Z): %s mm"
+            % (", ".join("%.4f" % (h,) for h in counted),),
+            "press spread: %.4f mm" % (press_spread,),
+            "press tolerance: %.4f mm" % (self.switch_probe_tolerance,),
+            "switch trigger (machine Z): %.4f mm" % (trigger_z,),
+            "center x: %.4f" % (center_x,),
+            "center y: %.4f" % (center_y,),
+        ]
+        rows.extend(self._z_curve_rows(curve))
+        rows.extend([
+            "anchor height above trigger plane: %.4f mm" % (anchor_height,),
+            "anchor frequency: %.3f Hz" % (anchor_freq,),
+            "state file: %s" % (self._state_path(),),
+        ])
+        rows.extend(self._aggregate_rows(agg))
+        gcmd.respond_info("\n".join(rows))
+
+    cmd_EDDY_CALIBRATE_OFFSET_help = (
+        "Measure the tool named by T= over the coil and print its offsets "
+        "relative to T0. T=0 measures the baseline every other tool is "
+        "compared against, so run it first. Add DEBUG=1 to print each scan "
+        "pass's diagnostic rows.")
+
+    def cmd_EDDY_CALIBRATE_OFFSET(self, gcmd):
+        self._ensure_homed(gcmd)
+        tool = self._required_tool_index(gcmd, 'EDDY_CALIBRATE_OFFSET')
         debug = self._debug_flag(gcmd)
         is_baseline_run = tool == BASELINE_TOOL
         if not is_baseline_run and self.baseline is None:
             raise gcmd.error(
-                "Run EDDY_CALIBRATE_TOOL T=%d first, with the baseline tool "
+                "Run EDDY_CALIBRATE_OFFSET T=%d first, with the baseline tool "
                 "mounted. Offsets are measured against that tool and it has "
                 "not been calibrated in this session."
                 % (BASELINE_TOOL,))
+        if self.calibrate_z:
+            # Checked before any motion, so a machine that is only half
+            # anchored fails in a second rather than partway through the run.
+            needed = [tool]
+            if not is_baseline_run:
+                needed.append(self.baseline['tool'])
+            self._require_anchors(gcmd, needed)
         result = self._run_tool_measurement(gcmd, tool, debug)
         if is_baseline_run:
             # A fresh T0 run always replaces the session baseline, so the
             # comparison never mixes results from two different setups.
+            self.session_id += 1
             self.baseline = {
                 'tool': tool,
                 'x': result['x'],
                 'y': result['y'],
                 'z_curve': result['z_curve'],
+                'z_trigger': result['z_trigger'],
             }
+        result['session_id'] = self.session_id
+        result['measured_time'] = self.printer.get_reactor().monotonic()
+        self.last_tool = tool
         self._report_tool_result(gcmd, tool, result, is_baseline_run)
 
-    def _require_anchor_mode(self, gcmd):
-        """Reject a per-tool anchor under a mode that would never read it."""
-        if self.z_offset_mode is None:
-            raise gcmd.error(
-                "Set z_offset_mode to %s and restart. Without a mode no "
-                "descent is measured, and an anchor binds a measured "
-                "descent to your Z measurement." % (Z_OFFSET_MODE_MIXED,))
-        if self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
-            raise gcmd.error(
-                "Set z_offset_mode to %s and restart to use per-tool "
-                "anchors. In %s mode every tool is compared against one "
-                "shared reference frequency, so an anchor for a single tool "
-                "would be measured in a different frame from the rest."
-                % (Z_OFFSET_MODE_MIXED, Z_OFFSET_MODE_IDENTICAL))
-        if self.z_offset_mode == Z_OFFSET_MODE_MIXED:
+    def _require_anchors(self, gcmd, tools):
+        """Refuse to measure Z for a tool that has no stored anchor."""
+        missing = sorted(set(t for t in tools if t not in self.anchors))
+        if not missing:
             return
-        raise self._unhandled_mode_error(gcmd)
-
-    def _unhandled_mode_error(self, gcmd):
-        return gcmd.error(
-            "Set z_offset_mode to %s and restart. The configured value %r is "
-            "not one this plugin handles."
-            % (" or ".join(Z_OFFSET_MODES), self.z_offset_mode))
-
-    def _measures_z(self, gcmd):
-        """Whether the configured mode has any use for a Z descent.
-
-        Without a mode the descent's output is never read, and the descent is
-        the slowest part of a calibration, so it is not run at all.
-        """
-        if self.z_offset_mode is None:
-            return False
-        if self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
-            return True
-        if self.z_offset_mode == Z_OFFSET_MODE_MIXED:
-            return True
-        raise self._unhandled_mode_error(gcmd)
+        raise gcmd.error(
+            "Run %s first, mounting each of those tools in turn. The Z "
+            "reference for %s is missing, and calibrate_z is True, so a Z "
+            "offset cannot be measured without it."
+            % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in missing),
+               ", ".join("T%d" % (t,) for t in missing)))
 
     def _run_tool_measurement(self, gcmd, tool, debug):
         center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
         agg = self._new_aggregate()
         self._merge_aggregate(agg, agg_xy)
         curve = None
-        if self._measures_z(gcmd):
+        z_crossing = None
+        z_trigger = None
+        if self.calibrate_z:
             curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
             self._merge_aggregate(agg, agg_z)
+            z_trigger, z_crossing = self._trigger_plane(gcmd, tool, curve)
         result = {
             'x': center_x,
             'y': center_y,
             'z_curve': curve,
+            'z_crossing': z_crossing,
+            'z_trigger': z_trigger,
             'agg': agg,
+            'session_id': self.session_id,
+            'measured_time': None,
         }
         self.results[tool] = result
         return result
+
+    def _trigger_plane(self, gcmd, tool, curve):
+        """Machine Z of the switch trigger plane this descent reconstructs.
+
+        Returns (trigger_z, crossing_z). This is the single place a measured
+        curve becomes a comparable height, so the printed rows, the reported
+        offsets and the status readout all read the same number.
+        """
+        anchor = self.anchors[tool]
+        try:
+            return trigger_plane_from_anchor(
+                curve, anchor['anchor_height'], anchor['anchor_frequency'])
+        except ValueError as e:
+            raise gcmd.error(
+                "The stored Z reference for T%d does not fall inside this "
+                "descent: %s. Run EDDY_CALIBRATE_Z T=%d again, which is "
+                "usually needed because the coil or the switch moved."
+                % (tool, e, tool))
 
     def _z_curve_rows(self, curve):
         """Labeled rows describing the measured descent curve itself."""
@@ -1424,96 +1926,37 @@ class EddyToolCalibration:
             % (curve[-1][1], curve[0][1]),
         ]
 
-    def _z_rows_identical(self, gcmd, tool, result, is_baseline_run):
-        """Crossing rows and Z offset row with one shared reference frequency.
-
-        The reference is the baseline tool's own frequency at the middle of
-        its descent. Identical hotend assemblies respond to the coil
-        identically, so equal frequency means equal distance and the height
-        at which another tool's curve reaches that frequency is directly
-        comparable.
-        """
-        base_curve = self.baseline['z_curve']
-        base_z, ref_freq = z_curve_shared_reference(base_curve)
-        rows = ["z reference frequency (shared): %.3f Hz" % (ref_freq,)]
-        if is_baseline_run:
-            # The baseline crosses its own reference at the height the
-            # reference was taken from, by construction.
-            rows.append("z crossing (machine Z): %.4f mm" % (base_z,))
-            return rows, None
-        try:
-            z_cross = z_curve_z_at_freq(result['z_curve'], ref_freq)
-        except ValueError as e:
-            raise gcmd.error(
-                "The shared Z reference frequency does not fall inside this "
-                "tool's descent: %s. Widen the descent by raising z_start or "
-                "lowering z_stop, which are heights above the coil top face, "
-                "then re-run EDDY_CALIBRATE_TOOL T=%d." % (e, BASELINE_TOOL))
-        rows.append("z crossing (machine Z): %.4f mm" % (z_cross,))
-        return rows, "offset z: %+.4f" % (z_cross - base_z,)
-
-    def _z_crossing_at_anchor(self, gcmd, tool, curve):
-        """Height at which a tool's curve reaches its own anchor frequency.
-
-        Returns None when the tool has no anchor. Raises when it has one that
-        this descent does not reach.
-        """
-        if tool not in self.z_refs:
-            return None
-        ref_z, ref_freq = self.z_refs[tool]
-        try:
-            return z_curve_z_at_freq(curve, ref_freq)
-        except ValueError as e:
-            raise gcmd.error(
-                "The Z reference for T%d does not fall inside this descent: "
-                "%s. Re-run EDDY_SET_Z_REF T=%d for this tool."
-                % (tool, e, tool))
-
-    def _z_rows_mixed(self, gcmd, tool, result, is_baseline_run):
-        """Crossing rows and Z offset row from each tool's own anchor."""
-        z_cross = self._z_crossing_at_anchor(gcmd, tool, result['z_curve'])
-        if z_cross is None:
-            rows = ["z crossing: not available, run EDDY_SET_Z_REF T=%d "
-                    "Z=<machine Z>" % (tool,)]
-        else:
-            ref_z, ref_freq = self.z_refs[tool]
-            rows = [
-                "z reference frequency: %.3f Hz" % (ref_freq,),
-                "z crossing (machine Z): %.4f mm" % (z_cross,),
-                "z vs anchor: %+.4f mm" % (z_cross - ref_z,),
-            ]
-        if is_baseline_run:
-            return rows, None
-        base = self.baseline
-        base_cross = self._z_crossing_at_anchor(
-            gcmd, base['tool'], base['z_curve'])
-        if z_cross is None:
-            return rows, ("offset z: not available, run EDDY_SET_Z_REF T=%d "
-                          "Z=<machine Z> for T%d" % (tool, tool))
-        if base_cross is None:
-            return rows, ("offset z: not available, run EDDY_SET_Z_REF T=%d "
-                          "Z=<machine Z> for the baseline tool"
-                          % (base['tool'],))
-        return rows, "offset z: %+.4f" % (z_cross - base_cross,)
-
-    def _z_rows(self, gcmd, tool, result, is_baseline_run):
-        """Every Z row for one tool: curve, crossing, and the Z offset row.
-
-        Returns (rows, offset_row), where offset_row is None when the run has
-        no Z offset to report.
-        """
-        if self.z_offset_mode is None:
-            return [], None
+    def _z_rows(self, tool, result):
+        """Every Z row for one tool: curve, anchor, crossing, trigger plane."""
+        if not self.calibrate_z:
+            return []
+        anchor = self.anchors[tool]
         rows = self._z_curve_rows(result['z_curve'])
-        if self.z_offset_mode == Z_OFFSET_MODE_IDENTICAL:
-            more, offset_row = self._z_rows_identical(
-                gcmd, tool, result, is_baseline_run)
-        elif self.z_offset_mode == Z_OFFSET_MODE_MIXED:
-            more, offset_row = self._z_rows_mixed(
-                gcmd, tool, result, is_baseline_run)
-        else:
-            raise self._unhandled_mode_error(gcmd)
-        return rows + more, offset_row
+        rows.extend([
+            "anchor frequency: %.3f Hz" % (anchor['anchor_frequency'],),
+            "anchor height above trigger plane: %.4f mm"
+            % (anchor['anchor_height'],),
+            "z crossing (machine Z): %.4f mm" % (result['z_crossing'],),
+            "switch trigger plane (machine Z): %.4f mm"
+            % (result['z_trigger'],),
+        ])
+        return rows
+
+    def _offsets(self, result):
+        """Offsets of a measured tool against the session baseline.
+
+        The Z entry is None when calibrate_z is False, because no descent ran
+        and there is no measured Z to report.
+        """
+        base = self.baseline
+        offsets = {
+            'x': result['x'] - base['x'],
+            'y': result['y'] - base['y'],
+            'z': None,
+        }
+        if self.calibrate_z:
+            offsets['z'] = result['z_trigger'] - base['z_trigger']
+        return offsets
 
     def _report_tool_result(self, gcmd, tool, result, is_baseline_run):
         rows = [
@@ -1521,51 +1964,58 @@ class EddyToolCalibration:
             "center x: %.4f" % (result['x'],),
             "center y: %.4f" % (result['y'],),
         ]
-        z_rows, offset_row = self._z_rows(
-            gcmd, tool, result, is_baseline_run)
-        rows.extend(z_rows)
+        rows.extend(self._z_rows(tool, result))
         if is_baseline_run:
             rows.append("offsets: baseline tool, zero by definition")
         else:
-            base = self.baseline
-            rows.append("baseline tool: T%d" % (base['tool'],))
-            rows.append("offset x: %+.4f" % (result['x'] - base['x'],))
-            rows.append("offset y: %+.4f" % (result['y'] - base['y'],))
-            if offset_row is not None:
-                rows.append(offset_row)
+            offsets = self._offsets(result)
+            rows.append("baseline tool: T%d" % (self.baseline['tool'],))
+            rows.append("offset x: %+.4f" % (offsets['x'],))
+            rows.append("offset y: %+.4f" % (offsets['y'],))
+            if offsets['z'] is not None:
+                rows.append("offset z: %+.4f" % (offsets['z'],))
         rows.extend(self._aggregate_rows(result['agg']))
         gcmd.respond_info("\n".join(rows))
 
-    cmd_EDDY_SET_Z_REF_help = (
-        "Bind the current tool's measured frequency curve to a real Z "
-        "obtained by another method. Z= is a machine Z coordinate, the same "
-        "frame the descent curve is reported in. Requires "
-        "z_offset_mode: mixed_hotends.")
+    def get_status(self, eventtime):
+        """Anchors and this session's measurements, for macros to read.
 
-    def cmd_EDDY_SET_Z_REF(self, gcmd):
-        self._require_anchor_mode(gcmd)
-        tool = self._tool_index(gcmd)
-        z = gcmd.get_float('Z')
-        result = self.results.get(tool)
-        if result is None:
-            raise gcmd.error(
-                "Run EDDY_CALIBRATE_TOOL T=%d first. The anchor binds a "
-                "measured descent curve to your Z measurement." % (tool,))
-        try:
-            ref_freq = z_curve_freq_at(result['z_curve'], z)
-        except ValueError as e:
-            raise gcmd.error(
-                "Z=%.4f does not fall inside the measured descent: %s. Pass "
-                "a machine Z, and widen the descent by raising z_start or "
-                "lowering z_stop, which are heights above the coil top "
-                "face." % (z, e))
-        self.z_refs[tool] = (z, ref_freq)
-        gcmd.respond_info(
-            "tool: T%d\n"
-            "z anchor (machine Z): %.4f mm\n"
-            "z reference frequency: %.3f Hz\n"
-            "config z_ref_t%d: %.4f:%.3f"
-            % (tool, z, ref_freq, tool, z, ref_freq))
+        This is a view of the same numbers the printed rows carry, rebuilt on
+        every call. Tool numbers are decimal strings so the dicts survive JSON
+        transport unchanged.
+        """
+        anchors = {}
+        for tool, record in self.anchors.items():
+            anchors[str(tool)] = {
+                'anchor_height': record['anchor_height'],
+                'anchor_frequency': record['anchor_frequency'],
+                'trigger_z': record['trigger_z'],
+                'updated': record['updated'],
+            }
+        tools = {}
+        for tool, result in self.results.items():
+            if self.baseline is None or result['session_id'] != self.session_id:
+                continue
+            offsets = self._offsets(result)
+            tools[str(tool)] = {
+                'session_id': result['session_id'],
+                'center_x': result['x'],
+                'center_y': result['y'],
+                'z_crossing': result['z_crossing'],
+                'offset_x': offsets['x'],
+                'offset_y': offsets['y'],
+                'offset_z': offsets['z'],
+                'measured_time': result['measured_time'],
+            }
+        return {
+            'calibrate_z': self.calibrate_z,
+            'baseline_tool': (
+                None if self.baseline is None else self.baseline['tool']),
+            'session_id': self.session_id,
+            'last_tool': self.last_tool,
+            'anchors': anchors,
+            'tools': tools,
+        }
 
 
 def load_config(config):

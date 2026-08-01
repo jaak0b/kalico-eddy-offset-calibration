@@ -7,8 +7,9 @@ affect the measurement. XY offsets come from directional scans over the
 coil with parabolic sub-sample fitting of the symmetric frequency response
 (material-independent). Z offset comes from a frequency-vs-height descent
 curve anchored by a one-time per-tool contact reference. Kalico only; no
-stock-Klipper support. Offsets are printed to the console in v1; there is no
-toolchanger integration or persistence yet.
+stock-Klipper support. Offsets are printed to the console in v1; the plugin
+persists its Z references itself, and there is no toolchanger integration
+yet.
 
 **Status: pre-hardware, unvalidated, under active development.** The
 sensor board has not yet been built and no measurement has been taken on
@@ -67,8 +68,15 @@ scan_angles: 45, 135
 pair_scans: True
 samples_min: 100
 save_csv: False
-# --- Z offsets: omit z_offset_mode to skip the Z descent entirely ---
-z_offset_mode: identical_hotends
+csv_dir: EddyToolCalibration/data
+# --- Z offsets: leave calibrate_z off to skip the Z descent entirely ---
+calibrate_z: True
+# --- contact switch, required when calibrate_z is True ---
+switch_pin: ^PA1                # endstop pin the nozzle presses
+switch_x: 340.0                 # machine X of the nozzle over the switch
+switch_y: 5.0                   # machine Y of the nozzle over the switch
+switch_probe_z_start: 3.0       # machine Z the press starts from
+switch_probe_tolerance: 0.020   # mm the counted presses may disagree by
 ```
 
 See `docs/design.md` for the full schema description and rationale.
@@ -80,28 +88,38 @@ See `docs/design.md` for the full schema description and rationale.
 - `EDDY_LOCATE [DEBUG=1]`: coarse raster scan over the configured coil
   position to find and store the refined coil center for the session.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_CALIBRATE_TOOL T=<n> [DEBUG=1]`: run the full XY and Z measurement
-  for the mounted tool and print its offsets relative to T0. Run `T=0` first
-  with the baseline tool mounted; every later tool is measured against it.
-  `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_SET_Z_REF [T=<n>] Z=<machine Z>`: bind the current tool's measured
-  frequency curve to a real Z obtained by another method. `Z=` is a machine
-  coordinate, the same frame the descent curve is reported in. Requires
-  `z_offset_mode: mixed_hotends`.
+- `EDDY_CALIBRATE_OFFSET T=<n> [DEBUG=1]`: measure the mounted tool over the
+  coil and print its offsets relative to T0. Run `T=0` first with the
+  baseline tool mounted; every later tool is measured against it. `DEBUG=1`
+  also prints each scan pass's diagnostic rows.
+- `EDDY_CALIBRATE_Z T=<n> [DEBUG=1]`: one-time Z reference setup for the
+  mounted tool. Run it after changing a nozzle or a hotend, or after moving
+  the coil or the switch. This is the setup step, not the routine
+  measurement.
 
 ## Z offsets
 
-Set `z_offset_mode` to pick how the Z offset between two tools is derived.
+Set `calibrate_z: True` and mount a contact switch next to the coil, the kind
+of endstop a nozzle can press on. Leave `calibrate_z` off and no descent runs
+at all, which makes each calibration noticeably faster; XY offsets are still
+measured and reported.
 
-- `identical_hotends`: no anchor needed. Every tool is compared against one
-  shared reference frequency taken from the baseline tool's own descent
-  curve. Use it when all tools carry the same hotend assembly, nozzle,
-  heater block and shroud alike, because the coil responds to all the metal
-  near it.
-- `mixed_hotends`: anchor each tool once with `EDDY_SET_Z_REF` against a Z
-  you measured by another method. Use it when tools differ.
-- Left out: no Z descent runs at all, which makes each calibration
-  noticeably faster. XY offsets are still measured and reported.
+Run `EDDY_CALIBRATE_Z T=<n>` once per tool before measuring offsets. It
+presses the switch four times, discards the first press as a warm-up, takes
+the median of the remaining three, and binds that height to the tool's own
+eddy sensor reading over the coil.
+
+The switch's own height does not have to be known or accurate. Every tool
+presses the same switch, only the differences between tools matter, and
+whatever height the switch sits at cancels out.
+
+References are saved to `EddyToolCalibration/calibration_state.json` next to
+your printer config as soon as they are measured. There is nothing to paste
+and no `SAVE_CONFIG` to run.
+
+Active gcode offsets do not affect any measurement. The plugin commands and
+reads machine coordinates, below the gcode transform, so calibrate in
+whatever state the printer is in.
 
 ## Moonraker update_manager
 
