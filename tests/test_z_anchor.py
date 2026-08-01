@@ -280,8 +280,24 @@ def test_an_anchor_temperature_that_is_not_a_number_is_rejected():
 
 def test_rejects_a_csv_dir_that_would_hold_the_state_file():
     with pytest.raises(ValueError, match="calibration state file"):
-        etc.validate_csv_dir('EddyToolCalibration')
+        etc.validate_data_dir('csv_dir', 'EddyToolCalibration')
+
+
+def test_rejects_a_log_dir_that_would_hold_the_state_file():
+    with pytest.raises(ValueError, match="calibration state file"):
+        etc.validate_data_dir('log_dir', 'EddyToolCalibration')
 
 
 def test_accepts_the_default_csv_subdirectory():
-    assert etc.validate_csv_dir('EddyToolCalibration/data') is None
+    assert etc.validate_data_dir('csv_dir', 'EddyToolCalibration/data') is None
+
+
+def test_rejects_a_log_dir_the_scan_dumps_are_cleared_out_of():
+    with pytest.raises(ValueError, match="directory csv_dir names"):
+        etc.validate_log_dir(
+            'EddyToolCalibration/data', 'EddyToolCalibration/data')
+
+
+def test_accepts_the_default_log_and_dump_directories_side_by_side():
+    assert etc.validate_log_dir(
+        'EddyToolCalibration/logs', 'EddyToolCalibration/data') is None

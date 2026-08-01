@@ -60,7 +60,8 @@ samples_min: 100                # abort fit below this sample count per pass
 query_time: 0.5                 # seconds EDDY_QUERY samples for
 save_csv: False                 # dump raw scan data for analysis
 save_history: True              # append every measurement to the per-tool drift log
-csv_dir: EddyToolCalibration/data # folder, relative to the config dir, for scan CSV files
+csv_dir: EddyToolCalibration/data # folder, relative to the config dir, for scan dumps
+log_dir: EddyToolCalibration/logs # folder for the drift logs and the study files
 # --- fit tuning ---
 fit_window_radius: 1.0          # mm each side of the extremum; coil_inner_diameter / 2
 fit_sigma_fraction: 0.5         # Gaussian weight sigma as a fraction of the window
@@ -86,7 +87,7 @@ switch_probe_max_travel: 4.0    # mm below the press start height
 switch_probe_sample_retract_dist: 2.0  # mm, must be below max_travel
 switch_probe_tolerance: 0.020   # mm, spread across the counted presses
 # --- fleet runs: required only for a command without T= ---
-tool_count: 4                   # 1 to 99; tools are T0 .. T(tool_count-1), no holes
+tool_count: 4                   # 1 to 16; tools are T0 .. T(tool_count-1), no holes
 toolchange_gcode:               # the lines that mount a tool; {tool} is the number
     T{tool}
 apply_offsets_gcode:            # optional; {tool}, {offset_x}, {offset_y}, {offset_z}
@@ -177,42 +178,67 @@ face height never enters an offset; it only has to be small enough that the
 switch probing and the descent are both reachable.
 
 Display precision in every readout: millimetres to 4 decimals, frequencies to
-3 decimals, temperatures to 1 decimal. Step distances are the one exception, at
+3 decimals, temperatures to 1 decimal. Microstep distances are the exception, at
 6 decimals, because a microstep is a few microns and 4 decimals would round most
 machines' resolution away. Values are printed exactly as measured at that
 precision, never rounded further and never clamped.
 
 ## Machine resolution
 
-Every readout that prints a fitted center also prints the step distance of each
-X and Y stepper, so a reader can judge a measured spread against the machine's
-own resolution. The figure comes from the kinematics
+Every readout that prints a fitted center also prints the microstep distance of
+each X and Y stepper, so a reader can judge a measured spread against the
+machine's own resolution. The figure comes from the kinematics
 (`toolhead.get_kinematics().get_steppers()` and each stepper's
 `get_step_dist()`), never worked out from `rotation_distance`,
 `full_steps_per_rotation` and `microsteps` here, so it is the distance the
-machine itself steps by. Steppers that cannot be read produce no rows at all
-rather than a guess, and never fail the measurement they accompany.
+machine itself steps by. Each row is one stepper's own microstep distance and
+is labeled as such: on kinematics where an axis is driven by a combination of
+steppers, CoreXY among them, the machine's positional quantum is a combination
+of the listed values rather than either one, and no kinematics transform is
+attempted here. Steppers that cannot be read produce no rows at all rather than
+a guess, never fail the measurement they accompany, and log their reason.
 
 ## Measurement logs
 
-Two CSV layouts, both written into `csv_dir`:
+Two CSV layouts, both written into `log_dir`. That directory is deliberately
+not `csv_dir`: the scan dumps there are working files, cleared once they have
+been looked at, and clearing them must not take the durable record with them.
+Both are refused at load if they name the state file's own directory, and
+`log_dir` is refused if it names `csv_dir`.
 
 - `history_T<n>.csv`, one line per completed measurement of a tool, appended by
   `EDDY_CALIBRATE_OFFSET`, `EDDY_CALIBRATE_Z` and `EDDY_REPEATABILITY` alike.
   Columns: `timestamp`, `command`, `center_x`, `center_y`, `offset_x`,
-  `offset_y`, `z_crossing`, `trigger_z`, `offset_z`, `temperature`,
-  `samples_used`. This is the drift log, the record a claim about drift over
-  time rests on. An anchor run leaves `z_crossing` empty, because its descent
-  defines the anchor rather than being evaluated against one; what it
-  contributes is the trigger plane it pressed. A value that was not measured is
-  an empty field, never a zero. The log is governed by `save_history` and not by
-  `save_csv`: the latter dumps the raw samples of each scan pass, a different
-  concept. A write that fails is a gcode error naming the path, raised after the
-  measurement's own rows are printed, so a failed log never costs a measurement
-  that succeeded.
-- `repeatability_T<n>_<index>.csv`, one file per study, holding the same columns
-  with `cycle` and `run` in front. The index is one above the highest already in
-  the directory, so a study never overwrites the data of one that ran before it.
+  `offset_y`, `z_crossing`, `trigger_z`, `offset_z`, `baseline_session`,
+  `temperature`, `samples_used`. This is the drift log, the record a claim
+  about drift over time rests on. `timestamp` is UTC in
+  `YYYY-MM-DDTHH:MM:SSZ`, so a daylight saving rollback cannot reorder the
+  file. `baseline_session` names the session whose baseline measurement the
+  offsets on that line were taken against, so a baseline that moved between two
+  sessions is visible as such rather than read as a drift of the tool. An
+  anchor run leaves `z_crossing` empty, because its descent defines the anchor
+  rather than being evaluated against one; what it contributes is the trigger
+  plane it pressed. A measurement of the baseline tool leaves the offset
+  columns empty, because those offsets are zero by definition. A value that was
+  not measured is an empty field, never a zero. The log is governed by
+  `save_history` and not by `save_csv`: the latter dumps the raw samples of
+  each scan pass into `csv_dir`, a different concept.
+- `repeatability_T<n>_<index>.csv`, one file per study, holding the same
+  columns with `cycle` and `run` in front. The index is zero padded to three
+  digits and one above the highest already in the directory, so a study never
+  overwrites the data of one that ran before it.
+
+A log file that does not exist yet and one that exists but is empty are both
+written their header first, so an interrupted create cannot leave rows under no
+columns. A file whose first line names other columns is a gcode error telling
+the owner to move it aside, never appended to.
+
+The drift log is written last in every command, after the measurement is
+reported, the anchor is stored or the offsets are applied, so a log that cannot
+be written never costs work that succeeded; its error names what is already in
+place and says that only the log write failed. The deliberate cost of that
+order is that a failed apply leaves no log row: a row would claim an offset the
+machine never received.
 
 ## Nozzle temperature
 
@@ -301,17 +327,29 @@ reference it; decide during implementation, wrapper preferred.)
   count is guessed at. A cycle mounts another tool and remounts the measured
   one, then takes `RUNS` measurements without touching it in between. The tool
   it docks through is the lowest tool number of the fleet that is not the
-  measured one, so `CYCLES` above 1 needs `tool_count` and `toolchange_gcode`
-  and names both when either is missing. `CYCLES=1` runs anywhere and exercises
-  no docking, which the plan and the summary both say. `SKIP_Z` defaults to 1,
-  which skips the descent even with `calibrate_z: True`; `SKIP_Z=0` with
-  `calibrate_z: False` is an error naming `calibrate_z` rather than a silently
-  ignored parameter. Heating follows `EDDY_CALIBRATE_OFFSET`: the tool's
-  recorded anchor temperature, once before the study rather than per cycle, and
-  nothing at all when the tool has no anchor. The command prints its plan and a
-  rough run time before it moves, each cycle's mean and spread as that cycle
-  ends, and the summary below at the end. A study does not replace the session
-  baseline; it repeats one measurement rather than establishing one.
+  measured one, so docking needs `tool_count` and `toolchange_gcode`. Without
+  either one the cycles still run and both the plan and the summary say no
+  docking was exercised and name what is missing; more than one cycle is then a
+  control run whose cycles are separated by time rather than by a toolchange.
+  Each cycle runs in its own retreat scope, so it ends at the lift height every
+  toolchange starts from and the next cycle's docking begins there.
+  `SKIP_Z` defaults to 1, which skips the descent even with `calibrate_z:
+  True`; `SKIP_Z=0` with `calibrate_z: False` is an error naming `calibrate_z`
+  rather than a silently ignored parameter. Heating has three cases, and the
+  plan names the one that applies: the tool's recorded anchor temperature, once
+  before the study rather than per cycle, when `calibrate_z` is True and the
+  tool has an anchor; no heating when the tool has no anchor, which the plan
+  says makes the spread not comparable with an offset run's; and no heating at
+  all when `calibrate_z` is False. The study file is resolved before anything
+  is heated, so a directory that cannot be written fails in a second rather
+  than after minutes of heating. The command prints its plan and a rough run
+  time before it moves, each cycle's mean, range and standard deviation as that
+  cycle ends, and the summary below at the end. A cycle's standard deviation is
+  the same estimator the summary pools, run over that one cycle, so the two
+  never disagree about one quantity. A study does not replace the session
+  baseline; it repeats one measurement rather than establishing one, and a
+  study of the baseline tool leaves the offset columns empty exactly as a
+  calibration run of that tool does.
 - Both calibration commands share one tool rule. `T=` takes one tool number or
   a comma separated list of them with no spaces (`T=0,1,2`); a duplicate, a
   tool outside the machine's range and a malformed entry are each an error
@@ -357,13 +395,21 @@ reference it; decide during implementation, wrapper preferred.)
   `cycles - 1` degrees of freedom is reported as measured, and the docking's own
   component follows from subtracting the measurement's share of it, the
   within-cycle variance over the number of runs. Both are printed: the raw
-  spread of the cycle means and the corrected docking component beside it, so
-  the correction is visible rather than assumed. Where the subtraction leaves
-  nothing, the manual's convention is followed and the component is reported as
-  zero, labeled as a docking the data does not resolve, never as a negative
-  variance. The range and the largest deviation from the grand mean are printed
-  alongside, because a worst case is what a user comparing against a contact
-  probe asks about and a standard deviation does not answer.
+  spread of the cycle means, labeled as the docking plus the measurement's
+  share of a cycle mean, and the corrected component beside it, labeled as the
+  docking and any drift between cycles, because time passes between two cycles
+  as surely as a toolchange happens. The `cycles - 1` degrees of freedom are
+  printed beside that component, so two cycles read visibly as the one degree
+  of freedom they are. Where the subtraction leaves nothing, the manual's
+  convention is followed and the component is reported as zero, never as a
+  negative variance; a study whose measurements never varied at all says
+  exactly that, rather than blaming measurement noise it did not have. The
+  range and the largest deviation from the grand mean are printed alongside,
+  because a worst case is what a user comparing against a contact probe asks
+  about and a standard deviation does not answer. A value that is not finite is
+  refused before any of this, naming the cycle and the run it sat in, rather
+  than passing the ordered comparisons and coming back out as a confident zero
+  spread beside a plausible range.
 
 ## Error handling
 

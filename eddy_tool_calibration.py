@@ -904,18 +904,34 @@ def fleet_summary_rows(entries):
     return rows
 
 
-def validate_csv_dir(csv_dir):
-    """Reject a scan dump directory that would sit on the state file's own.
+def validate_data_dir(option, directory):
+    """Reject a data directory that would sit on the state file's own.
 
-    The dumps are cleared out from time to time, and the saved references must
-    not go with them, so the two never share a directory.
+    A directory this plugin writes working files into is cleared out from time
+    to time, and the saved Z references must not go with them, so neither one
+    ever shares a directory with the state file.
     """
-    if os.path.normpath(csv_dir) == os.path.normpath(STATE_DIR):
+    if os.path.normpath(directory) == os.path.normpath(STATE_DIR):
         raise ValueError(
-            "csv_dir %r is the directory the calibration state file lives in. "
-            "Point csv_dir at a subdirectory such as %s instead, so clearing "
-            "the scan dumps cannot take the saved Z references with it."
-            % (csv_dir, os.path.join(STATE_DIR, 'data').replace('\\', '/')))
+            "%s %r is the directory the calibration state file lives in. "
+            "Point %s at a subdirectory such as %s instead, so clearing that "
+            "directory cannot take the saved Z references with it."
+            % (option, directory, option,
+               os.path.join(STATE_DIR, 'data').replace('\\', '/')))
+
+
+def validate_log_dir(log_dir, csv_dir):
+    """Reject a log directory the scan dumps are cleared out of.
+
+    The scan dumps are working files, cleared whenever they have been looked
+    at. The drift logs and the study files are the record a claim about drift
+    over time rests on, so the two never share a directory.
+    """
+    if os.path.normpath(log_dir) == os.path.normpath(csv_dir):
+        raise ValueError(
+            "log_dir %r is the directory csv_dir names. Point log_dir at a "
+            "different directory, so clearing the scan dumps cannot take the "
+            "drift logs and the study files with it." % (log_dir,))
 
 
 def fit_half_window_samples(sample_rate, scan_speed, window_radius):
@@ -935,7 +951,13 @@ def fit_half_window_samples(sample_rate, scan_speed, window_radius):
 
 
 def spread(values):
-    """Minimum, maximum and population standard deviation of a sample set."""
+    """Minimum, maximum and population standard deviation of a sample set.
+
+    The population form is what EDDY_QUERY's frequency stream needs: those
+    thousands of samples are the whole of one steady reading rather than a
+    small sample drawn from a wider population. A repeatability study is the
+    other case, and its spreads come from repeatability_statistics.
+    """
     if not values:
         raise ValueError("spread needs at least one value")
     n = len(values)
@@ -951,12 +973,15 @@ def step_distance_rows(step_distances):
     """Labeled rows naming how far one microstep moves each XY stepper.
 
     step_distances is a list of (stepper section name, millimetres per step),
-    read off the kinematics. The rows exist so a measured spread can be read
-    against the machine's own resolution. An empty list produces no rows,
-    because a resolution the machine did not report is better left out than
+    read off the kinematics. Each row is that one stepper's own microstep
+    distance, which is the machine's positional quantum only where a single
+    stepper drives the axis on its own: on kinematics that drive an axis from
+    a combination of steppers, CoreXY among them, the quantum is a combination
+    of the listed distances rather than either one. An empty list produces no
+    rows, because a figure the machine did not report is better left out than
     guessed at.
     """
-    return ["step distance %s: %.6f mm" % (name, distance)
+    return ["stepper microstep distance %s: %.6f mm" % (name, distance)
             for name, distance in step_distances]
 
 
@@ -978,6 +1003,19 @@ DESCENT_SETTLE_DWELL = 1.000
 # sure the batch carrying the last in-move samples has arrived.
 COLLECT_TAIL_TIME = 0.200
 
+# Provenance: BUFFER_TIME_START in Kalico's toolhead.py, 0.250 s there. Once
+# the motion queue has drained, the next move cannot start until that much
+# buffer has been built up again, so every wait for the queue to empty costs
+# it before the following move begins.
+MOTION_QUEUE_RESTART_TIME = 0.250
+
+# How many times a scan pass and a descent drain the motion queue. A pass
+# travels to the safe height, drops to the scan plane, runs the scan and lifts
+# again; a descent is bracketed by the travel to its start height and the lift
+# back to it, and its steps are queued back to back in between.
+SCAN_PASS_QUEUE_RESTARTS = 4
+DESCENT_QUEUE_RESTARTS = 2
+
 
 def measurement_time_estimate(rounds, pass_count, scan_length, scan_speed,
                               scan_safe_z, z_speed, z_step_count, z_step,
@@ -986,11 +1024,14 @@ def measurement_time_estimate(rounds, pass_count, scan_length, scan_speed,
 
     Counts what the configured scan parameters and the fixed collection times
     determine: every scan pass, the vertical leg down to the scan plane and
-    back, the settle and tail times around each pass, and, when a descent
-    runs, every descent step with its approach hop and dwell. Travel between
-    the coil and wherever the toolhead starts is not counted, because that
-    distance is not known before the move runs, so the figure is a floor
-    rather than a prediction.
+    back, the settle and tail times around each pass, the wait for the motion
+    queue to refill after each time the pass drains it, and, when a descent
+    runs, every descent step with its approach hop and dwell.
+
+    Three things are left out, so the figure is a floor rather than a
+    prediction: travel between the coil and wherever the toolhead starts,
+    whose distance is not known before the move runs, and the toolchanges and
+    the heating, whose durations belong to the owner's own lines and hardware.
     """
     if rounds < 1:
         raise ValueError(
@@ -1007,7 +1048,8 @@ def measurement_time_estimate(rounds, pass_count, scan_length, scan_speed,
             "scan length must be greater than 0, got %r" % (scan_length,))
     per_pass = (scan_length / scan_speed
                 + 2.0 * scan_safe_z / z_speed
-                + SAMPLE_SETTLE_TIME + COLLECT_TAIL_TIME)
+                + SAMPLE_SETTLE_TIME + COLLECT_TAIL_TIME
+                + SCAN_PASS_QUEUE_RESTARTS * MOTION_QUEUE_RESTART_TIME)
     total = rounds * pass_count * per_pass
     if include_z:
         if z_step_count < 1:
@@ -1018,16 +1060,30 @@ def measurement_time_estimate(rounds, pass_count, scan_length, scan_speed,
         per_step = ((abs(Z_APPROACH_HOP - z_step) + Z_APPROACH_HOP) / z_speed
                     + STEP_DWELL_TIME)
         total += (2.0 * DESCENT_SETTLE_DWELL + COLLECT_TAIL_TIME
+                  + DESCENT_QUEUE_RESTARTS * MOTION_QUEUE_RESTART_TIME
                   + z_step_count * per_step)
     return total
 
 
 # --- measurement logs ------------------------------------------------------
 
+
+def log_timestamp(seconds=None):
+    """The timestamp a log row or an anchor record carries.
+
+    Written in UTC with a trailing Z rather than in local time. A local time
+    without an offset reorders a log across a daylight saving rollback, where
+    an hour of rows repeats an hour that is already in the file.
+    """
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(seconds))
+
+
 # The drift log's columns, in file order, each with the format its values are
 # written in. Millimetres carry 4 decimals and temperatures 1, the same
 # precision the console rows show. A value that was not measured is written
-# as an empty field rather than a zero.
+# as an empty field rather than a zero. baseline_session names the session
+# whose baseline measurement the offsets were taken against, so a drift in the
+# baseline is not read as a drift of the tool.
 HISTORY_COLUMNS = (
     ('timestamp', '%s'),
     ('command', '%s'),
@@ -1038,6 +1094,7 @@ HISTORY_COLUMNS = (
     ('z_crossing', '%.4f'),
     ('trigger_z', '%.4f'),
     ('offset_z', '%.4f'),
+    ('baseline_session', '%d'),
     ('temperature', '%.1f'),
     ('samples_used', '%d'),
 )
@@ -1061,6 +1118,12 @@ def csv_row(columns, entry):
     A column whose value is None is written as an empty field, which is how a
     run that measured no Z or had no baseline to compare against reports that
     it did not measure the value at all.
+
+    The fields are joined on commas and never quoted. That holds because every
+    string column of these layouts is produced by this plugin: a timestamp in
+    the format above and a gcode command name, neither of which can carry a
+    comma, a quote or a newline. A layout that ever takes free text from
+    elsewhere needs the csv module here instead.
     """
     known = set(name for name, _format in columns)
     unknown = sorted(set(entry) - known)
@@ -1077,6 +1140,37 @@ def csv_row(columns, entry):
             continue
         fields.append(value_format % (value,))
     return ",".join(fields) + "\n"
+
+
+def append_csv(path, columns, entry):
+    """Append one measurement to a log file, creating it with its header.
+
+    A file that does not exist yet and a file that exists but is empty are
+    both written a header first, so an interrupted create cannot leave a log
+    whose rows have no columns above them. A file whose first line names other
+    columns is refused rather than appended to, because the rows underneath
+    would not line up with the header the reader sees.
+
+    Raises OSError or ValueError, which the callers turn into a gcode error
+    naming what was already completed.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    header = csv_header(columns)
+    header_needed = True
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        header_needed = False
+        with open(path, 'r') as f:
+            first_line = f.readline()
+        if first_line != header:
+            raise ValueError(
+                "%s already holds the columns %s, and this log writes %s. "
+                "Move that file aside, and the command writes a new one."
+                % (path, first_line.strip(), header.strip()))
+    line = csv_row(columns, entry)
+    with open(path, 'a') as f:
+        if header_needed:
+            f.write(header)
+        f.write(line)
 
 
 def history_filename(tool):
@@ -1098,7 +1192,10 @@ def next_study_filename(existing, tool):
         if not name.startswith(prefix) or not name.endswith(suffix):
             continue
         index = name[len(prefix):len(name) - len(suffix)]
-        if not index.isdigit():
+        # isdigit accepts digits int() cannot parse, superscripts among them,
+        # so a file name is only read as an index when it is plain ASCII
+        # digits. Anything else is another file and is skipped.
+        if not index.isascii() or not index.isdigit():
             continue
         highest = max(highest, int(index))
     return "%s%03d%s" % (prefix, highest + 1, suffix)
@@ -1129,24 +1226,67 @@ def study_docking(tool, tool_count, has_toolchange_gcode):
     return 'no_other_tool', None
 
 
-def docking_row(state, docking_tool):
-    """The labeled row saying whether a study exercised the docking."""
+def docking_row(state, docking_tool, cycles):
+    """The labeled row saying whether a study exercised the docking.
+
+    A study of more than one cycle that cannot dock is a control run: its
+    cycles still separate, but what separates them is the time between them
+    rather than a docking, so the row says that where it applies.
+    """
     if state == 'through_tool':
         return ("docking between cycles: each cycle mounts T%d and remounts "
                 "the measured tool" % (int(docking_tool),))
     if state == 'no_other_tool':
-        return ("docking between cycles: not exercised, tool_count names no "
-                "second tool to dock through")
-    if state == 'no_toolchange_gcode':
-        return ("docking between cycles: not exercised, toolchange_gcode is "
-                "not set")
+        reason = "tool_count names no second tool to dock through"
+    elif state == 'no_toolchange_gcode':
+        reason = "toolchange_gcode is not set"
+    else:
+        raise ValueError(
+            "unhandled docking state %r, expected one of %r"
+            % (state, DOCKING_STATES))
+    if cycles > 1:
+        return ("docking between cycles: not exercised, %s, so the cycles "
+                "measure drift over time instead" % (reason,))
+    return "docking between cycles: not exercised, %s" % (reason,)
+
+
+# Whether a study heats the measured tool before it measures, and why it does
+# not when it cannot. Heating reproduces the thermal state the tool's Z
+# reference was measured in, which needs Z calibration and a stored reference
+# for that tool.
+HEATING_STATES = ('to_anchor_temperature', 'no_anchor', 'z_calibration_off')
+
+
+def study_heating(calibrate_z, has_anchor):
+    """Whether a study heats the measured tool, as a state."""
+    if not calibrate_z:
+        return 'z_calibration_off'
+    if not has_anchor:
+        return 'no_anchor'
+    return 'to_anchor_temperature'
+
+
+def heating_row(state, temperature):
+    """The labeled row saying whether a study heats the tool before measuring.
+
+    temperature is what the tool's anchor recorded, and is None wherever no
+    heating runs.
+    """
+    if state == 'to_anchor_temperature':
+        return ("nozzle heating: held at %.1f C, the temperature the tool's Z "
+                "reference was measured at" % (float(temperature),))
+    if state == 'no_anchor':
+        return ("nozzle heating: none, the tool has no stored Z reference, so "
+                "this spread is not comparable with an offset run's")
+    if state == 'z_calibration_off':
+        return "nozzle heating: none, calibrate_z is False"
     raise ValueError(
-        "unhandled docking state %r, expected one of %r"
-        % (state, DOCKING_STATES))
+        "unhandled heating state %r, expected one of %r"
+        % (state, HEATING_STATES))
 
 
 def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
-                    seconds):
+                    heating_state, heating_temperature, seconds):
     """Labeled rows describing a study before it starts moving.
 
     seconds is the estimated run time, or None when no honest estimate is
@@ -1165,32 +1305,55 @@ def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
         "cycles: %d" % (cycles,),
         "measurements: %d" % (runs * cycles,),
         "z descent: %s" % ("included" if include_z else "skipped",),
-        docking_row(state, docking_tool),
+        heating_row(heating_state, heating_temperature),
+        docking_row(state, docking_tool, cycles),
     ]
     if seconds is not None:
         rows.append(
-            "estimated run time: %.0f s (%.1f min), counting the scan and "
-            "descent moves only" % (seconds, seconds / 60.0))
+            "estimated run time: %.0f s (%.1f min), a floor that counts the "
+            "scan and descent moves only, without the toolchanges or the "
+            "heating" % (seconds, seconds / 60.0))
     return rows
 
 
-def cycle_progress_rows(cycle, axes):
-    """Labeled rows closing one cycle of a study.
+# What each axis of a study reads off one measurement. The Z figure is the
+# reconstructed switch trigger plane, the height a Z offset is the difference
+# of, so its spread is the spread of the offset the run would have reported.
+STUDY_AXIS_FIELDS = (('x', 'x'), ('y', 'y'), ('z', 'z_trigger'))
 
-    axes is a list of (axis label, values measured in that cycle).
+
+def study_axes(include_z):
+    """The axes a study summarises, in the order it reports them.
+
+    Z is there only when the descent ran, because without a descent there is
+    no measured height for a spread to be taken over. The labels come from the
+    field map above, so the axes a study collects and the fields it reads them
+    from cannot drift apart.
     """
-    rows = []
-    for label, values in axes:
-        low, high, deviation = spread(values)
-        rows.append(
-            "cycle %d %s mean: %.4f mm" % (cycle, label,
-                                           sum(values) / len(values)))
-        rows.append(
-            "cycle %d %s range: %.4f mm" % (cycle, label, high - low))
-        rows.append(
-            "cycle %d %s standard deviation: %.4f mm"
-            % (cycle, label, deviation))
-    return rows
+    return [label for label, _field in STUDY_AXIS_FIELDS
+            if label != 'z' or include_z]
+
+
+def study_axis_field(axis):
+    """The measurement field one study axis reads."""
+    for label, field in STUDY_AXIS_FIELDS:
+        if label == axis:
+            return field
+    raise ValueError(
+        "unhandled study axis %r, expected one of %r"
+        % (axis, tuple(label for label, _field in STUDY_AXIS_FIELDS)))
+
+
+def reports_offsets(tool, baseline_tool, has_baseline):
+    """Whether a measurement of a tool reports offsets against the baseline.
+
+    The baseline tool's own offsets are zero by definition, so they are left
+    out rather than written as zeros, and a run with no baseline measurement
+    in the session has nothing to difference against at all. Every command
+    that logs a measurement asks here, so an offset column means the same
+    thing in every file.
+    """
+    return int(tool) != int(baseline_tool) and has_baseline
 
 
 def repeatability_statistics(cycles):
@@ -1230,6 +1393,14 @@ def repeatability_statistics(cycles):
                 "cycle %d holds %d runs and cycle 1 holds %d, and the "
                 "decomposition needs the same number of runs in every cycle"
                 % (index + 1, len(runs), run_count))
+        # A value that is not finite passes every ordered comparison the
+        # summary makes and would come back out as a confident zero spread
+        # beside a plausible range, so it is refused here instead.
+        for run_index, value in enumerate(runs):
+            if not math.isfinite(value):
+                raise ValueError(
+                    "cycle %d run %d measured %r, which is not a finite "
+                    "number" % (index + 1, run_index + 1, value))
     cycle_count = len(cycles)
     values = [value for runs in cycles for value in runs]
     grand_mean = sum(values) / len(values)
@@ -1256,9 +1427,34 @@ def repeatability_statistics(cycles):
         'cycle_mean_spread': mean_spread,
         'between': between,
         'between_resolved': between_resolved,
+        # The degrees of freedom the between-cycle figures rest on. Two cycles
+        # leave one, which is a wide confidence interval, so the number is
+        # printed beside the component rather than left to be worked out.
+        'between_dof': None if cycle_count < 2 else cycle_count - 1,
         'range': max(values) - min(values),
         'max_deviation': max(abs(value - grand_mean) for value in values),
     }
+
+
+def cycle_progress_rows(cycle, axes):
+    """Labeled rows closing one cycle of a study.
+
+    axes is a list of (axis label, values measured in that cycle). The
+    standard deviation is the estimator the closing summary uses, run over the
+    one cycle, so a cycle row and the summary never carry two different
+    numbers for the same quantity.
+    """
+    rows = []
+    for label, values in axes:
+        stats = repeatability_statistics([values])
+        rows.append(
+            "cycle %d %s mean: %.4f mm" % (cycle, label, stats['mean']))
+        rows.append(
+            "cycle %d %s range: %.4f mm" % (cycle, label, stats['range']))
+        rows.append(
+            "cycle %d %s standard deviation: %.4f mm"
+            % (cycle, label, stats['within']))
+    return rows
 
 
 def repeatability_rows(label, stats):
@@ -1274,17 +1470,26 @@ def repeatability_rows(label, stats):
             "ran one cycle" % (label,))
     else:
         rows.append(
-            "%s spread of the cycle means (docking and measurement together): "
-            "%.4f mm" % (label, stats['cycle_mean_spread']))
+            "%s spread of the cycle means (the docking plus the "
+            "measurement's share of a cycle mean): %.4f mm"
+            % (label, stats['cycle_mean_spread']))
         if stats['between_resolved']:
             rows.append(
-                "%s between-cycle spread (the docking alone): %.4f mm"
-                % (label, stats['between']))
+                "%s between-cycle spread (the docking and any drift between "
+                "cycles): %.4f mm" % (label, stats['between']))
+        elif stats['within'] == 0.0 and stats['cycle_mean_spread'] == 0.0:
+            rows.append(
+                "%s between-cycle spread (the docking and any drift between "
+                "cycles): 0.0000 mm, the measurements did not vary at all"
+                % (label,))
         else:
             rows.append(
-                "%s between-cycle spread (the docking alone): 0.0000 mm, the "
-                "cycle means differ by no more than the measurement itself"
-                % (label,))
+                "%s between-cycle spread (the docking and any drift between "
+                "cycles): 0.0000 mm, the cycle means differ by no more than "
+                "the measurement itself" % (label,))
+        rows.append(
+            "%s between-cycle degrees of freedom: %d"
+            % (label, stats['between_dof']))
     rows.append("%s range: %.4f mm" % (label, stats['range']))
     rows.append(
         "%s largest deviation from the mean: %.4f mm"
@@ -1328,7 +1533,14 @@ LOCATE_SCAN_LENGTH_FACTOR = 3.0
 # reports under. The first round starts from the current center estimate and
 # every round after it re-centers on the result of the one before, so the
 # scan passes end up centered on the response rather than on the estimate.
-XY_MEASUREMENT_ROUNDS = ('coarse', 'refine')
+XY_MEASUREMENT_ROUNDS = ('measurement coarse', 'measurement refine')
+
+# The scan rounds EDDY_LOCATE runs, in order, and the label each one reports
+# under. A locate round covers locate_scan_length rather than scan_length, so
+# it is a different measurement from the measurement rounds above and carries
+# a label of its own: the same word in both places would name two different
+# things in two commands' output.
+LOCATE_ROUNDS = ('locate coarse', 'locate refine')
 
 
 class SwitchPinConfig:
@@ -1439,8 +1651,16 @@ class EddyToolCalibration:
         self.save_history = config.getboolean('save_history', True)
         self.csv_dir = config.get(
             'csv_dir', os.path.join(STATE_DIR, 'data').replace('\\', '/'))
+        # The drift logs and the study files keep their own directory. They
+        # are the record a drift claim rests on, and the scan dumps beside
+        # them are working files that get cleared, so clearing those cannot
+        # take the logs with them.
+        self.log_dir = config.get(
+            'log_dir', os.path.join(STATE_DIR, 'logs').replace('\\', '/'))
         try:
-            validate_csv_dir(self.csv_dir)
+            validate_data_dir('csv_dir', self.csv_dir)
+            validate_data_dir('log_dir', self.log_dir)
+            validate_log_dir(self.log_dir, self.csv_dir)
         except ValueError as e:
             raise config.error("%s: %s" % (self.name, e))
         self.query_time = config.getfloat(
@@ -1790,15 +2010,20 @@ class EddyToolCalibration:
         is mounted, which is how it behaves on a machine that changes tools by
         hand. It never learns anything about the toolchanger either way: it
         runs the lines the owner wrote and nothing else.
+
+        Every command that works on a tool comes through here, so this is
+        where the tool the rest of the run is about is recorded for the status
+        readout, on a machine that mounts it and on one that does not.
         """
-        if not self.has_toolchange_gcode:
-            return
-        context = self.toolchange_gcode.create_template_context()
-        context['tool'] = tool
-        self.toolchange_gcode.run_gcode_from_command(context)
-        # A toolchange moves the toolhead, and the measurement reads positions
-        # out of the motion queue, so the change is finished before it starts.
-        self.printer.lookup_object('toolhead').wait_moves()
+        if self.has_toolchange_gcode:
+            context = self.toolchange_gcode.create_template_context()
+            context['tool'] = tool
+            self.toolchange_gcode.run_gcode_from_command(context)
+            # A toolchange moves the toolhead, and the measurement reads
+            # positions out of the motion queue, so the change is finished
+            # before the measurement starts.
+            self.printer.lookup_object('toolhead').wait_moves()
+        self.last_tool = tool
 
     def _apply_offsets(self, gcmd, tool, offsets):
         """Run the configured apply lines with a tool's measured offsets.
@@ -2119,7 +2344,7 @@ class EddyToolCalibration:
         toolhead.dwell(self.calibration_settle_time)
         toolhead.wait_moves()
 
-    # -- contact switch probing -------------------------------------------
+    # -- machine resolution -----------------------------------------------
 
     def _step_distances(self):
         """How far one microstep moves each X and Y stepper, in mm.
@@ -2128,28 +2353,38 @@ class EddyToolCalibration:
         figure is the one the machine itself steps by. Returns a list of
         (stepper section name, millimetres per step). A machine whose steppers
         cannot be read returns an empty list, which leaves the rows out of the
-        readout: the resolution is a comparison aid beside a measurement, and
-        losing it must not cost the measurement. The reason is logged so it
-        stays visible in klippy.log.
+        readout: the figure is a comparison aid beside a measurement, and
+        losing it must not cost the measurement. Every path that produces no
+        rows logs its reason, so it stays visible in klippy.log.
         """
         toolhead = self.printer.lookup_object('toolhead', None)
         if toolhead is None:
+            logging.info(
+                "eddy_tool_calibration: the toolhead is not available, so the "
+                "stepper microstep distance rows are left out")
             return []
+        distances = []
         try:
-            steppers = toolhead.get_kinematics().get_steppers()
+            for stepper in toolhead.get_kinematics().get_steppers():
+                name = stepper.get_name()
+                if not name.startswith('stepper_x') and \
+                        not name.startswith('stepper_y'):
+                    continue
+                distances.append((name, stepper.get_step_dist()))
         except Exception:
             logging.exception(
                 "eddy_tool_calibration: could not read the steppers from the "
-                "kinematics, so the step distance rows are left out")
+                "kinematics, so the stepper microstep distance rows are left "
+                "out")
             return []
-        distances = []
-        for stepper in steppers:
-            name = stepper.get_name()
-            if not name.startswith('stepper_x') and \
-                    not name.startswith('stepper_y'):
-                continue
-            distances.append((name, stepper.get_step_dist()))
+        if not distances:
+            logging.info(
+                "eddy_tool_calibration: the kinematics report no stepper_x or "
+                "stepper_y stepper, so the stepper microstep distance rows "
+                "are left out")
         return distances
+
+    # -- contact switch probing -------------------------------------------
 
     def _kin_z_limits(self, gcmd):
         """The kinematic Z travel limits, as (minimum, maximum).
@@ -2479,28 +2714,18 @@ class EddyToolCalibration:
 
     # -- measurement logs -------------------------------------------------
 
-    def _append_csv(self, path, columns, entry):
-        """Append one measurement to a log file, creating it with its header.
-
-        Raises OSError or ValueError, which the callers turn into a gcode
-        error naming the path.
-        """
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        header_needed = not os.path.exists(path)
-        line = csv_row(columns, entry)
-        with open(path, 'a') as f:
-            if header_needed:
-                f.write(csv_header(columns))
-            f.write(line)
-
     def _log_entry(self, command, result, offsets):
         """The fields one completed measurement contributes to a log row.
 
         offsets is None when the measurement had no baseline to be compared
-        against, which leaves the three offset columns empty rather than zero.
+        against, which leaves the offset columns empty rather than zero. The
+        offsets that are written are differences against the session baseline,
+        so the row carries the session that baseline belongs to: a baseline
+        that moved between two sessions is then visible as such rather than
+        read as a drift of the tool.
         """
         return {
-            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'timestamp': log_timestamp(),
             'command': command,
             'center_x': result['x'],
             'center_y': result['y'],
@@ -2509,30 +2734,35 @@ class EddyToolCalibration:
             'z_crossing': result['z_crossing'],
             'trigger_z': result['z_trigger'],
             'offset_z': None if offsets is None else offsets['z'],
+            'baseline_session': None if offsets is None else self.session_id,
             'temperature': result['temperature'],
             'samples_used': result['agg']['samples_used'],
         }
 
-    def _append_history(self, gcmd, tool, entry):
-        """Append one measurement to the tool's drift log.
+    def _append_history(self, gcmd, tool, entry, completed):
+        """Append one completed measurement to the tool's drift log.
 
         The log is what a claim about drift over time would rest on, so a
-        write that fails is reported rather than skipped. It is appended after
-        the result rows are printed, so a measurement that succeeded is
-        reported in full whatever the log does.
+        write that fails is reported rather than skipped. It is written last,
+        after the work of the command is finished and reported, so a log that
+        cannot be written never costs a measurement. completed is the sentence
+        naming what is already in place when that happens.
         """
         if not self.save_history:
             return
         path = os.path.join(
-            self._config_dir(), self.csv_dir, history_filename(tool))
+            self._config_dir(), self.log_dir, history_filename(tool))
         try:
-            self._append_csv(path, HISTORY_COLUMNS, entry)
-        except (OSError, ValueError) as e:
+            append_csv(path, HISTORY_COLUMNS, entry)
+        except ValueError as e:
             raise gcmd.error(
-                "The measurement above is complete, and it could not be "
-                "appended to the drift log %s: %s. Fix the directory "
-                "permissions, or set save_history to False in the [%s] config "
-                "section." % (path, e, self.name))
+                "%s Only the drift log write failed: %s" % (completed, e))
+        except OSError as e:
+            raise gcmd.error(
+                "%s Only the drift log write failed: %s could not be written: "
+                "%s. Fix the directory permissions, or set save_history to "
+                "False in the [%s] config section."
+                % (completed, path, e, self.name))
 
     # -- measurement ------------------------------------------------------
 
@@ -2735,15 +2965,16 @@ class EddyToolCalibration:
     def cmd_EDDY_LOCATE(self, gcmd):
         self._ensure_homed(gcmd)
         debug = self._debug_flag(gcmd)
+        coarse_label, refine_label = LOCATE_ROUNDS
         coarse_x, coarse_y, agg1 = self._measure_center(
             gcmd, self.coil_x, self.coil_y, self.locate_scan_length,
-            "locate coarse", debug)
+            coarse_label, debug)
         if debug:
             gcmd.respond_info(
-                "coarse center x: %.4f\ncoarse center y: %.4f"
-                % (coarse_x, coarse_y))
+                "%s center x: %.4f\n%s center y: %.4f"
+                % (coarse_label, coarse_x, coarse_label, coarse_y))
         refined_x, refined_y, agg2 = self._measure_center(
-            gcmd, coarse_x, coarse_y, self.scan_length, "locate refine",
+            gcmd, coarse_x, coarse_y, self.scan_length, refine_label,
             debug)
         self.center = (refined_x, refined_y)
         agg = self._new_aggregate()
@@ -2816,7 +3047,7 @@ class EddyToolCalibration:
             'curve_high_z': curve[-1][0],
             'center_x': center_x,
             'center_y': center_y,
-            'updated': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'updated': log_timestamp(),
         }
         previous = self.anchors.get(tool)
         self.anchors[tool] = record
@@ -2860,11 +3091,18 @@ class EddyToolCalibration:
         # The descent of an anchor run defines the anchor rather than being
         # evaluated against one, so it has no crossing to log; what the run
         # contributes to the drift record is the trigger plane it pressed.
-        self._append_history(gcmd, tool, self._log_entry(
-            'EDDY_CALIBRATE_Z',
-            {'x': center_x, 'y': center_y, 'z_crossing': None,
-             'z_trigger': trigger_z, 'temperature': temperature, 'agg': agg},
-            None))
+        # The log is written last, once the anchor is stored and reported, so
+        # a log that cannot be written never costs the anchor.
+        self._append_history(
+            gcmd, tool,
+            self._log_entry(
+                'EDDY_CALIBRATE_Z',
+                {'x': center_x, 'y': center_y, 'z_crossing': None,
+                 'z_trigger': trigger_z, 'temperature': temperature,
+                 'agg': agg},
+                None),
+            "The Z reference for T%d is measured and saved to the state file."
+            % (tool,))
 
     cmd_EDDY_CALIBRATE_OFFSET_help = (
         "Measure the tools named by T= over the coil and print their offsets "
@@ -2933,20 +3171,26 @@ class EddyToolCalibration:
             result['session_id'] = self.session_id
             result['measured_time'] = self.printer.get_reactor().monotonic()
             self.results[tool] = result
-            self.last_tool = tool
             self._report_tool_result(gcmd, tool, result, is_baseline_run)
             offsets = None
-            if not is_baseline_run:
+            if reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
                 offsets = self._offsets(result, self.calibrate_z)
-            self._append_history(
-                gcmd, tool,
-                self._log_entry('EDDY_CALIBRATE_OFFSET', result, offsets))
             if offsets is not None:
                 # The baseline tool's offsets are zero by definition, and
                 # applying zeros would overwrite whatever the owner set for it,
                 # so only the other tools reach the apply lines.
                 with self._phase(gcmd, tool, 'apply', sweeping):
                     self._apply_offsets(gcmd, tool, offsets)
+            # The drift log is written once the tool's work is finished, so a
+            # log that cannot be written never discards a measurement that was
+            # already applied. An apply that fails leaves no log row, which is
+            # the deliberate cost: a row would claim an offset the machine
+            # never received.
+            self._append_history(
+                gcmd, tool,
+                self._log_entry('EDDY_CALIBRATE_OFFSET', result, offsets),
+                "The measurement of T%d is complete and reported above."
+                % (tool,))
         return {'tool': tool, 'offsets': offsets}
 
     def _preheat_anchored(self, gcmd, tools):
@@ -2983,6 +3227,28 @@ class EddyToolCalibration:
             % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in missing),
                ", ".join("T%d" % (t,) for t in missing)))
 
+    def _measurement_temperature(self, gcmd, tool, include_z):
+        """The nozzle temperature one measurement is recorded against.
+
+        Every measurement carries it, because the log row is read against the
+        thermal state the run was in whether or not a descent evaluated an
+        anchor. A descent has to have it, so a heater that cannot be named
+        there is the run's error. An XY only run needs no heater at all, so
+        one that cannot be named leaves the field unmeasured rather than
+        costing a measurement that never depended on it, and the reason is
+        logged so it stays visible in klippy.log.
+        """
+        if include_z:
+            return self._tool_temperature(gcmd, tool)
+        try:
+            return self._tool_temperature(gcmd, tool)
+        except self.printer.command_error:
+            logging.exception(
+                "eddy_tool_calibration: could not read the nozzle temperature "
+                "of T%d, so its measurement log row leaves the field empty"
+                % (tool,))
+            return None
+
     def _run_tool_measurement(self, gcmd, tool, debug, include_z):
         center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
         agg = self._new_aggregate()
@@ -2990,12 +3256,11 @@ class EddyToolCalibration:
         curve = None
         z_crossing = None
         z_trigger = None
-        temperature = None
+        # Read before any descent and reported beside the anchor's own
+        # temperature, so a curve measured in the wrong thermal state is
+        # visible in the readout rather than only in the offset it moved.
+        temperature = self._measurement_temperature(gcmd, tool, include_z)
         if include_z:
-            # Read before the descent and reported beside the anchor's own
-            # temperature, so a curve measured in the wrong thermal state is
-            # visible in the readout rather than only in the offset it moved.
-            temperature = self._tool_temperature(gcmd, tool)
             curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
             self._merge_aggregate(agg, agg_z)
             z_trigger, z_crossing = self._trigger_plane(gcmd, tool, curve)
@@ -3105,10 +3370,10 @@ class EddyToolCalibration:
         "another tool and remounts the measured one before its runs, so the "
         "runs inside a cycle show the measurement alone and the cycles show "
         "what the docking adds. A machine with no second tool or no "
-        "toolchange_gcode can still run CYCLES=1, which exercises no docking. "
-        "SKIP_Z defaults to 1 and skips the Z descent even with calibrate_z "
-        "True; SKIP_Z=0 runs it. Every measurement is written to a CSV file "
-        "in csv_dir.")
+        "toolchange_gcode still runs any number of cycles, which then measure "
+        "drift over time instead of a docking. SKIP_Z defaults to 1 and skips "
+        "the Z descent even with calibrate_z True; SKIP_Z=0 runs it. Every "
+        "measurement is written to a CSV file in log_dir.")
 
     def cmd_EDDY_REPEATABILITY(self, gcmd):
         self._ensure_homed(gcmd)
@@ -3119,41 +3384,77 @@ class EddyToolCalibration:
         include_z = self._study_include_z(gcmd)
         state, docking_tool = study_docking(
             tool, self.tool_count, self.has_toolchange_gcode)
-        if cycles > 1 and state != 'through_tool':
-            raise gcmd.error(
-                "Add tool_count and toolchange_gcode to the [%s] config "
-                "section and restart, or run the study with CYCLES=1. A cycle "
-                "docks the measured tool and mounts it again, which needs a "
-                "second tool to dock through and the lines that mount one."
-                % (self.name,))
+        heating = study_heating(self.calibrate_z, tool in self.anchors)
         if include_z:
             # Checked before any motion: without an anchor the descent has
             # nothing to be evaluated against.
             self._require_anchors(gcmd, [tool])
         gcmd.respond_info("\n".join(study_plan_rows(
-            tool, runs, cycles, include_z, state, docking_tool,
+            tool, runs, cycles, include_z, state, docking_tool, heating,
+            self._heating_temperature(gcmd, heating, tool),
             self._study_time_estimate(runs * cycles, include_z))))
-        if self.calibrate_z and tool in self.anchors:
-            self._preheat_anchored(gcmd, [tool])
-        path = self._study_csv_path(gcmd, tool)
-        axes = ['x', 'y'] + (['z'] if include_z else [])
+        # Resolved before anything is heated, so a directory that cannot be
+        # written fails in a second rather than after minutes of heating.
+        log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
+        self._study_preheat(gcmd, heating, tool)
+        axes = study_axes(include_z)
         by_cycle = dict((axis, []) for axis in axes)
         with self._retreating():
             # The first cycle measures whatever is mounted, so the tool is
             # mounted before it starts. Every cycle mounts it again itself, as
             # the second half of the docking it exercises.
             self._mount_tool(gcmd, tool)
-            for cycle in range(1, cycles + 1):
+        for cycle in range(1, cycles + 1):
+            # Each cycle retreats on its own, so it ends at the height every
+            # toolchange starts from and the docking of the next cycle begins
+            # where a calibration run's would.
+            with self._retreating():
                 measured = self._run_study_cycle(
                     gcmd, tool, cycle, runs, include_z, debug, state,
-                    docking_tool, path, axes)
-                gcmd.respond_info("\n".join(cycle_progress_rows(
-                    cycle, [(axis, measured[axis]) for axis in axes])))
-                for axis in axes:
-                    by_cycle[axis].append(measured[axis])
+                    docking_tool, log, axes)
+            try:
+                rows = cycle_progress_rows(
+                    cycle, [(axis, measured[axis]) for axis in axes])
+            except ValueError as e:
+                raise gcmd.error(
+                    "Cycle %d could not be summarised: %s. Its measurements "
+                    "are in %s." % (cycle, e, log['path']))
+            gcmd.respond_info("\n".join(rows))
+            for axis in axes:
+                by_cycle[axis].append(measured[axis])
         self._report_study(
-            gcmd, tool, runs, cycles, include_z, state, docking_tool, path,
-            axes, by_cycle)
+            gcmd, tool, runs, cycles, include_z, state, docking_tool,
+            log['path'], axes, by_cycle)
+
+    def _heating_temperature(self, gcmd, heating, tool):
+        """The temperature a study heats the tool to, or None when it does not.
+
+        The tool's anchor is the only place a study takes a temperature from,
+        so a state that heats nothing reports no temperature rather than a
+        number the run does not use.
+        """
+        if heating == 'to_anchor_temperature':
+            return self.anchors[tool]['temperature']
+        if heating in ('no_anchor', 'z_calibration_off'):
+            return None
+        raise gcmd.error(
+            "Internal error: the heating state %r is not one of %r."
+            % (heating, HEATING_STATES))
+
+    def _study_preheat(self, gcmd, heating, tool):
+        """Heat the measured tool to its anchor temperature, where it has one.
+
+        A tool with no anchor and a machine with Z calibration off are both
+        measured as they are: there is no recorded temperature to reproduce.
+        """
+        if heating == 'to_anchor_temperature':
+            self._preheat_anchored(gcmd, [tool])
+            return
+        if heating in ('no_anchor', 'z_calibration_off'):
+            return
+        raise gcmd.error(
+            "Internal error: the heating state %r is not one of %r."
+            % (heating, HEATING_STATES))
 
     def _study_tool(self, gcmd):
         """The one tool a repeatability study measures."""
@@ -3175,15 +3476,20 @@ class EddyToolCalibration:
         return tools[0]
 
     def _study_count(self, gcmd, name, minimum):
-        """A required repetition count of a study, or the error naming it."""
-        value = gcmd.get_int(name, None, minval=minimum)
-        if value is None:
+        """A required repetition count of a study, or the error naming it.
+
+        The bound is checked here rather than handed to get_int, so a count
+        below it and a missing count both reach the message that says what the
+        two counts mean.
+        """
+        value = gcmd.get_int(name, None)
+        if value is None or value < minimum:
             raise gcmd.error(
-                "Add %s= to the command, as in EDDY_REPEATABILITY T=0 "
+                "Set %s= to at least %d, as in EDDY_REPEATABILITY T=0 "
                 "RUNS=10 CYCLES=3. RUNS is how many measurements a cycle "
                 "takes without touching the tool, at least 2, and CYCLES is "
                 "how many times the tool is docked and mounted again first, "
-                "at least 1." % (name,))
+                "at least 1." % (name, minimum))
         return value
 
     def _study_include_z(self, gcmd):
@@ -3232,23 +3538,25 @@ class EddyToolCalibration:
         The index comes from what is already in the directory, so a study
         cannot overwrite the data of one that ran before it.
         """
-        directory = os.path.join(self._config_dir(), self.csv_dir)
+        directory = os.path.join(self._config_dir(), self.log_dir)
         try:
             os.makedirs(directory, exist_ok=True)
-            existing = os.listdir(directory)
-        except OSError as e:
+            name = next_study_filename(os.listdir(directory), tool)
+        except (OSError, ValueError) as e:
             raise gcmd.error(
                 "Could not prepare the study data directory %s: %s. Fix the "
-                "directory permissions, or point csv_dir at a directory the "
+                "directory permissions, or point log_dir at a directory the "
                 "printer host can write." % (directory, e))
-        return os.path.join(directory, next_study_filename(existing, tool))
+        return os.path.join(directory, name)
 
     @contextlib.contextmanager
-    def _study_step(self, gcmd, phase, cycle, run, path):
+    def _study_step(self, gcmd, phase, cycle, run, log):
         """Name the cycle and the run a study failed in.
 
         run is None for the toolchange that opens a cycle, which belongs to
-        the cycle rather than to any one measurement.
+        the cycle rather than to any one measurement. log carries the study
+        file and how many rows have reached it, so the message points at that
+        file only once it holds something.
         """
         if phase not in TOOL_PHASES:
             raise gcmd.error(
@@ -3259,14 +3567,19 @@ class EddyToolCalibration:
         except self.printer.command_error as e:
             where = ("cycle %d" % (cycle,) if run is None
                      else "cycle %d run %d" % (cycle, run))
+            if not log['rows']:
+                raise gcmd.error(
+                    "The study stopped during %s of %s: %s. It had written no "
+                    "measurements yet." % (phase, where, e))
             raise gcmd.error(
-                "The study stopped during %s of %s: %s. The measurements it "
-                "already took are in %s." % (phase, where, e, path))
+                "The study stopped during %s of %s: %s. The %d measurements "
+                "it already took are in %s."
+                % (phase, where, e, log['rows'], log['path']))
 
-    def _exercise_docking(self, gcmd, tool, cycle, state, docking_tool, path):
+    def _exercise_docking(self, gcmd, tool, cycle, state, docking_tool, log):
         """Dock the measured tool and mount it again, when a partner exists."""
         if state == 'through_tool':
-            with self._study_step(gcmd, 'toolchange', cycle, None, path):
+            with self._study_step(gcmd, 'toolchange', cycle, None, log):
                 self._mount_tool(gcmd, docking_tool)
                 self._mount_tool(gcmd, tool)
             return
@@ -3277,41 +3590,51 @@ class EddyToolCalibration:
             % (state, DOCKING_STATES))
 
     def _run_study_cycle(self, gcmd, tool, cycle, runs, include_z, debug,
-                         state, docking_tool, path, axes):
+                         state, docking_tool, log, axes):
         """One cycle: dock and remount the tool, then measure it runs times.
 
         Returns the measured values of the cycle, keyed by axis label. The
         session baseline is left alone, because a study repeats one
         measurement rather than replacing what a calibration run established.
         """
-        self._exercise_docking(gcmd, tool, cycle, state, docking_tool, path)
+        # The axis to measurement field mapping is resolved once, before the
+        # cycle moves, so an axis this build cannot read is refused rather
+        # than found partway through a run.
+        try:
+            fields = [(axis, study_axis_field(axis)) for axis in axes]
+        except ValueError as e:
+            raise gcmd.error("Internal error: %s." % (e,))
+        self._exercise_docking(gcmd, tool, cycle, state, docking_tool, log)
         measured = dict((axis, []) for axis in axes)
         for run in range(1, runs + 1):
-            with self._study_step(gcmd, 'measurement', cycle, run, path):
+            with self._study_step(gcmd, 'measurement', cycle, run, log):
                 result = self._run_tool_measurement(
                     gcmd, tool, debug, include_z)
             offsets = None
-            if self.baseline is not None:
+            if reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
                 offsets = self._offsets(result, include_z)
             entry = self._log_entry('EDDY_REPEATABILITY', result, offsets)
             try:
-                self._append_csv(
-                    path, STUDY_COLUMNS,
+                append_csv(
+                    log['path'], STUDY_COLUMNS,
                     dict(entry, cycle=cycle, run=run))
-            except (OSError, ValueError) as e:
+            except ValueError as e:
+                raise gcmd.error(
+                    "Cycle %d run %d is complete, and it could not be "
+                    "written: %s" % (cycle, run, e))
+            except OSError as e:
                 raise gcmd.error(
                     "Cycle %d run %d is complete, and it could not be written "
                     "to %s: %s. Fix the directory permissions, or point "
-                    "csv_dir at a directory the printer host can write."
-                    % (cycle, run, path, e))
-            self._append_history(gcmd, tool, entry)
-            measured['x'].append(result['x'])
-            measured['y'].append(result['y'])
-            if include_z:
-                # The reconstructed trigger plane, which is the height a Z
-                # offset is the difference of, so its spread is the spread of
-                # the offset the run would have reported.
-                measured['z'].append(result['z_trigger'])
+                    "log_dir at a directory the printer host can write."
+                    % (cycle, run, log['path'], e))
+            log['rows'] += 1
+            self._append_history(
+                gcmd, tool, entry,
+                "Cycle %d run %d is complete and written to %s."
+                % (cycle, run, log['path']))
+            for axis, field in fields:
+                measured[axis].append(result[field])
         return measured
 
     def _report_study(self, gcmd, tool, runs, cycles, include_z, state,
@@ -3324,16 +3647,15 @@ class EddyToolCalibration:
             "cycles: %d" % (cycles,),
             "measurements: %d" % (runs * cycles,),
             "z descent: %s" % ("included" if include_z else "skipped",),
-            docking_row(state, docking_tool),
+            docking_row(state, docking_tool, cycles),
         ]
         for axis in axes:
             try:
                 stats = repeatability_statistics(by_cycle[axis])
             except ValueError as e:
                 raise gcmd.error(
-                    "The %s results could not be summarised: %s. Re-run the "
-                    "study with RUNS and CYCLES held to one value each."
-                    % (axis, e))
+                    "The %s results could not be summarised: %s. The "
+                    "measurements themselves are in %s." % (axis, e, path))
             rows.extend(repeatability_rows(axis, stats))
         rows.extend(step_distance_rows(self._step_distances()))
         rows.append("measurement data: %s" % (path,))

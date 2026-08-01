@@ -55,7 +55,10 @@ For the spread repeated runs produced on the author's machine, see
 
 Every readout that prints a fitted center also prints what one microstep moves
 each X and Y stepper, read off the kinematics, so a measured spread can be read
-against the machine's own resolution.
+against the machine's own resolution. Each row is that one stepper's microstep
+distance. On kinematics where an axis is driven by a combination of steppers,
+CoreXY among them, the machine's positional quantum is a combination of the
+listed values rather than either one.
 
 `DEBUG=1` adds a block per scan pass: response type, sample counts, extremum
 sample, fitted vertex offset, pass angle and peak position. A failed pass always
@@ -123,20 +126,29 @@ measured one, then takes `RUNS` measurements without touching it again, so the
 runs inside a cycle show the measurement alone and the cycles show what the
 docking adds on top of it.
 
-`CYCLES` above 1 needs `tool_count` and `toolchange_gcode`, because a cycle has
-to dock through a second tool. `CYCLES=1` runs on any machine and exercises no
-docking.
+Docking through a second tool needs `tool_count` and `toolchange_gcode`. Without
+them the cycles still run and the plan and the summary both say no docking was
+exercised, which makes such a run a control: its cycles are separated by time
+rather than by a toolchange.
 
 `SKIP_Z` defaults to 1, which skips the Z descent even with `calibrate_z: True`,
 so a study is XY only and fast. `SKIP_Z=0` includes the descent, which needs
 `calibrate_z: True` and the tool's `EDDY_CALIBRATE_Z` reference.
 
+The tool is heated only when `calibrate_z: True` and it has a stored
+`EDDY_CALIBRATE_Z` reference, in which case it is held at the temperature that
+reference was measured at. The plan row says which of the three cases applies,
+because a study run cold is not comparable with an offset run.
+
 The command prints its plan and a rough run time before it moves, each cycle's
-mean and spread as that cycle finishes, and a summary at the end: the
-within-cycle spread (the measurement), the between-cycle spread (the docking),
-the range and the largest deviation from the mean, per axis. Every individual
-measurement is written to `repeatability_T<n>_<index>.csv` in `csv_dir`, with a
-fresh index per study, so nothing overwrites an earlier one.
+mean, range and standard deviation as that cycle finishes, and a summary at the
+end. Per axis the summary carries the mean, the within-cycle spread (the
+measurement), the spread of the cycle means, the between-cycle spread (the
+docking and any drift between cycles) with its degrees of freedom, the range and
+the largest deviation from the mean. Every individual measurement is written to
+`repeatability_T<n>_<index>.csv` in `log_dir`, the index zero padded to three
+digits and one above the highest already there, so nothing overwrites an earlier
+study.
 
 The LDC1612 driver also registers Kalico's own
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`.
@@ -165,9 +177,10 @@ Read this section before wiring anything.
 - Cartesian kinematics for the switch probing. The switch probing reads the
   kinematic Z limits and refuses to run without them.
 
-- No drift figure yet. Every completed measurement is appended to
-  `history_T<n>.csv` in `csv_dir`, and that log is what a claim about drift over
-  time would be based on. None is claimed here until it covers enough time.
+- No drift figure yet. With `save_history` at its default of `True`, every
+  completed measurement is appended to `history_T<n>.csv` in `log_dir`, and that
+  log is what a claim about drift over time would be based on. None is claimed
+  here until it covers enough time.
 
 ### Measured so far
 
@@ -336,16 +349,23 @@ Every option and its default. Options shown commented out may be left out.
 #   Write every scan pass's raw samples to a CSV file for offline review.
 #save_history: True
 #   Append every completed measurement of a tool to history_T<n>.csv in
-#   csv_dir: the timestamp, the fitted center, the offsets, the Z crossing
+#   log_dir: the UTC timestamp, the command, the fitted center, the offsets,
+#   the session of the baseline they were measured against, the Z crossing
 #   and trigger plane, the nozzle temperature and the sample count. This is
 #   the drift log, one line per measurement, and it is what a claim about
 #   drift over time rests on. It is separate from save_csv, which dumps the
 #   raw samples of each scan pass instead.
 #csv_dir: EddyToolCalibration/data
-#   Directory the scan CSV files are written to, relative to the printer
-#   config directory. It must not be the directory holding the calibration
-#   state file, so that clearing the dumps cannot take the saved Z
-#   references with it.
+#   Directory the raw scan dumps of save_csv are written to, relative to the
+#   printer config directory. These are working files, meant to be cleared
+#   once they have been looked at. It must be neither the directory holding
+#   the calibration state file nor log_dir, so that clearing the dumps
+#   cannot take the saved Z references or the logs with them.
+#log_dir: EddyToolCalibration/logs
+#   Directory the drift logs and the repeatability study files are written
+#   to, relative to the printer config directory. These are the durable
+#   record, kept apart from the scan dumps so clearing those cannot delete
+#   them. It must not be the directory holding the calibration state file.
 #calibrate_z: False
 #   Run the Z descent and report Z offsets. With it False no descent runs,
 #   XY offsets are still measured, and none of the switch options below
