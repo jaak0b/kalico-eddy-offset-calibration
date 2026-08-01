@@ -15,6 +15,11 @@ sensor board has not yet been built and no measurement has been taken on
 real hardware. Do not rely on this plugin for production calibration until
 the validation plan in `docs/design.md` has been run and confirmed.
 
+**Requirements:** the BTT Eddy Coil works on any Kalico with a
+`klippy/plugins/` directory (2023 onward), as long as `frequency:` is left
+out of the config. The Little Crab board needs Kalico from March 2026 or
+newer, because that is when the `frequency` config option was added.
+
 ## Hardware
 
 Base design: chengxg's open-source "Little Crab" dual-coil eddy-current
