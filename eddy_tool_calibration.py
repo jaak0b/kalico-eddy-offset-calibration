@@ -2854,6 +2854,7 @@ class EddyToolCalibration:
             "nozzle temperature: %.1f C" % (temperature,),
             "state file: %s" % (self._state_path(),),
         ])
+        rows.extend(step_distance_rows(self._step_distances()))
         rows.extend(self._aggregate_rows(agg))
         gcmd.respond_info("\n".join(rows))
         # The descent of an anchor run defines the anchor rather than being
