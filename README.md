@@ -380,6 +380,8 @@ whatever state the printer is in.
 Both templates are your own lines; the plugin renders and runs them and knows
 nothing about your toolchanger.
 
+With Contomo's `klipper-toolchanger-hard` fork, which provides `SET_TOOL_OFFSET`:
+
 ```ini
 tool_count: 4
 toolchange_gcode:
@@ -388,8 +390,7 @@ apply_offsets_gcode:
     SET_TOOL_OFFSET T={tool} X={offset_x} Y={offset_y} Z={offset_z}
 ```
 
-`SET_TOOL_OFFSET` above is Contomo's `klipper-toolchanger-hard` fork. On the
-viesturz original, which has no such command, use three lines:
+On the viesturz original, which has no `SET_TOOL_OFFSET`, use three lines:
 
 ```ini
 apply_offsets_gcode:
