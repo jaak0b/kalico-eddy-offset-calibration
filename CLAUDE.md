@@ -72,9 +72,15 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
    layer. New calibration modes or sensor variants are their own modules behind clear
    interfaces.
 
-4. **Limited AI attribution in git/GitHub.** A `Co-Authored-By: Claude <...>` trailer IS allowed
-   on commits. Beyond that trailer, no AI attribution anywhere. Commit messages: a single short
-   sentence.
+4. **Limited AI attribution in git/GitHub; no AI process residue in any output.** A
+   `Co-Authored-By: Claude <...>` trailer IS allowed on commits. Beyond that trailer, no AI
+   attribution anywhere. Commit messages: a single short sentence. Shipped output of every kind
+   (source code, comments, docstrings, docs, UI text, error messages, commit messages) must
+   never reference the AI-assisted process behind it: no mention of these rules or their
+   numbers ("per rule 2"), CLAUDE.md, skills, agents, subagents, prompts, reviews by agents,
+   or session context. Rationale is expressed in plain domain terms instead ("failed passes
+   always print their full diagnostics so the cause stays visible"). The reader of any shipped
+   file must find no evidence of how it was produced.
 
 5. **Commit approval.** The owner granted standing approval to commit at will on `main`
    (2026-07-30). Pushes still require explicit approval.
