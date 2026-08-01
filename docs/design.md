@@ -68,17 +68,28 @@ edge_margin: 0.15               # fraction of each pass treated as edge
 freq_min: 1000000.0             # Hz; samples below this are discarded as noise
 # --- Z offsets ---
 calibrate_z: False              # run the Z descent and report Z offsets
-# --- contact switch, required when calibrate_z is True ---
+# --- contact switch: these four are required when calibrate_z is True ---
 switch_pin: ^PA1                # endstop pin, invert and pullup prefixes allowed
 switch_x: 340.0                 # machine X of the nozzle over the switch
 switch_y: 5.0                   # machine Y of the nozzle over the switch
 switch_probe_z_start: 3.0       # machine Z the probing move starts from
+# --- switch probing tuning, all optional, defaults shown ---
 switch_probe_speed: 5.0         # mm/s
 switch_probe_lift_speed: 5.0    # default: switch_probe_speed
-switch_probe_max_travel: 4.0    # mm below switch_probe_z_start
-switch_probe_sample_retract_dist: 2.0  # mm
+switch_probe_max_travel: 4.0    # mm below the press start height
+switch_probe_sample_retract_dist: 2.0  # mm, must be below max_travel
 switch_probe_tolerance: 0.020   # mm, spread across the counted presses
 ```
+
+`switch_pin`, `switch_x`, `switch_y` and `switch_probe_z_start` are the four
+options `EDDY_CALIBRATE_Z` cannot run without; it names whichever is missing.
+The five tuning options all have defaults.
+
+Each press starts from the height the previous press retracted to, so
+`switch_probe_sample_retract_dist` must be smaller than
+`switch_probe_max_travel`. A config where it is not is refused at load, because
+otherwise the second press and every press after it would end short of the
+switch and report a missing trigger instead of the real cause.
 
 Per-tool Z references are not config options. They live in
 `EddyToolCalibration/calibration_state.json` next to the printer config,

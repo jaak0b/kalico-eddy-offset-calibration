@@ -292,8 +292,7 @@ connects, that is a warning, not a failure. It is not a reason to reflash.
    configured `coil_x` / `coil_y`. A result far from your estimate means the
    coarse scan missed the coil; recheck the geometry in section 4.
 4. Run `EDDY_CALIBRATE_OFFSET T=0` with `save_csv: True` already set in config,
-   so every scan pass and the Z descent are written to CSV for offline
-   review. `T=` is required, and `T=0` is the baseline every other tool is
+   so every scan pass is written to CSV for offline review. `T=` is required, and `T=0` is the baseline every other tool is
    measured against.
 5. Mount the next tool and run `EDDY_CALIBRATE_OFFSET T=1`, then `T=2` and so
    on for the remaining tools. Each run prints its offsets against the `T=0`
@@ -310,8 +309,9 @@ reappearance means the scan collector regressed.
 
 ## 7. Safety notes
 
-- **Verify `coil_z` against the real coil before the first Z descent.** The
-  descent ends `z_stop` above whatever machine Z you put in `coil_z` (0.5 mm
+- **Once you turn `calibrate_z` on, verify `coil_z` against the real coil
+  before the first Z descent.** The bring-up config above leaves `calibrate_z`
+  off, so no descent runs until you enable it. The descent ends `z_stop` above whatever machine Z you put in `coil_z` (0.5 mm
   above it by default), so a `coil_z` set below the real top face drives the
   nozzle into the coil by that difference.
 - Run the first `EDDY_CALIBRATE_OFFSET` with the printer's Z already at a

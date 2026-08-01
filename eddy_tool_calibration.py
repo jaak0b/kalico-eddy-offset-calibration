@@ -23,7 +23,9 @@ installed (unit tests run standalone). Any import of klippy modules
 method body, never at module scope.
 """
 
+import contextlib
 import json
+import logging
 import math
 import os
 import tempfile
@@ -941,6 +943,19 @@ class EddyToolCalibration:
             'switch_probe_sample_retract_dist', 2.0, above=0.0)
         self.switch_probe_tolerance = config.getfloat(
             'switch_probe_tolerance', 0.020, above=0.0)
+        # Each press starts from wherever the previous one retracted to, so a
+        # retract at or beyond the travel allowance puts the switch out of
+        # reach of every press after the first.
+        if (self.switch_probe_sample_retract_dist
+                >= self.switch_probe_max_travel):
+            raise config.error(
+                "%s: switch_probe_sample_retract_dist (%.4f mm) must be less "
+                "than switch_probe_max_travel (%.4f mm). Each press starts "
+                "from the height the previous press retracted to, so a "
+                "retract that is not shorter than the travel allowance leaves "
+                "the switch out of reach from the second press onward."
+                % (self.name, self.switch_probe_sample_retract_dist,
+                   self.switch_probe_max_travel))
 
         # Session state.
         self.center = None
@@ -1056,10 +1071,12 @@ class EddyToolCalibration:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
                 raise
-        except OSError as e:
+        except (OSError, ValueError) as e:
             raise gcmd.error(
                 "Could not write the calibration state to %s: %s. Fix the "
-                "directory permissions and run EDDY_CALIBRATE_Z again. The "
+                "directory permissions if the path cannot be written, or "
+                "delete the file to start over if the message names an "
+                "incomplete reference, then run EDDY_CALIBRATE_Z again. The "
                 "reference was not kept, because a reference that did not "
                 "persist would be gone at the next restart." % (path, e))
 
@@ -1248,7 +1265,74 @@ class EddyToolCalibration:
             toolhead.manual_move([None, None, z], z_speed)
         toolhead.wait_moves()
 
+    def _retreat(self):
+        """Lift the toolhead clear of the coil and the switch.
+
+        The same height the descent already ends at, so a run that stops
+        anywhere leaves the nozzle where a successful run would have left it.
+        """
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.manual_move(
+            [None, None, self._machine_z(self.z_start + Z_APPROACH_HOP)],
+            self.z_speed)
+        toolhead.wait_moves()
+
+    @contextlib.contextmanager
+    def _retreating(self):
+        """Run a block of motion and lift clear afterwards, however it ends.
+
+        A lift that fails while another error is already on its way up is
+        logged instead of raised, so the message the console shows is the one
+        naming the original cause rather than the failure to move away from
+        it.
+        """
+        try:
+            yield
+        except Exception:
+            try:
+                self._retreat()
+            except Exception:
+                logging.exception(
+                    "eddy_tool_calibration: could not lift the toolhead clear "
+                    "after a failed calibration move")
+            raise
+        self._retreat()
+
     # -- contact switch probing -------------------------------------------
+
+    def _kin_z_limits(self, gcmd):
+        """The kinematic Z travel limits, as (minimum, maximum).
+
+        The single place the plugin reads the machine's vertical limits, so
+        every check against them, and the probing move's own clamp, agree.
+        """
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        kin_status = toolhead.get_kinematics().get_status(curtime)
+        if ('axis_minimum' not in kin_status
+                or 'axis_maximum' not in kin_status):
+            raise gcmd.error(
+                "Switch probing works with cartesian kinematics only. The "
+                "configured kinematics report no axis limits.")
+        return kin_status['axis_minimum'][2], kin_status['axis_maximum'][2]
+
+    def _require_switch_z_range(self, gcmd):
+        """Refuse to travel to the switch when the heights are out of range."""
+        minimum_z, maximum_z = self._kin_z_limits(gcmd)
+        travel_z = self.switch_probe_z_start + self.scan_safe_z
+        if self.switch_probe_z_start < minimum_z:
+            raise gcmd.error(
+                "switch_probe_z_start is machine Z %.4f mm, below the Z axis "
+                "minimum of %.4f mm. Set switch_probe_z_start to a height "
+                "the machine can reach, just above the switch."
+                % (self.switch_probe_z_start, minimum_z))
+        if travel_z > maximum_z:
+            raise gcmd.error(
+                "switch_probe_z_start plus scan_safe_z is machine Z %.4f mm, "
+                "above the Z axis maximum of %.4f mm. Lower "
+                "switch_probe_z_start or scan_safe_z; the plugin travels to "
+                "the switch at that combined height."
+                % (travel_z, maximum_z))
 
     def _require_switch_config(self, gcmd):
         """Refuse to probe until every option the switch needs is present."""
@@ -1294,17 +1378,12 @@ class EddyToolCalibration:
         """
         phoming = self.printer.lookup_object('homing')
         toolhead = self.printer.lookup_object('toolhead')
-        curtime = self.printer.get_reactor().monotonic()
-        kin_status = toolhead.get_kinematics().get_status(curtime)
-        if ('axis_minimum' not in kin_status
-                or 'axis_maximum' not in kin_status):
-            raise gcmd.error(
-                "Switch probing works with cartesian kinematics only. The "
-                "configured kinematics report no axis limits.")
+        minimum_z, _maximum_z = self._kin_z_limits(gcmd)
         pos = toolhead.get_position()
         target = list(pos)
-        target[2] = max(pos[2] - self.switch_probe_max_travel,
-                        kin_status['axis_minimum'][2])
+        requested_z = pos[2] - self.switch_probe_max_travel
+        clamped = requested_z < minimum_z
+        target[2] = max(requested_z, minimum_z)
         try:
             epos = phoming.probing_move(
                 self.switch_endstop, target, self.switch_probe_speed)
@@ -1318,6 +1397,17 @@ class EddyToolCalibration:
                     "switch_probe_sample_retract_dist lifts the nozzle clear "
                     "of the trigger point between presses.")
             if "No trigger on probe after full movement" in reason:
+                if clamped:
+                    raise gcmd.error(
+                        "The nozzle travelled %.4f mm down from machine Z "
+                        "%.4f to the Z axis minimum of %.4f mm without "
+                        "triggering the contact switch. The press stopped at "
+                        "that axis limit rather than at "
+                        "switch_probe_max_travel, so raising that option "
+                        "cannot help. Check switch_x, switch_y and "
+                        "switch_probe_z_start against where the switch "
+                        "actually sits, and check the Z axis position_min."
+                        % (pos[2] - target[2], pos[2], minimum_z))
                 raise gcmd.error(
                     "The nozzle travelled %.4f mm down from machine Z %.4f "
                     "without triggering the contact switch. Check switch_x, "
@@ -1340,8 +1430,12 @@ class EddyToolCalibration:
         result. A spread above switch_probe_tolerance is an error rather than
         a retry, because a switch that cannot repeat inside its tolerance has
         a mechanical cause another press does not fix.
+
+        Every press retracts, the last one included, so the nozzle is never
+        left standing on the switch while the presses are aggregated.
         """
         toolhead = self.printer.lookup_object('toolhead')
+        _minimum_z, maximum_z = self._kin_z_limits(gcmd)
         heights = []
         for press in range(SWITCH_PRESS_COUNT):
             trigger_z = self._probe_switch_once(gcmd)
@@ -1350,12 +1444,17 @@ class EddyToolCalibration:
                 gcmd.respond_info(
                     "switch press %d trigger (machine Z): %.4f mm"
                     % (press + 1, trigger_z))
-            if press < SWITCH_PRESS_COUNT - 1:
-                toolhead.manual_move(
-                    [None, None,
-                     trigger_z + self.switch_probe_sample_retract_dist],
-                    self.switch_probe_lift_speed)
-                toolhead.wait_moves()
+            retract_z = trigger_z + self.switch_probe_sample_retract_dist
+            if retract_z > maximum_z:
+                raise gcmd.error(
+                    "Retracting %.4f mm from the trigger at machine Z %.4f "
+                    "would reach machine Z %.4f, above the Z axis maximum of "
+                    "%.4f mm. Lower switch_probe_sample_retract_dist."
+                    % (self.switch_probe_sample_retract_dist, trigger_z,
+                       retract_z, maximum_z))
+            toolhead.manual_move(
+                [None, None, retract_z], self.switch_probe_lift_speed)
+            toolhead.wait_moves()
         try:
             median, counted, press_spread = aggregate_switch_presses(
                 heights, self.switch_probe_tolerance)
@@ -1510,9 +1609,7 @@ class EddyToolCalibration:
         return result, stats
 
     def _save_csv(self, gcmd, label, samples, debug):
-        config_file = self.printer.get_start_args()['config_file']
-        config_dir = os.path.dirname(os.path.abspath(config_file))
-        directory = os.path.join(config_dir, self.csv_dir)
+        directory = os.path.join(self._config_dir(), self.csv_dir)
         path = os.path.join(
             directory, "eddy_scan_%s.csv" % (label.replace(' ', '_'),))
         try:
@@ -1769,15 +1866,17 @@ class EddyToolCalibration:
         self._ensure_homed(gcmd)
         tool = self._required_tool_index(gcmd, 'EDDY_CALIBRATE_Z')
         debug = self._debug_flag(gcmd)
+        self._require_switch_z_range(gcmd)
         self._query_switch(gcmd)
         travel_z = self.switch_probe_z_start + self.scan_safe_z
-        self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
-        self._move(self.switch_x, self.switch_y, self.switch_probe_z_start,
-                   self.z_speed)
-        trigger_z, counted, press_spread = self._probe_switch(gcmd, debug)
-        self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
-        center_x, center_y, agg = self._measure_xy(gcmd, debug)
-        curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
+        with self._retreating():
+            self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
+            self._move(self.switch_x, self.switch_y,
+                       self.switch_probe_z_start, self.z_speed)
+            trigger_z, counted, press_spread = self._probe_switch(gcmd, debug)
+            self._move(self.switch_x, self.switch_y, travel_z, self.z_speed)
+            center_x, center_y, agg = self._measure_xy(gcmd, debug)
+            curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
         self._merge_aggregate(agg, agg_z)
         anchor_height, anchor_freq = switch_anchor(curve, trigger_z)
         record = {
@@ -1845,7 +1944,8 @@ class EddyToolCalibration:
             if not is_baseline_run:
                 needed.append(self.baseline['tool'])
             self._require_anchors(gcmd, needed)
-        result = self._run_tool_measurement(gcmd, tool, debug)
+        with self._retreating():
+            result = self._run_tool_measurement(gcmd, tool, debug)
         if is_baseline_run:
             # A fresh T0 run always replaces the session baseline, so the
             # comparison never mixes results from two different setups.
@@ -2009,6 +2109,9 @@ class EddyToolCalibration:
             }
         return {
             'calibrate_z': self.calibrate_z,
+            # None until the fleet options land: the key is published from the
+            # start so a macro can read it without testing for its presence.
+            'tool_count': None,
             'baseline_tool': (
                 None if self.baseline is None else self.baseline['tool']),
             'session_id': self.session_id,

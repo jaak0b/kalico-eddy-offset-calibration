@@ -88,14 +88,16 @@ See `docs/design.md` for the full schema description and rationale.
 - `EDDY_LOCATE [DEBUG=1]`: coarse raster scan over the configured coil
   position to find and store the refined coil center for the session.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_CALIBRATE_OFFSET T=<n> [DEBUG=1]`: measure the mounted tool over the
-  coil and print its offsets relative to T0. Run `T=0` first with the
-  baseline tool mounted; every later tool is measured against it. `DEBUG=1`
-  also prints each scan pass's diagnostic rows.
 - `EDDY_CALIBRATE_Z T=<n> [DEBUG=1]`: one-time Z reference setup for the
   mounted tool. Run it after changing a nozzle or a hotend, or after moving
   the coil or the switch. This is the setup step, not the routine
   measurement.
+- `EDDY_CALIBRATE_OFFSET T=<n> [DEBUG=1]`: measure the mounted tool over the
+  coil and print its offsets relative to T0. With `calibrate_z: True` every
+  tool involved needs its `EDDY_CALIBRATE_Z` reference first, and the run
+  stops before it moves if one is missing. Run `T=0` first with the baseline
+  tool mounted; every later tool is measured against it. `DEBUG=1` also
+  prints each scan pass's diagnostic rows.
 
 ## Z offsets
 

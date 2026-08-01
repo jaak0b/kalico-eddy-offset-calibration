@@ -138,7 +138,16 @@ def test_reports_the_seeded_trigger_delta_for_two_identical_hotends():
     trigger_a, _ = etc.trigger_plane_from_anchor(curve_a, height_a, freq_a)
     trigger_b, _ = etc.trigger_plane_from_anchor(curve_b, height_b, freq_b)
 
-    # Assert: the reported Z offset is the seeded 0.3000 mm.
+    # Assert: A's anchor sits at the 2.5000 mm midpoint of its 1.0 to 4.0 mm
+    # range, 2.1000 mm above its 0.4000 mm trigger plane, and B's sits at the
+    # 2.8000 mm midpoint of its 1.3 to 4.3 mm range, 2.1000 mm above its
+    # 0.7000 mm trigger plane. Both trigger planes come back as the values
+    # they were built from, which pins the sign of the height, and the
+    # reported Z offset is the seeded 0.3000 mm.
+    assert height_a == pytest.approx(2.1000, abs=1e-9)
+    assert height_b == pytest.approx(2.1000, abs=1e-9)
+    assert trigger_a == pytest.approx(0.4000, abs=1e-9)
+    assert trigger_b == pytest.approx(0.7000, abs=1e-9)
     assert trigger_b - trigger_a == pytest.approx(0.3000, abs=1e-9)
 
 
@@ -210,8 +219,6 @@ def test_a_state_file_with_no_version_is_rejected():
 
 def test_an_unknown_field_inside_an_anchor_is_ignored():
     # Arrange: a record carrying a field a later version might add.
-    record = _anchor_record()
-    record['coil_temperature'] = 41.5
     text = etc.encode_state({0: _anchor_record()})
     text = text.replace('"trigger_z"', '"coil_temperature": 41.5,\n"trigger_z"')
 
