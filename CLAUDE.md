@@ -49,6 +49,15 @@ Durable gotchas:
   250 Hz; watch the `errors`/`overflows` fields at scan edges.
 - Map sample timestamps to positions with `motion_report.get_trapq_position(print_time)`,
   never by assuming constant scan velocity.
+- **The `kalico/` clone is newer than the printer this runs on.** Reading an attribute,
+  option or method there proves it exists in current Kalico, not in the owner's build. Before
+  depending on any Kalico surface, establish when it was added and reach it defensively if it
+  postdates the target build (`ldc1612`'s `frequency` option and its `freq_conv` attribute both
+  arrived 2026-03-04; the printer runs December 2025). The tests cannot catch this: they never
+  import klippy, so every Kalico-facing line is proven only on hardware.
+- An unexpected exception in a gcode handler is not an error message, it is a printer shutdown.
+  Klipper's dispatcher only catches `CommandError`, so an `AttributeError` or a `KeyError`
+  reaches the bare handler and shuts the machine down mid-command.
 
 ## Conventions
 
