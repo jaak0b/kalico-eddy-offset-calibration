@@ -1054,6 +1054,17 @@ HISTORY_COLUMNS = (
 STUDY_COLUMNS = (('cycle', '%d'), ('run', '%d')) + HISTORY_COLUMNS
 
 
+def offset_fields(offsets):
+    """The offset fields of a record: empty when offsets is None, because a
+    tool that reported no offsets must not read as one measured at zero.
+    """
+    return {
+        'offset_x': None if offsets is None else offsets['x'],
+        'offset_y': None if offsets is None else offsets['y'],
+        'offset_z': None if offsets is None else offsets['z'],
+    }
+
+
 def csv_header(columns):
     return ",".join(name for name, _format in columns) + "\n"
 
@@ -1084,19 +1095,35 @@ def csv_row(columns, entry):
     return ",".join(fields) + "\n"
 
 
-def rotated_log_path(path):
+def next_numbered_index(existing, prefix, suffix):
+    """The index a new numbered file takes, read off the names already there.
+
+    The highest index in use plus one, never the smallest free one: a free
+    index below the highest is a gap a deleted file left, and reusing it would
+    place a newer file below an older one.
+    """
+    highest = 0
+    for name in existing:
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        index = name[len(prefix):len(name) - len(suffix)]
+        # str.isdigit accepts digits int() cannot parse, superscripts among
+        # them, so an index is only read off a name that is plain ASCII digits.
+        if not index.isascii() or not index.isdigit():
+            continue
+        highest = max(highest, int(index))
+    return highest + 1
+
+
+def rotated_log_path(path, existing):
     """The sibling name an outdated log file is renamed to.
 
-    history_T0.csv becomes history_T0.1.csv, history_T0.2.csv and so on: the
-    smallest suffix not already on disk.
+    history_T0.csv becomes history_T0.1.csv, history_T0.2.csv and so on.
+    existing holds the file names already in the directory the log lives in.
     """
     root, ext = os.path.splitext(path)
-    index = 1
-    while True:
-        candidate = "%s.%d%s" % (root, index, ext)
-        if not os.path.exists(candidate):
-            return candidate
-        index += 1
+    prefix = os.path.basename(root) + "."
+    return "%s.%d%s" % (root, next_numbered_index(existing, prefix, ext), ext)
 
 
 def append_csv(path, columns, entry):
@@ -1110,7 +1137,8 @@ def append_csv(path, columns, entry):
     already completed. ValueError still propagates from csv_row, for an entry
     with an unknown or missing field.
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
     header = csv_header(columns)
     header_needed = True
     rotated_to = None
@@ -1119,7 +1147,7 @@ def append_csv(path, columns, entry):
         with open(path, 'r') as f:
             first_line = f.readline()
         if first_line != header:
-            rotated_to = rotated_log_path(path)
+            rotated_to = rotated_log_path(path, os.listdir(directory))
             os.rename(path, rotated_to)
             header_needed = True
     line = csv_row(columns, entry)
@@ -1141,17 +1169,8 @@ def next_study_filename(existing, tool):
     """
     prefix = "repeatability_T%d_" % (int(tool),)
     suffix = ".csv"
-    highest = 0
-    for name in existing:
-        if not name.startswith(prefix) or not name.endswith(suffix):
-            continue
-        index = name[len(prefix):len(name) - len(suffix)]
-        # str.isdigit accepts digits int() cannot parse, superscripts among
-        # them, so an index is only read off a name that is plain ASCII digits.
-        if not index.isascii() or not index.isdigit():
-            continue
-        highest = max(highest, int(index))
-    return "%s%03d%s" % (prefix, highest + 1, suffix)
+    return "%s%03d%s" % (
+        prefix, next_numbered_index(existing, prefix, suffix), suffix)
 
 
 # --- repeatability studies -------------------------------------------------
@@ -1418,8 +1437,8 @@ LOCATE_SCAN_LENGTH_FACTOR = 3.0
 XY_MEASUREMENT_ROUNDS = ('measurement coarse', 'measurement refine')
 
 # The scan rounds EDDY_LOCATE runs, in order, and the label each one reports
-# under. A locate round covers locate_scan_length rather than scan_length, so
-# it carries a label of its own.
+# under. Its opening round covers locate_scan_length rather than scan_length,
+# so these rounds carry labels of their own.
 LOCATE_ROUNDS = ('locate coarse', 'locate refine')
 
 
@@ -1769,7 +1788,7 @@ class EddyToolCalibration:
         """The tools a command runs over, in the order it measures them."""
         text = gcmd.get('T', None)
         if text is None:
-            return self._sweep_tools(gcmd, command)
+            self._require_sweep_config(gcmd, command)
         try:
             tools = parse_tool_list(text, self.tool_count, MAX_TOOLS)
         except ValueError as e:
@@ -1785,29 +1804,22 @@ class EddyToolCalibration:
                 "mount a tool." % (self.name, command, tools[0]))
         return tools
 
-    def _sweep_tools(self, gcmd, command):
-        """The tools a run without T= covers, or the error naming what is
-        missing before one can run."""
+    def _require_sweep_config(self, gcmd, command):
+        """Refuse a run without T= until the options a sweep needs are set."""
         missing = []
         if self.tool_count is None:
             missing.append('tool_count')
         if not self.has_toolchange_gcode:
             missing.append('toolchange_gcode')
-        if missing:
-            raise gcmd.error(
-                "Add %s to the [%s] config section and restart, or run "
-                "%s T=0 to calibrate one tool at a time. Running the command "
-                "without T= calibrates every tool in turn, which needs the "
-                "number of tools in tool_count and the lines that mount a "
-                "tool in toolchange_gcode."
-                % (" and ".join(missing), self.name, command))
-        try:
-            return sweep_tool_order(self.tool_count)
-        except ValueError as e:
-            raise gcmd.error(
-                "The tools of this machine could not be listed: %s. Set "
-                "tool_count in the [%s] config section to the number of tools "
-                "the machine has." % (e, self.name))
+        if not missing:
+            return
+        raise gcmd.error(
+            "Add %s to the [%s] config section and restart, or run "
+            "%s T=0 to calibrate one tool at a time. Running the command "
+            "without T= calibrates every tool in turn, which needs the "
+            "number of tools in tool_count and the lines that mount a "
+            "tool in toolchange_gcode."
+            % (" and ".join(missing), self.name, command))
 
     @contextlib.contextmanager
     def _phase(self, gcmd, tool, phase, sweeping):
@@ -1919,7 +1931,7 @@ class EddyToolCalibration:
     def _add_to_aggregate(self, agg, stats, kept_count):
         agg['samples_used'] += kept_count
         agg['dropped_low_freq'] += stats['dropped_low_freq']
-        agg['dropped_no_position'] += stats.get('dropped_no_position', 0)
+        agg['dropped_no_position'] += stats['dropped_no_position']
         agg['dropped_outside_move'] += stats['dropped_outside_move']
 
     def _merge_aggregate(self, agg, other):
@@ -2487,21 +2499,19 @@ class EddyToolCalibration:
         offsets is None when the measurement had no baseline to be compared
         against, which leaves the offset columns empty rather than zero.
         """
-        return {
-            'timestamp': log_timestamp(),
-            'command': command,
-            'center_x': result['x'],
-            'center_y': result['y'],
-            'offset_x': None if offsets is None else offsets['x'],
-            'offset_y': None if offsets is None else offsets['y'],
-            'z_crossing': result['z_crossing'],
-            'trigger_z': result['z_trigger'],
-            'offset_z': None if offsets is None else offsets['z'],
-            'baseline_session': None if offsets is None else self.session_id,
-            'setpoint_temperature': result['setpoint_temperature'],
-            'observed_temperature': result['observed_temperature'],
-            'samples_used': result['agg']['samples_used'],
-        }
+        return dict(
+            offset_fields(offsets),
+            timestamp=log_timestamp(),
+            command=command,
+            center_x=result['x'],
+            center_y=result['y'],
+            z_crossing=result['z_crossing'],
+            trigger_z=result['z_trigger'],
+            baseline_session=None if offsets is None else self.session_id,
+            setpoint_temperature=result['setpoint_temperature'],
+            observed_temperature=result['observed_temperature'],
+            samples_used=result['agg']['samples_used'],
+        )
 
     def _append_history(self, gcmd, tool, entry, completed):
         """Append one completed measurement to the tool's drift log.
@@ -2585,19 +2595,33 @@ class EddyToolCalibration:
                 % (e,))
         return center_x, center_y, agg
 
-    def _measure_xy(self, gcmd, debug):
-        center_x, center_y = self.center if self.center else (
-            self.coil_x, self.coil_y)
+    def _scan_rounds(self, labels, first_length):
+        """Pair every round of a measurement with the length its passes cover.
+
+        Only the opening round covers first_length: it is the one that has to
+        bracket the uncertainty in the center estimate it starts from.
+        """
+        return [(label, first_length if index == 0 else self.scan_length)
+                for index, label in enumerate(labels)]
+
+    def _measure_rounds(self, gcmd, center_x, center_y, rounds, debug):
         agg = self._new_aggregate()
-        for label in XY_MEASUREMENT_ROUNDS:
+        for label, length in rounds:
             center_x, center_y, round_agg = self._measure_center(
-                gcmd, center_x, center_y, self.scan_length, label, debug)
+                gcmd, center_x, center_y, length, label, debug)
             self._merge_aggregate(agg, round_agg)
             if debug:
                 gcmd.respond_info(
                     "%s center x: %.4f\n%s center y: %.4f"
                     % (label, center_x, label, center_y))
         return center_x, center_y, agg
+
+    def _measure_xy(self, gcmd, debug):
+        center_x, center_y = self.center if self.center else (
+            self.coil_x, self.coil_y)
+        return self._measure_rounds(
+            gcmd, center_x, center_y,
+            self._scan_rounds(XY_MEASUREMENT_ROUNDS, self.scan_length), debug)
 
     def _measure_z_curve(self, gcmd, center_x, center_y):
         """Stepwise descent over the coil center, returning the Z curve.
@@ -2684,11 +2708,8 @@ class EddyToolCalibration:
                 "z_start so the descent stays inside the sensor's range."
                 % (e,))
         agg = self._new_aggregate()
-        agg['samples_used'] = (
-            stats['raw_count'] - stats['dropped_low_freq']
-            - stats['dropped_outside_move'])
-        agg['dropped_low_freq'] = stats['dropped_low_freq']
-        agg['dropped_outside_move'] = stats['dropped_outside_move']
+        self._add_to_aggregate(
+            agg, stats, sum(len(freqs) for freqs in buckets.values()))
         return curve, agg
 
     # -- commands ---------------------------------------------------------
@@ -2724,21 +2745,10 @@ class EddyToolCalibration:
     def cmd_EDDY_LOCATE(self, gcmd):
         self._ensure_homed(gcmd)
         debug = self._debug_flag(gcmd)
-        coarse_label, refine_label = LOCATE_ROUNDS
-        coarse_x, coarse_y, agg1 = self._measure_center(
-            gcmd, self.coil_x, self.coil_y, self.locate_scan_length,
-            coarse_label, debug)
-        if debug:
-            gcmd.respond_info(
-                "%s center x: %.4f\n%s center y: %.4f"
-                % (coarse_label, coarse_x, coarse_label, coarse_y))
-        refined_x, refined_y, agg2 = self._measure_center(
-            gcmd, coarse_x, coarse_y, self.scan_length, refine_label,
-            debug)
+        refined_x, refined_y, agg = self._measure_rounds(
+            gcmd, self.coil_x, self.coil_y,
+            self._scan_rounds(LOCATE_ROUNDS, self.locate_scan_length), debug)
         self.center = (refined_x, refined_y)
-        agg = self._new_aggregate()
-        self._merge_aggregate(agg, agg1)
-        self._merge_aggregate(agg, agg2)
         rows = [
             "coil center x: %.4f" % (refined_x,),
             "coil center y: %.4f" % (refined_y,),
@@ -2919,10 +2929,8 @@ class EddyToolCalibration:
                     gcmd, tool, debug, self.calibrate_z,
                     self._anchored_setpoint(gcmd, tool))
             self._publish_measurement(tool, result, is_baseline_run)
-            self._report_tool_result(gcmd, tool, result, is_baseline_run)
-            offsets = None
-            if reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
-                offsets = self._offsets(result, self.calibrate_z)
+            offsets = self._offsets(tool, result, self.calibrate_z)
+            self._report_tool_result(gcmd, tool, result, offsets)
             if offsets is not None:
                 # The baseline tool's offsets are zero by definition, and
                 # applying zeros would overwrite whatever the owner set for it.
@@ -3124,13 +3132,16 @@ class EddyToolCalibration:
         ])
         return rows
 
-    def _offsets(self, result, include_z):
-        """Offsets of a measured tool against the session baseline.
+    def _offsets(self, tool, result, include_z):
+        """Offsets of a measured tool against the session baseline, or None
+        when the measurement reports none.
 
         The Z entry is None whenever no descent ran. include_z says whether
         one did: it is calibrate_z for a calibration run, and a repeatability
         study may turn the descent off on top of that.
         """
+        if not reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
+            return None
         base = self.baseline
         offsets = {
             'x': result['x'] - base['x'],
@@ -3141,17 +3152,21 @@ class EddyToolCalibration:
             offsets['z'] = result['z_trigger'] - base['z_trigger']
         return offsets
 
-    def _report_tool_result(self, gcmd, tool, result, is_baseline_run):
+    def _report_tool_result(self, gcmd, tool, result, offsets):
         rows = [
             "tool: T%d" % (tool,),
             "center x: %.4f" % (result['x'],),
             "center y: %.4f" % (result['y'],),
         ]
         rows.extend(self._z_rows(gcmd, tool, result))
-        if is_baseline_run:
-            rows.append("offsets: baseline tool, zero by definition")
+        if offsets is None:
+            if self.baseline is None:
+                rows.append(
+                    "offsets: not reported, T%d has not been measured in this "
+                    "session" % (BASELINE_TOOL,))
+            else:
+                rows.append("offsets: baseline tool, zero by definition")
         else:
-            offsets = self._offsets(result, self.calibrate_z)
             rows.append("baseline tool: T%d" % (self.baseline['tool'],))
             rows.append("offset x: %+.4f" % (offsets['x'],))
             rows.append("offset y: %+.4f" % (offsets['y'],))
@@ -3351,9 +3366,7 @@ class EddyToolCalibration:
             with self._study_step(gcmd, 'measurement', cycle, run, log):
                 result = self._run_tool_measurement(
                     gcmd, tool, debug, include_z, setpoint)
-            offsets = None
-            if reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
-                offsets = self._offsets(result, include_z)
+            offsets = self._offsets(tool, result, include_z)
             entry = self._log_entry('EDDY_REPEATABILITY', result, offsets)
             try:
                 append_csv(
@@ -3411,19 +3424,16 @@ class EddyToolCalibration:
             }
         tools = {}
         for tool, result in self.results.items():
-            if self.baseline is None or result['session_id'] != self.session_id:
+            if result['session_id'] != self.session_id:
                 continue
-            offsets = self._offsets(result, self.calibrate_z)
-            tools[str(tool)] = {
-                'session_id': result['session_id'],
-                'center_x': result['x'],
-                'center_y': result['y'],
-                'z_crossing': result['z_crossing'],
-                'offset_x': offsets['x'],
-                'offset_y': offsets['y'],
-                'offset_z': offsets['z'],
-                'measured_time': result['measured_time'],
-            }
+            tools[str(tool)] = dict(
+                offset_fields(self._offsets(tool, result, self.calibrate_z)),
+                session_id=result['session_id'],
+                center_x=result['x'],
+                center_y=result['y'],
+                z_crossing=result['z_crossing'],
+                measured_time=result['measured_time'],
+            )
         return {
             'calibrate_z': self.calibrate_z,
             'tool_count': self.tool_count,
