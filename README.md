@@ -226,11 +226,17 @@ sh install.sh
 `install.sh` symlinks the plugin into your Kalico checkout, so a `git pull`
 updates it. Pass the checkout directory as an argument if it is not `~/klipper`.
 
-Add the config section, then restart klippy so it loads the module:
+Add the config section, then restart the klipper service so it loads the
+module:
 
 ```
-FIRMWARE_RESTART
+sudo service klipper restart
 ```
+
+Use the service restart whenever the plugin file itself changes. A
+`FIRMWARE_RESTART` from the console reloads the config but keeps the already
+imported module, so an updated plugin file only takes effect after the service
+restarts.
 
 Do the first restart with the sensor disconnected. A traceback naming
 `eddy_tool_calibration` at that point comes from the config or the file, not
