@@ -107,14 +107,6 @@ Read this section before wiring anything.
 - The dirty-nozzle test has not been run yet. That test is the motivating
   use case of the whole project, and it is not proven. Everything below was
   measured with clean nozzles.
-- Measured numbers, one machine, one session each. On a Voron with
-  StealthChanger, a Manta M8P and a BTT Eddy Coil: XY repeatability standard
-  deviation 4.6 um in X and 2.5 um in Y over repeated runs on one tool, about
-  5 um across a dock and redock, contact switch press spread 0 to 2.5 um. The
-  cross-check against the contact method agreed to within 14 to 66 um. The
-  session is recorded in full in the project's decisions log. These are one
-  setup's figures, not a specification, and a smaller coil, a different
-  mainboard or a different toolchanger will read differently.
 - Kalico only. The plugin is loaded from Kalico's `klippy/plugins/`
   directory, which stock Klipper does not have.
 - Per-tool Z needs the contact switch. Without a switch you get X and Y and
@@ -127,6 +119,20 @@ Read this section before wiring anything.
   you wrote and knows nothing else about your changer.
 - Cartesian kinematics for the switch probing. The switch probing reads the
   kinematic Z limits and refuses to run without them.
+
+### Measured so far
+
+Measured on one machine, one session each (a Voron with StealthChanger, a Manta
+M8P and a BTT Eddy Coil), recorded in full in the project's decisions log. These
+are one setup's figures, not a specification; a smaller coil, a different
+mainboard or a different toolchanger will read differently.
+
+| What | Measured | How |
+|---|---|---|
+| XY repeatability (standard deviation) | 4.6 um X, 2.5 um Y | six runs on one tool, no toolchange, 150 C |
+| XY repeatability across dock and redock | about 5 um | four runs including a full toolchange |
+| Contact switch press spread | 0 to 2.5 um | per anchor run of four presses |
+| Agreement with the contact method | 14 to 66 um | fresh contact calibration, same day, 150 C |
 
 ## Requirements
 
