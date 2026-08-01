@@ -178,10 +178,16 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     and no argument from usefulness. That requirement is what limits volume: a change contains
     only so many genuine citations, constraints and unhandled branches, so no quota is needed and
     none is set, since a quota would only invite filling it. Deleting comments that fail the
-    categories is always free. The rationale in a task's instructions is for whoever does the
-    work, not for the file: never copy the reasoning behind an assignment into the code it
-    produces. When reviewing, a comment that cannot name its category is a finding like any
-    other.
+    categories is always free. When reviewing, a comment that cannot name its category is a
+    finding like any other.
+
+    **This binds the instructions too, not only the code.** Rationale in a task's instructions
+    is for whoever does the work; copied into the file it becomes exactly the narration this
+    rule forbids, and an instruction not to narrate loses to three paragraphs of narration
+    surrounding it. So: put the reasoning a task needs in a section marked as context that must
+    not reach the code, keep the instruction itself imperative, and make the count of added
+    comment lines part of what the task reports back, so an over-explained result is visible
+    without reading the diff.
 
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
