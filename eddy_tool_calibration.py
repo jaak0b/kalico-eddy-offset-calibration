@@ -1462,6 +1462,18 @@ SWITCH_REQUIRED_OPTIONS = (
 # option; this is the default.
 QUERY_COLLECT_TIME_DEFAULT = 0.500
 
+# Chosen value: a scan pass has to cross the whole response and still leave
+# margin on both sides for the fit window, and the response is about as wide
+# as the bore, so the default scan length is one and a half times the coil
+# bore diameter.
+SCAN_LENGTH_BORE_FACTOR = 1.5
+
+
+def default_scan_length(coil_inner_diameter):
+    """Default scan_length for a coil bore diameter, both in mm."""
+    return coil_inner_diameter * SCAN_LENGTH_BORE_FACTOR
+
+
 # Chosen value: the coarse locate pass has to cover the uncertainty in the
 # configured coil position, which is much larger than the coil itself, so the
 # default locate length is three times the regular scan length.
@@ -1566,7 +1578,9 @@ class EddyToolCalibration:
 
         # Scan tuning.
         self.scan_speed = config.getfloat('scan_speed', 4.0, above=0.0)
-        self.scan_length = config.getfloat('scan_length', 4.0, above=0.0)
+        self.scan_length = config.getfloat(
+            'scan_length', default_scan_length(self.coil_inner_diameter),
+            above=0.0)
         self.locate_scan_length = config.getfloat(
             'locate_scan_length',
             self.scan_length * LOCATE_SCAN_LENGTH_FACTOR, above=0.0)

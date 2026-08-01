@@ -42,7 +42,7 @@ reg_drive_current: 22           # from LDC_CALIBRATE_DRIVE_CURRENT
 coil_x: 350.0                   # approximate coil center (refined by EDDY_LOCATE)
 coil_y: 5.0
 coil_z: 0.0                     # machine Z of the coil top face
-coil_inner_diameter: 2.0        # mm, coil bore; sets the default fit window
+coil_inner_diameter: 2.0        # mm, coil bore; sets the default fit window and scan length
 scan_height: 1.0                # mm above the coil top face during XY scans
 scan_safe_z: 2.0                # mm above the scan height for travel moves
 z_start: 5.0                    # descent start, mm above the coil top face
@@ -50,8 +50,8 @@ z_stop: 0.5                     # descent end, mm above the coil top face
 z_step: 0.05                    # descent step; must divide z_start - z_stop
 # --- scan tuning ---
 scan_speed: 4.0                 # mm/s
-scan_length: 4.0                # mm, must exceed coil diameter
-locate_scan_length: 12.0        # mm, EDDY_LOCATE coarse pass; 3 * scan_length
+scan_length: 3.0                # mm, default = 1.5 * coil bore
+locate_scan_length: 9.0         # mm, EDDY_LOCATE coarse pass; 3 * scan_length
 travel_speed: 100.0             # mm/s for XY travel between passes
 z_speed: 10.0                   # mm/s for every Z leg
 scan_angles: 45, 135            # degrees; two directions reconstruct X and Y

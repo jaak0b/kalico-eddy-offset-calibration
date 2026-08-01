@@ -266,8 +266,9 @@ Every option and its default. Options shown commented out may be left out.
 #   real face drives the nozzle into the coil by that difference.
 #coil_inner_diameter:
 #   Required. Bore of the sensing coil, in mm. Must be greater than 0. It
-#   sets the default fit_window_radius, so a value below the coil's real
-#   bore narrows the fit window below the response it should cover.
+#   sets the default fit_window_radius and scan_length, so a value below
+#   the coil's real bore narrows the fit window and the scan pass below
+#   the response they should cover.
 #scan_height: 1.0
 #   Height above the coil top face the XY scan passes run at. Must be
 #   above the face and below z_start.
@@ -287,11 +288,11 @@ Every option and its default. Options shown commented out may be left out.
 #scan_speed: 4.0
 #   Speed, in mm/s, of an XY scan pass. Lower it if a pass returns fewer
 #   than samples_min samples.
-#scan_length: 4.0
-#   Length, in mm, of an XY scan pass. As a rule of thumb, roughly 1.5 times
-#   the coil bore: 4.0 mm for the 2 mm crab board bore, 12.0 mm for the 8 mm
-#   BTT Eddy Coil bore. It must comfortably exceed the coil diameter so both
-#   edges of the response fall inside the pass.
+#scan_length:
+#   Length, in mm, of an XY scan pass. The default is 1.5 times
+#   coil_inner_diameter, so a pass crosses the whole response with margin
+#   on both sides for the fit window: 12.0 mm for the 8 mm BTT Eddy Coil
+#   bore, 3.0 mm for the 2 mm Little Crab bore.
 #locate_scan_length:
 #   Length, in mm, of the coarse EDDY_LOCATE pass. The default is three
 #   times scan_length, because the coarse pass has to cover the error in
@@ -474,12 +475,12 @@ i2c_software_sda_pin: PC9
 i2c_address: 42
 reg_drive_current: 15
 coil_inner_diameter: 8.0
-scan_length: 12.0
 ```
 
 Leave `frequency` out: the driver's 12 MHz default is this board's CLKIN. The
 `coil_inner_diameter` above is an estimate, because BTT publishes no bore
-specification; measure your coil with calipers.
+specification; measure your coil with calipers. Leave `scan_length` out too;
+its default follows `coil_inner_diameter`.
 
 **BTT Eddy USB.** The board's RP2040 is its own MCU, so it is declared as one
 and the sensor sits on its internal I2C bus, following BTT's own sample config.
@@ -506,9 +507,9 @@ the larger BTT coils. Its CLKIN oscillator is 24 MHz, so it needs an explicit
 [eddy_tool_calibration]
 frequency: 24000000
 coil_inner_diameter: 2.0
-scan_length: 4.0
 ```
 
+`scan_length` is left out here too; its default follows `coil_inner_diameter`.
 The author's crab boards are still being assembled, so this variant is
 unmeasured here. Sources: the
 [upstream repository](https://github.com/chengxg/tool_eddy_calibration) and the

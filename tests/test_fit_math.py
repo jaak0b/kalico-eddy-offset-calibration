@@ -591,3 +591,22 @@ def test_fit_half_window_covers_the_window_radius_in_samples():
 def test_rejects_a_scan_speed_of_zero_when_sizing_the_fit_window():
     with pytest.raises(ValueError, match="scan speed"):
         etc.fit_half_window_samples(250.0, 0.0, 1.0)
+
+
+# --- scan length sizing ----------------------------------------------------
+
+
+def test_default_scan_length_for_the_btt_eddy_coil_bore():
+    # Arrange / Act: the BTT Eddy Coil's documented bore is 8.0 mm.
+    length = etc.default_scan_length(8.0)
+
+    # Assert: 8.0 mm times the 1.5 bore factor is 12.0 mm.
+    assert length == pytest.approx(12.0, abs=1e-9)
+
+
+def test_default_scan_length_for_the_little_crab_bore():
+    # Arrange / Act: the Little Crab board's bore is 2.0 mm.
+    length = etc.default_scan_length(2.0)
+
+    # Assert: 2.0 mm times the 1.5 bore factor is 3.0 mm.
+    assert length == pytest.approx(3.0, abs=1e-9)
