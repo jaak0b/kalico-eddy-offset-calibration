@@ -342,11 +342,12 @@ reference it; decide during implementation, wrapper preferred.)
   says makes the spread not comparable with an offset run's; and no heating at
   all when `calibrate_z` is False. The study file is resolved before anything
   is heated, so a directory that cannot be written fails in a second rather
-  than after minutes of heating. The command prints its plan and a rough run
-  time before it moves, each cycle's mean, range and standard deviation as that
-  cycle ends, and the summary below at the end. A cycle's standard deviation is
-  the same estimator the summary pools, run over that one cycle, so the two
-  never disagree about one quantity. A study does not replace the session
+  than after minutes of heating. The command prints its plan before it moves,
+  a progress row naming the cycle and the measurement about to run before each
+  one starts, each cycle's mean, range and standard deviation as that cycle
+  ends, and the summary below at the end. A cycle's standard deviation is the
+  same estimator the summary pools, run over that one cycle, so the two never
+  disagree about one quantity. A study does not replace the session
   baseline; it repeats one measurement rather than establishing one, and a
   study of the baseline tool leaves the offset columns empty exactly as a
   calibration run of that tool does.

@@ -990,8 +990,7 @@ def step_distance_rows(step_distances):
 # Provenance: probe_eddy_current's calibration moves. Each step settles for
 # 0.050 s before its 0.100 s sample window, dwells 0.200 s in place, is
 # approached from 0.500 mm above, and the whole descent is bracketed by a
-# 1.0 s dwell so the sample stream settles before and after it. The same
-# times are what the run time estimate below counts.
+# 1.0 s dwell so the sample stream settles before and after it.
 SAMPLE_SETTLE_TIME = 0.050
 SAMPLE_WINDOW_TIME = 0.100
 STEP_DWELL_TIME = 0.200
@@ -1002,67 +1001,6 @@ DESCENT_SETTLE_DWELL = 1.000
 # batches, so collection runs two batch periods past the end of a move to be
 # sure the batch carrying the last in-move samples has arrived.
 COLLECT_TAIL_TIME = 0.200
-
-# Provenance: BUFFER_TIME_START in Kalico's toolhead.py, 0.250 s there. Once
-# the motion queue has drained, the next move cannot start until that much
-# buffer has been built up again, so every wait for the queue to empty costs
-# it before the following move begins.
-MOTION_QUEUE_RESTART_TIME = 0.250
-
-# How many times a scan pass and a descent drain the motion queue. A pass
-# travels to the safe height, drops to the scan plane, runs the scan and lifts
-# again; a descent is bracketed by the travel to its start height and the lift
-# back to it, and its steps are queued back to back in between.
-SCAN_PASS_QUEUE_RESTARTS = 4
-DESCENT_QUEUE_RESTARTS = 2
-
-
-def measurement_time_estimate(rounds, pass_count, scan_length, scan_speed,
-                              scan_safe_z, z_speed, z_step_count, z_step,
-                              include_z):
-    """Rough duration in seconds of one full measurement of a tool.
-
-    Counts what the configured scan parameters and the fixed collection times
-    determine: every scan pass, the vertical leg down to the scan plane and
-    back, the settle and tail times around each pass, the wait for the motion
-    queue to refill after each time the pass drains it, and, when a descent
-    runs, every descent step with its approach hop and dwell.
-
-    Three things are left out, so the figure is a floor rather than a
-    prediction: travel between the coil and wherever the toolhead starts,
-    whose distance is not known before the move runs, and the toolchanges and
-    the heating, whose durations belong to the owner's own lines and hardware.
-    """
-    if rounds < 1:
-        raise ValueError(
-            "a measurement runs at least one scan round, got %r" % (rounds,))
-    if pass_count < 1:
-        raise ValueError(
-            "a scan round runs at least one pass, got %r" % (pass_count,))
-    if scan_speed <= 0.0 or z_speed <= 0.0:
-        raise ValueError(
-            "scan_speed and z_speed must be greater than 0, got %r and %r"
-            % (scan_speed, z_speed))
-    if scan_length <= 0.0:
-        raise ValueError(
-            "scan length must be greater than 0, got %r" % (scan_length,))
-    per_pass = (scan_length / scan_speed
-                + 2.0 * scan_safe_z / z_speed
-                + SAMPLE_SETTLE_TIME + COLLECT_TAIL_TIME
-                + SCAN_PASS_QUEUE_RESTARTS * MOTION_QUEUE_RESTART_TIME)
-    total = rounds * pass_count * per_pass
-    if include_z:
-        if z_step_count < 1:
-            raise ValueError(
-                "a descent runs at least one step, got %r" % (z_step_count,))
-        # Each step lifts to its own approach height and descends onto the
-        # target, so the leg up is the hop less the step already descended.
-        per_step = ((abs(Z_APPROACH_HOP - z_step) + Z_APPROACH_HOP) / z_speed
-                    + STEP_DWELL_TIME)
-        total += (2.0 * DESCENT_SETTLE_DWELL + COLLECT_TAIL_TIME
-                  + DESCENT_QUEUE_RESTARTS * MOTION_QUEUE_RESTART_TIME
-                  + z_step_count * per_step)
-    return total
 
 
 # --- measurement logs ------------------------------------------------------
@@ -1286,19 +1224,14 @@ def heating_row(state, temperature):
 
 
 def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
-                    heating_state, heating_temperature, seconds):
-    """Labeled rows describing a study before it starts moving.
-
-    seconds is the estimated run time, or None when no honest estimate is
-    available, in which case the row is left out rather than filled with a
-    number nothing produced.
-    """
+                    heating_state, heating_temperature):
+    """Labeled rows describing a study before it starts moving."""
     if runs < 2:
         raise ValueError(
             "a study needs at least 2 runs per cycle, got %r" % (runs,))
     if cycles < 1:
         raise ValueError("a study needs at least 1 cycle, got %r" % (cycles,))
-    rows = [
+    return [
         "repeatability study:",
         "tool: T%d" % (int(tool),),
         "runs per cycle: %d" % (runs,),
@@ -1308,12 +1241,6 @@ def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
         heating_row(heating_state, heating_temperature),
         docking_row(state, docking_tool, cycles),
     ]
-    if seconds is not None:
-        rows.append(
-            "estimated run time: %.0f s (%.1f min), a floor that counts the "
-            "scan and descent moves only, without the toolchanges or the "
-            "heating" % (seconds, seconds / 60.0))
-    return rows
 
 
 # What each axis of a study reads off one measurement. The Z figure is the
@@ -1434,6 +1361,17 @@ def repeatability_statistics(cycles):
         'range': max(values) - min(values),
         'max_deviation': max(abs(value - grand_mean) for value in values),
     }
+
+
+def measurement_progress_row(cycle, cycles, run, runs):
+    """The labeled row printed just before one measurement of a study runs.
+
+    cycle and run are the 1-based position of the measurement about to start;
+    cycles and runs are the study's totals. Printed ahead of the measurement
+    it names, so a long study never goes quiet while a run is in progress.
+    """
+    return ("progress: cycle %d of %d, measurement %d of %d"
+            % (cycle, cycles, run, runs))
 
 
 def cycle_progress_rows(cycle, axes):
@@ -3391,8 +3329,7 @@ class EddyToolCalibration:
             self._require_anchors(gcmd, [tool])
         gcmd.respond_info("\n".join(study_plan_rows(
             tool, runs, cycles, include_z, state, docking_tool, heating,
-            self._heating_temperature(gcmd, heating, tool),
-            self._study_time_estimate(runs * cycles, include_z))))
+            self._heating_temperature(gcmd, heating, tool))))
         # Resolved before anything is heated, so a directory that cannot be
         # written fails in a second rather than after minutes of heating.
         log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
@@ -3410,7 +3347,7 @@ class EddyToolCalibration:
             # where a calibration run's would.
             with self._retreating():
                 measured = self._run_study_cycle(
-                    gcmd, tool, cycle, runs, include_z, debug, state,
+                    gcmd, tool, cycle, cycles, runs, include_z, debug, state,
                     docking_tool, log, axes)
             try:
                 rows = cycle_progress_rows(
@@ -3511,27 +3448,6 @@ class EddyToolCalibration:
             skip_z = 1
         return self.calibrate_z and not skip_z
 
-    def _study_time_estimate(self, measurements, include_z):
-        """Estimated seconds a study spends moving, or None.
-
-        A configuration the estimate cannot be built from returns None, which
-        leaves the row out of the plan: the plan still names the measurement
-        count, and a made up duration would be worse than none. The reason is
-        logged so it stays visible in klippy.log.
-        """
-        try:
-            per_measurement = measurement_time_estimate(
-                len(XY_MEASUREMENT_ROUNDS),
-                len(expand_scan_angles(self.scan_angles, self.pair_scans)),
-                self.scan_length, self.scan_speed, self.scan_safe_z,
-                self.z_speed, len(self.z_targets), self.z_step, include_z)
-        except ValueError:
-            logging.exception(
-                "eddy_tool_calibration: could not estimate the run time of a "
-                "repeatability study, so the plan leaves the row out")
-            return None
-        return per_measurement * measurements
-
     def _study_csv_path(self, gcmd, tool):
         """The file this study writes its measurements to.
 
@@ -3589,8 +3505,8 @@ class EddyToolCalibration:
             "Internal error: the docking state %r is not one of %r."
             % (state, DOCKING_STATES))
 
-    def _run_study_cycle(self, gcmd, tool, cycle, runs, include_z, debug,
-                         state, docking_tool, log, axes):
+    def _run_study_cycle(self, gcmd, tool, cycle, cycles, runs, include_z,
+                         debug, state, docking_tool, log, axes):
         """One cycle: dock and remount the tool, then measure it runs times.
 
         Returns the measured values of the cycle, keyed by axis label. The
@@ -3607,6 +3523,8 @@ class EddyToolCalibration:
         self._exercise_docking(gcmd, tool, cycle, state, docking_tool, log)
         measured = dict((axis, []) for axis in axes)
         for run in range(1, runs + 1):
+            gcmd.respond_info(
+                measurement_progress_row(cycle, cycles, run, runs))
             with self._study_step(gcmd, 'measurement', cycle, run, log):
                 result = self._run_tool_measurement(
                     gcmd, tool, debug, include_z)

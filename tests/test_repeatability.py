@@ -286,7 +286,7 @@ def test_a_cycle_of_one_run_cannot_be_summarised():
 
 def test_the_plan_names_the_docking_tool_and_the_measurement_count():
     rows = etc.study_plan_rows(
-        1, 10, 3, False, 'through_tool', 0, 'z_calibration_off', None, 396.0)
+        1, 10, 3, False, 'through_tool', 0, 'z_calibration_off', None)
 
     assert rows == [
         "repeatability study:",
@@ -298,15 +298,12 @@ def test_the_plan_names_the_docking_tool_and_the_measurement_count():
         "nozzle heating: none, calibrate_z is False",
         "docking between cycles: each cycle mounts T0 and remounts the "
         "measured tool",
-        "estimated run time: 396 s (6.6 min), a floor that counts the scan "
-        "and descent moves only, without the toolchanges or the heating",
     ]
 
 
-def test_the_plan_leaves_out_a_run_time_it_could_not_estimate():
+def test_the_plan_names_the_anchor_temperature_when_the_tool_has_one():
     rows = etc.study_plan_rows(
-        0, 5, 1, True, 'no_other_tool', None, 'to_anchor_temperature', 150.0,
-        None)
+        0, 5, 1, True, 'no_other_tool', None, 'to_anchor_temperature', 150.0)
 
     assert rows == [
         "repeatability study:",
@@ -325,15 +322,13 @@ def test_the_plan_leaves_out_a_run_time_it_could_not_estimate():
 def test_a_plan_of_one_run_per_cycle_is_rejected():
     with pytest.raises(ValueError, match="at least 2 runs"):
         etc.study_plan_rows(
-            0, 1, 2, False, 'through_tool', 1, 'z_calibration_off', None,
-            None)
+            0, 1, 2, False, 'through_tool', 1, 'z_calibration_off', None)
 
 
 def test_a_plan_of_no_cycles_is_rejected():
     with pytest.raises(ValueError, match="at least 1 cycle"):
         etc.study_plan_rows(
-            0, 5, 0, False, 'through_tool', 1, 'z_calibration_off', None,
-            None)
+            0, 5, 0, False, 'through_tool', 1, 'z_calibration_off', None)
 
 
 def test_a_missing_toolchange_gcode_is_named_as_the_reason_for_no_docking():
@@ -401,85 +396,27 @@ def test_a_machine_without_toolchange_lines_cannot_dock_at_all():
     assert etc.study_docking(1, 4, False) == ('no_toolchange_gcode', None)
 
 
-# --- run time estimate -----------------------------------------------------
-#
-# Every figure below is worked out by hand from the documented collection
-# times: a pass settles 0.050 s, runs its scan, and collects 0.200 s past the
-# end of the move, and a descent step lifts by the 0.500 mm approach hop and
-# dwells 0.200 s, with the descent bracketed by two 1.000 s settle dwells and
-# the same 0.200 s tail. A pass drains the motion queue four times and a
-# descent twice, and a drained queue costs 0.250 s before the next move
-# begins.
+# --- per-measurement progress row -------------------------------------------
 
 
-def test_the_estimate_counts_every_pass_of_every_scan_round():
-    # A 4 mm pass at 4 mm/s takes 1.0 s, the legs down to the scan plane and
-    # back cover 2 * 2 mm at 10 mm/s for 0.4 s, the settle and tail add
-    # 0.25 s, and the four queue restarts add 1.0 s, so a pass is 2.65 s.
-    # Two rounds of four passes is 21.2 s.
-    seconds = etc.measurement_time_estimate(
-        2, 4, 4.0, 4.0, 2.0, 10.0, 10, 0.5, False)
-
-    assert seconds == pytest.approx(21.2, abs=1e-9)
+def test_the_first_measurement_of_the_first_cycle_is_announced():
+    assert etc.measurement_progress_row(1, 3, 1, 5) == (
+        "progress: cycle 1 of 3, measurement 1 of 5")
 
 
-def test_the_estimate_adds_every_descent_step_when_the_descent_runs():
-    # Each of the 10 steps lifts 0.5 mm less the 0.5 mm step already
-    # descended, drops the 0.5 mm hop at 10 mm/s for 0.05 s, and dwells
-    # 0.200 s, so the steps take 2.5 s. The two 1.0 s settle dwells, the
-    # 0.2 s tail and the two 0.25 s queue restarts bring the descent to
-    # 5.2 s, on top of the 21.2 s of scanning.
-    seconds = etc.measurement_time_estimate(
-        2, 4, 4.0, 4.0, 2.0, 10.0, 10, 0.5, True)
-
-    assert seconds == pytest.approx(26.4, abs=1e-9)
+def test_the_last_measurement_of_the_first_cycle_is_announced():
+    assert etc.measurement_progress_row(1, 3, 5, 5) == (
+        "progress: cycle 1 of 3, measurement 5 of 5")
 
 
-def test_a_descent_step_finer_than_the_hop_still_pays_for_the_lift():
-    # At the default z_step of 0.05 mm each step lifts 0.5 - 0.05 = 0.45 mm
-    # and drops the full 0.5 mm hop, so it travels 0.95 mm at 10 mm/s for
-    # 0.095 s and dwells 0.200 s, a step of 0.295 s. Ten steps take 2.95 s,
-    # and the 2.7 s of settle dwells, tail and queue restarts bring the
-    # descent to 5.65 s, on top of the 21.2 s of scanning.
-    seconds = etc.measurement_time_estimate(
-        2, 4, 4.0, 4.0, 2.0, 10.0, 10, 0.05, True)
-
-    assert seconds == pytest.approx(26.85, abs=1e-9)
+def test_the_first_measurement_of_the_last_cycle_is_announced():
+    assert etc.measurement_progress_row(3, 3, 1, 5) == (
+        "progress: cycle 3 of 3, measurement 1 of 5")
 
 
-def test_an_estimate_without_a_scan_round_is_rejected():
-    with pytest.raises(ValueError, match="at least one scan round"):
-        etc.measurement_time_estimate(0, 4, 4.0, 4.0, 2.0, 10.0, 10, 0.5,
-                                      False)
-
-
-def test_an_estimate_without_a_scan_pass_is_rejected():
-    with pytest.raises(ValueError, match="at least one pass"):
-        etc.measurement_time_estimate(2, 0, 4.0, 4.0, 2.0, 10.0, 10, 0.5,
-                                      False)
-
-
-def test_an_estimate_at_a_standstill_scan_speed_is_rejected():
-    with pytest.raises(ValueError, match="must be greater than 0"):
-        etc.measurement_time_estimate(2, 4, 4.0, 0.0, 2.0, 10.0, 10, 0.5,
-                                      False)
-
-
-def test_an_estimate_at_a_standstill_z_speed_is_rejected():
-    with pytest.raises(ValueError, match="must be greater than 0"):
-        etc.measurement_time_estimate(2, 4, 4.0, 4.0, 2.0, 0.0, 10, 0.5,
-                                      False)
-
-
-def test_an_estimate_of_a_scan_pass_of_no_length_is_rejected():
-    with pytest.raises(ValueError, match="scan length must be greater than 0"):
-        etc.measurement_time_estimate(2, 4, 0.0, 4.0, 2.0, 10.0, 10, 0.5,
-                                      False)
-
-
-def test_an_estimate_of_a_descent_without_steps_is_rejected():
-    with pytest.raises(ValueError, match="at least one step"):
-        etc.measurement_time_estimate(2, 4, 4.0, 4.0, 2.0, 10.0, 0, 0.5, True)
+def test_the_last_measurement_of_the_last_cycle_is_announced():
+    assert etc.measurement_progress_row(3, 3, 5, 5) == (
+        "progress: cycle 3 of 3, measurement 5 of 5")
 
 
 # --- step distance rows ----------------------------------------------------

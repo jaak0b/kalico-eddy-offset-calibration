@@ -140,9 +140,10 @@ The tool is heated only when `calibrate_z: True` and it has a stored
 reference was measured at. The plan row says which of the three cases applies,
 because a study run cold is not comparable with an offset run.
 
-The command prints its plan and a rough run time before it moves, each cycle's
-mean, range and standard deviation as that cycle finishes, and a summary at the
-end. Per axis the summary carries the mean, the within-cycle spread (the
+The command prints its plan before it moves, a progress row naming the cycle
+and the measurement about to run before each one starts, each cycle's mean,
+range and standard deviation as that cycle finishes, and a summary at the end.
+Per axis the summary carries the mean, the within-cycle spread (the
 measurement), the spread of the cycle means, the between-cycle spread (the
 docking and any drift between cycles) with its degrees of freedom, the range and
 the largest deviation from the mean. Every individual measurement is written to
@@ -214,33 +215,13 @@ deviation from the mean, and writes every measurement to a CSV file.
 
 ## Install
 
-On the printer host:
-
 ```
 cd ~
 git clone https://github.com/jaak0b/kalico-eddy-offset-calibration
 cd kalico-eddy-offset-calibration
 sh install.sh
-```
-
-`install.sh` symlinks the plugin into your Kalico checkout, so a `git pull`
-updates it. Pass the checkout directory as an argument if it is not `~/klipper`.
-
-Add the config section, then restart the klipper service so it loads the
-module:
-
-```
 sudo service klipper restart
 ```
-
-Use the service restart whenever the plugin file itself changes. A
-`FIRMWARE_RESTART` from the console reloads the config but keeps the already
-imported module, so an updated plugin file only takes effect after the service
-restarts.
-
-Do the first restart with the sensor disconnected. A traceback naming
-`eddy_tool_calibration` at that point comes from the config or the file, not
-from the wiring.
 
 ## Config reference
 
