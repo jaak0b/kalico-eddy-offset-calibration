@@ -68,6 +68,11 @@ edge_margin: 0.15               # fraction of each pass treated as edge
 freq_min: 1000000.0             # Hz; samples below this are discarded as noise
 # --- Z offsets ---
 calibrate_z: False              # run the Z descent and report Z offsets
+# --- nozzle temperature ---
+calibration_temp: 150.0         # C every calibration measurement is taken at
+calibration_settle_time: 30.0   # s dwell after the target is reached
+tool_extruders:                 # heater section names by tool number; default
+                                # is extruder, extruder1, extruder2, ...
 # --- contact switch: these four are required when calibrate_z is True ---
 switch_pin: ^PA1                # endstop pin, invert and pullup prefixes allowed
 switch_x: 340.0                 # machine X of the nozzle over the switch
@@ -111,17 +116,20 @@ written by `EDDY_CALIBRATE_Z` as soon as a reference is measured.
 
 The state file holds one JSON object per anchored tool under an `"anchors"`
 key, keyed by decimal tool number as a string, alongside a top-level
-`"version"` field (currently 1). Each entry stores `anchor_height` and
-`anchor_frequency`, the only two fields the offset math reads, plus
-diagnostic record fields (`trigger_z`, `curve_low_z`, `curve_high_z`,
+`"version"` field (currently 1). Each entry stores `anchor_height`,
+`anchor_frequency` and `temperature`, the three fields an offset run reads,
+plus diagnostic record fields (`trigger_z`, `curve_low_z`, `curve_high_z`,
 `center_x`, `center_y`, `updated`) that let a stale anchor be recognised
 later but are never fed back into a measurement. Writes serialise to a
 temporary file and `os.replace` it over the target, so an interrupted write
 cannot leave a truncated state file; a fleet run rewrites the file after each
 tool, so an abort partway through keeps the anchors already measured. A
 missing file is normal and means no tool is anchored yet; a file that exists
-but does not parse, or carries a `version` this build does not handle, is a
-config error naming the path.
+but does not parse, carries a `version` this build does not handle, or is
+missing a field this build needs, is a config error naming the path and the
+command that rewrites the references from scratch. There is no migration
+path: every field an anchor record carries comes out of one measurement, so a
+record missing one cannot be completed without measuring again.
 
 `coil_z` is the only vertical option in machine coordinates. `scan_height`,
 `z_start` and `z_stop` are heights above the coil top face, so the plugin adds
@@ -168,8 +176,44 @@ face height never enters an offset; it only has to be small enough that the
 switch probing and the descent are both reachable.
 
 Display precision in every readout: millimetres to 4 decimals, frequencies to
-3 decimals. Values are printed exactly as measured at that precision, never
-rounded further and never clamped.
+3 decimals, temperatures to 1 decimal. Values are printed exactly as measured
+at that precision, never rounded further and never clamped.
+
+## Nozzle temperature
+
+How the frequency reads against height depends on how hot the nozzle is, so a
+Z reference is only valid for a measurement taken at the temperature the
+reference was measured at. The plugin holds that temperature itself rather
+than trusting the machine to be in the right state:
+
+- `EDDY_CALIBRATE_Z` heats to `calibration_temp`, waits for the target, dwells
+  `calibration_settle_time`, measures, and records into the anchor what the
+  heater actually read rather than the target it was given.
+- `EDDY_CALIBRATE_OFFSET` reads each tool's recorded temperature out of the
+  state file and heats that tool back to it. It never measures at
+  `calibration_temp`, so an offset run reproduces the thermal state of the
+  anchor it evaluates against by construction.
+- A tool whose recorded temperature differs from `calibration_temp` by more
+  than 1 C is reported as a console warning naming both values. The run still
+  measures at the recorded temperature: the anchor frequency says nothing
+  about any other one. Re-running `EDDY_CALIBRATE_Z` is what moves a tool to a
+  new temperature.
+- `calibration_settle_time` exists because the heater block reaches its target
+  well before the nozzle tip does. Both commands dwell the same time after the
+  target is reached, so both measure the same thermal state.
+- With `calibrate_z: False` nothing is heated at all. No anchor exists, no
+  descent runs, and the XY center is amplitude-invariant.
+
+`calibration_temp` above 0 is a config requirement when `calibrate_z` is True.
+A cold anchor could only be compared against a later measurement taken cold as
+well, and a nozzle that has been hot does not come back to cold inside a run.
+
+The heater of a tool is found by section name, because a fleet preheat sets
+targets on tools that are not mounted. `tool_extruders` names them in tool
+number order; without it each tool follows Klipper's own extruder naming
+(`extruder` for T0, `extruder1` for T1, and so on). Every tool's heater is
+resolved at `klippy:connect`, where the heater sections exist and a wrong name
+is still a startup failure rather than a surprise partway into a run.
 
 The plugin instantiates Kalico's `extras.ldc1612.LDC1612` directly with its own
 config wrapper, so users need no separate `[ldc1612]` section. (Fallback design
@@ -182,12 +226,14 @@ reference it; decide during implementation, wrapper preferred.)
 - `EDDY_LOCATE [DEBUG=1]`: coarse raster over the configured coil position,
   finds and stores the refined coil center for the session; prints it.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
-- `EDDY_CALIBRATE_OFFSET [T=<n>] [DEBUG=1]`: full XY(+Z) measurement. `T=<n>`
-  measures that one tool; a missing `T=` measures every tool from T0 upward in
-  turn and ends with a summary table of their offsets. `T=0` measures the
+- `EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: full XY(+Z) measurement.
+  `T=<n>` measures that one tool, `T=0,1,2` measures those three, and a
+  missing `T=` measures every tool from T0 upward in turn. Any run over more
+  than one tool ends with a summary table of their offsets. `T=0` measures the
   baseline and always replaces the session baseline with its result, reporting
-  its own offsets as zero by definition. `T=1` to `T=15` require that `T=0` was
-  calibrated in this session and error otherwise. Each non-baseline tool's
+  its own offsets as zero by definition; it is measured first whatever order
+  the list gives it in. A list without `T=0` requires that `T=0` was
+  calibrated in this session and errors otherwise. Each non-baseline tool's
   result is passed to `apply_offsets_gcode` if that option is set.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
   1. XY: for each configured angle, scan through the current center estimate,
@@ -202,23 +248,33 @@ reference it; decide during implementation, wrapper preferred.)
      `calibrate_z: False` this whole step is skipped and no descent runs.
   3. Print labeled results: raw center, the Z curve rows when a descent ran,
      and offsets relative to the T0 baseline.
-- `EDDY_CALIBRATE_Z [T=<n>] [DEBUG=1]`: one-time per-tool Z reference. Presses
+- `EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: one-time per-tool Z reference. Presses
   the contact switch four times, discards the first press as a warm-up, takes
   the median of the remaining three as the trigger plane, then measures the
   tool's XY center and descent curve and stores the curve midpoint's height
-  above that trigger plane together with the frequency there. Written to the
-  state file immediately. Requires `calibrate_z: True` and the switch options.
+  above that trigger plane together with the frequency there, and the nozzle
+  temperature it measured at. Written to the state file immediately. Requires
+  `calibrate_z: True` and the switch options.
   A missing `T=` anchors every tool from T0 upward in turn. Anchoring a tool
   discards that tool's measurements from this session, and anchoring the
   baseline tool clears the session baseline as well, so the next offset run
   measures T0 again.
-- Both calibration commands share one tool rule. `T=<n>` runs that tool;
-  omitting `T=` runs the whole fleet and needs `tool_count` and
-  `toolchange_gcode`, naming both when either is missing. With
+- Both calibration commands share one tool rule. `T=` takes one tool number or
+  a comma separated list of them with no spaces (`T=0,1,2`); a duplicate, a
+  tool outside the machine's range and a malformed entry are each an error
+  naming the entry. Omitting `T=` runs the whole fleet and needs `tool_count`
+  and `toolchange_gcode`, naming both when either is missing, and produces the
+  same tool list a full `T=` would have. A list of more than one tool needs
+  `toolchange_gcode` as well, because it mounts each tool it measures. With
   `toolchange_gcode` set, the plugin mounts the tool it is about to work on in
-  both cases; without it, both cases work on whatever tool is mounted. A
-  failure inside a fleet run lifts the toolhead clear and names the tool and
-  the stage that failed, keeping the results and references already taken.
+  every case; without it, a single-tool run works on whatever tool is mounted.
+  A failure inside a run over several tools lifts the toolhead clear and names
+  the tool and the stage that failed, keeping the results and references
+  already taken.
+- Heating a list of tools is one parallel preheat before the per-tool loop:
+  every target is set first, then every tool is waited for, then the settle
+  dwell runs once. A tool that has to cool to its target is waited for the same
+  way, which is why the command prints its targets before it starts waiting.
 - All output as labeled raw-value rows, not prose.
 
 ## Algorithm notes (ported from upstream, with provenance)

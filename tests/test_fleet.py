@@ -30,6 +30,82 @@ def test_a_sweep_of_no_tools_is_rejected():
         etc.sweep_tool_order(0)
 
 
+# --- the T= tool list ------------------------------------------------------
+
+
+def test_a_t_list_is_read_in_the_order_it_was_written():
+    assert etc.parse_tool_list('0,2,1', 4, 16) == [0, 2, 1]
+
+
+def test_a_single_t_value_reads_as_a_one_tool_list():
+    assert etc.parse_tool_list('3', 4, 16) == [3]
+
+
+def test_spaces_around_the_entries_of_a_t_list_are_allowed():
+    assert etc.parse_tool_list(' 0 , 1 ', 4, 16) == [0, 1]
+
+
+def test_an_omitted_t_reads_as_the_whole_fleet():
+    # A run without T= covers every tool, which is the same list a full T=
+    # would have named.
+    assert etc.parse_tool_list(None, 3, 16) == [0, 1, 2]
+
+
+def test_a_t_list_naming_a_tool_twice_is_rejected():
+    with pytest.raises(ValueError, match="names T1 twice"):
+        etc.parse_tool_list('0,1,1', 4, 16)
+
+
+def test_a_t_list_beyond_the_configured_tool_count_is_rejected():
+    with pytest.raises(ValueError, match="tool_count is 4"):
+        etc.parse_tool_list('0,4', 4, 16)
+
+
+def test_a_t_list_beyond_the_accepted_tools_is_rejected_without_a_tool_count():
+    with pytest.raises(ValueError, match="T0 through T15"):
+        etc.parse_tool_list('16', None, 16)
+
+
+def test_a_negative_tool_number_is_rejected():
+    with pytest.raises(ValueError, match="names T-1"):
+        etc.parse_tool_list('-1', 4, 16)
+
+
+def test_a_t_list_entry_that_is_not_a_number_is_rejected():
+    with pytest.raises(ValueError, match="'x1'"):
+        etc.parse_tool_list('0,x1', 4, 16)
+
+
+def test_a_fractional_tool_number_is_rejected():
+    with pytest.raises(ValueError, match="'1.5'"):
+        etc.parse_tool_list('1.5', 4, 16)
+
+
+def test_a_t_list_with_a_trailing_comma_is_rejected():
+    with pytest.raises(ValueError, match="empty entry"):
+        etc.parse_tool_list('0,1,', 4, 16)
+
+
+def test_a_t_parameter_with_no_tool_number_is_rejected():
+    with pytest.raises(ValueError, match="carries no tool number"):
+        etc.parse_tool_list('  ', 4, 16)
+
+
+# --- baseline ordering -----------------------------------------------------
+
+
+def test_the_baseline_tool_is_moved_to_the_front_of_a_list():
+    assert etc.baseline_first([2, 0, 1], 0) == [0, 2, 1]
+
+
+def test_the_other_tools_keep_the_order_they_were_listed_in():
+    assert etc.baseline_first([3, 1, 0, 2], 0) == [0, 3, 1, 2]
+
+
+def test_a_list_without_the_baseline_tool_is_left_alone():
+    assert etc.baseline_first([3, 1, 2], 0) == [3, 1, 2]
+
+
 # --- apply template context ------------------------------------------------
 
 

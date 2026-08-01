@@ -30,6 +30,9 @@ work. An eddy-current coil sidesteps both.
 - **Z** comes from a frequency-vs-height descent curve, anchored once per tool by
   a press on a contact switch next to the coil. The switch's own height never has
   to be known, because it cancels between tools.
+- **The temperature is held for you.** A nozzle reads differently hot and cold,
+  so each reference records the temperature it was measured at, and an offset
+  run heats every tool back to its own recorded value before measuring.
 - The fitting math is ported from chengxg's `tool_eddy_calibration` and Kalico's
   `probe_eddy_current`.
 
@@ -70,31 +73,42 @@ followed by a refining scan, and store the resulting coil center for the rest of
 the session. Prints the measured center next to the configured `coil_x` and
 `coil_y`. `DEBUG=1` prints each scan pass's diagnostic rows.
 
+Both calibration commands take the same tool selection: `T=` takes one tool
+number or a comma separated list with no spaces: `T=0`, `T=0,1,2`. Leaving `T=`
+out runs every tool of the fleet, which needs `tool_count` and
+`toolchange_gcode`. A list of more than one tool needs `toolchange_gcode` too,
+because it mounts each tool it measures.
+
 #### EDDY_CALIBRATE_Z
 
-`EDDY_CALIBRATE_Z [T=<tool>] [DEBUG=1]`: One-time Z reference setup for the tool
-named by `T=`, or for every tool in turn when `T=` is left out. Presses the
-contact switch (a sexbolt or sexball style Z endstop, or any rigidly mounted
-microswitch the nozzle can press straight down, placed within reach of every
-tool near the coil), measures the tool's descent curve, and binds the two together.
-Requires `calibrate_z: True` and the switch options. Run it after changing a
-nozzle or a hotend, or after moving the coil or the switch. References are
-written to `EddyToolCalibration/calibration_state.json` next to the printer
-config as soon as they are measured; there is no `SAVE_CONFIG` step. A run
-without `T=` needs `tool_count` and `toolchange_gcode`. `DEBUG=1` prints each
-press trigger height and each scan pass's diagnostic rows.
+`EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: One-time Z reference setup for the
+tools named by `T=`, or for every tool in turn when `T=` is left out. Heats
+each tool to `calibration_temp`, presses the contact switch (a sexbolt or
+sexball style Z endstop, or any rigidly mounted microswitch the nozzle can
+press straight down, placed within reach of every tool near the coil),
+measures the tool's descent curve, and binds the two together. Requires
+`calibrate_z: True` and the switch options. Run it after changing a nozzle or a
+hotend, after moving the coil or the switch, or after changing
+`calibration_temp`. References are written to
+`EddyToolCalibration/calibration_state.json` next to the printer config as soon
+as they are measured; there is no `SAVE_CONFIG` step. Each one records the
+nozzle temperature it was measured at, alongside the anchor height and
+frequency. `DEBUG=1` prints each press trigger height and each scan pass's
+diagnostic rows.
 
 #### EDDY_CALIBRATE_OFFSET
 
-`EDDY_CALIBRATE_OFFSET [T=<tool>] [DEBUG=1]`: Measure the tool named by `T=`
-over the coil and print its offsets relative to T0, or measure every tool in
+`EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: Measure the tools named by `T=`
+over the coil and print their offsets relative to T0, or measure every tool in
 turn when `T=` is left out. Run `T=0` first: it is the baseline every other tool
-is compared against, and it is not persisted across a restart. With
-`calibrate_z: True` every tool involved needs its `EDDY_CALIBRATE_Z` reference
-first, and the command stops before it moves if one is missing. Each
-non-baseline result is passed to `apply_offsets_gcode` when that option is set.
-A run without `T=` needs `tool_count` and `toolchange_gcode`, and ends with a
-per-tool summary. `DEBUG=1` prints each scan pass's diagnostic rows.
+is compared against, and it is not persisted across a restart. T0 is measured
+first whatever order a list gives it in. With `calibrate_z: True` every tool
+involved needs its `EDDY_CALIBRATE_Z` reference first, and the command stops
+before it moves if one is missing; each tool is then heated to the temperature
+its own reference was measured at, all of them together, before the first
+measurement starts. Each non-baseline result is passed to `apply_offsets_gcode`
+when that option is set. A run over more than one tool ends with a per-tool
+summary. `DEBUG=1` prints each scan pass's diagnostic rows.
 
 The LDC1612 driver also registers Kalico's own
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`.
@@ -112,6 +126,9 @@ Read this section before wiring anything.
 - Per-tool Z needs the contact switch. Without a switch you get X and Y and
   nothing else. Leave `calibrate_z` at its default of `False` and no descent
   runs at all, which makes a run faster.
+- Z calibration heats the nozzles and waits. Every listed tool is brought to
+  its calibration temperature before the first measurement, so a run takes
+  minutes longer, and longer still when a tool has to cool down to it.
 - Offsets are not persisted. Each session measures a fresh T0 baseline and
   prints the other tools against it. If you want them applied, write the lines
   in `apply_offsets_gcode`. Only the per-tool Z references are stored on disk.
@@ -321,6 +338,22 @@ Every option and its default. Options shown commented out may be left out.
 #   How far, in mm, the three counted presses may disagree before the
 #   probing is reported as failed. A switch that cannot repeat inside its
 #   tolerance has a mechanical cause another press does not fix.
+#calibration_temp: 150.0
+#   Nozzle temperature, in C, that every calibration measurement is taken at.
+#   It must be above 0 when calibrate_z is True: a reference measured cold
+#   could only be compared against a later run measured cold as well. The
+#   default is hot enough for the hotend to be in its working state and cool
+#   enough to limit oozing.
+#calibration_settle_time: 30.0
+#   Seconds to dwell after a tool reaches its target, before measuring. The
+#   heater block reaches temperature well before the nozzle tip does, and both
+#   commands dwell the same time so both measure the same thermal state.
+#tool_extruders:
+#   Comma separated heater section names, one per tool, in tool number order.
+#   Set it whenever a tool does not use the equally numbered extruder: the
+#   default assumes T0 uses extruder, T1 uses extruder1 and so on, and a fleet
+#   that maps differently would heat the wrong hotend. Names are resolved at
+#   startup, so a name that does not exist is a startup error.
 #tool_count:
 #   How many tools the machine has, 1 to 16. Tools are T0 through
 #   T(tool_count-1) with no gaps. Needed only to run a command without T=.

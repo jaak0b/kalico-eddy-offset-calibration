@@ -72,8 +72,8 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
    layer. New calibration modes or sensor variants are their own modules behind clear
    interfaces.
 
-4. **Limited AI attribution in git/GitHub; no AI process residue in any output.** A
-   `Co-Authored-By: Claude <...>` trailer IS allowed on commits. Beyond that trailer, no AI
+4. **NO AI attribution in git/GitHub; no AI process residue in any output.** A
+   `Co-Authored-By: Claude <...>` trailer NEVER allowed on commits. no AI
    attribution anywhere. Commit messages: a single short sentence. Shipped output of every kind
    (source code, comments, docstrings, docs, UI text, error messages, commit messages) must
    never reference the AI-assisted process behind it: no mention of these rules or their

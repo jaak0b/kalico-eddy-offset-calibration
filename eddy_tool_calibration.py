@@ -604,6 +604,81 @@ def trigger_plane_from_anchor(curve, anchor_height, anchor_frequency):
     return crossing - float(anchor_height), crossing
 
 
+# --- nozzle temperature ----------------------------------------------------
+
+# How far a tool's recorded anchor temperature may sit from calibration_temp
+# before an offset run warns about it. What an anchor records is the
+# temperature the heater actually read, which settles a fraction either side
+# of the target it was held at, so a margin below the width of that settling
+# would warn on every run.
+CALIBRATION_TEMP_MARGIN = 1.0
+
+
+def default_tool_extruder(tool):
+    """Klipper's extruder section name for a tool number.
+
+    Klipper names extruder sections extruder, extruder1, extruder2 and so on,
+    so a machine that follows that convention needs no tool_extruders option.
+    """
+    index = int(tool)
+    if index < 0:
+        raise ValueError("tool numbers start at 0, got %r" % (tool,))
+    if index == 0:
+        return 'extruder'
+    return 'extruder%d' % (index,)
+
+
+def parse_tool_extruders(text, tool_count):
+    """Heater section names indexed by tool number, from tool_extruders.
+
+    Returns None when the option is not set, which leaves every tool on
+    Klipper's own extruder naming.
+    """
+    if text is None:
+        return None
+    names = [name.strip() for name in str(text).split(',')]
+    for name in names:
+        if not name:
+            raise ValueError(
+                "tool_extruders holds an empty entry in %r" % (text,))
+    if tool_count is not None and len(names) < int(tool_count):
+        raise ValueError(
+            "tool_extruders lists %d heater names and tool_count is %d, so "
+            "T%d has no heater" % (len(names), int(tool_count), len(names)))
+    return names
+
+
+def tool_extruder_name(names, tool):
+    """The heater section name holding one tool's nozzle temperature."""
+    if names is None:
+        return default_tool_extruder(tool)
+    index = int(tool)
+    if index < 0 or index >= len(names):
+        raise ValueError(
+            "tool_extruders lists %d heater names, so T%d has none"
+            % (len(names), index))
+    return names[index]
+
+
+def temperature_warning(tool, recorded, configured):
+    """Warning text when a tool was anchored at another temperature.
+
+    Returns None when the two agree. An offset run measures at the recorded
+    temperature either way, because the anchor frequency was measured at that
+    temperature and only a measurement taken at the same temperature can be
+    compared against it.
+    """
+    if abs(float(recorded) - float(configured)) <= CALIBRATION_TEMP_MARGIN:
+        return None
+    return (
+        "warning: T%d was anchored at %.1f C, and calibration_temp is "
+        "%.1f C. This run measures T%d at %.1f C, the temperature its anchor "
+        "was measured at. Run EDDY_CALIBRATE_Z T=%d to anchor the tool at "
+        "calibration_temp instead."
+        % (int(tool), float(recorded), float(configured), int(tool),
+           float(recorded), int(tool)))
+
+
 # --- persisted calibration state -------------------------------------------
 
 # Directory next to the printer config that holds everything this plugin
@@ -614,12 +689,14 @@ STATE_FILENAME = 'calibration_state.json'
 # The only document version this build reads or writes.
 STATE_VERSION = 1
 
-# The two fields the offset math reads. The rest of an anchor record is
-# diagnostic: it lets a stale anchor be recognised after the coil or the
-# switch moves, and is never fed back into a measurement.
+# The three fields an offset run reads: the anchor pair its descent is
+# evaluated against, and the temperature it has to bring the nozzle back to
+# before it measures. The rest of an anchor record is diagnostic: it lets a
+# stale anchor be recognised after the coil or the switch moves, and is never
+# fed back into a measurement.
 ANCHOR_NUMBER_FIELDS = (
-    'anchor_height', 'anchor_frequency', 'trigger_z', 'curve_low_z',
-    'curve_high_z', 'center_x', 'center_y',
+    'anchor_height', 'anchor_frequency', 'temperature', 'trigger_z',
+    'curve_low_z', 'curve_high_z', 'center_x', 'center_y',
 )
 ANCHOR_TEXT_FIELDS = ('updated',)
 
@@ -726,6 +803,59 @@ def sweep_tool_order(tool_count):
         raise ValueError(
             "the tool count must be at least 1, got %r" % (tool_count,))
     return list(range(count))
+
+
+def parse_tool_list(text, tool_count, max_tools):
+    """Tool numbers a T= parameter names, in the order it lists them.
+
+    text is the raw parameter: a single tool number, a comma separated list of
+    them, or None when T= was left out, which names every tool of the fleet
+    and so goes through the same list the fleet order produces.
+    """
+    if text is None:
+        return sweep_tool_order(tool_count)
+    if not str(text).strip():
+        raise ValueError("T= carries no tool number")
+    limit = max_tools
+    if tool_count is not None:
+        limit = min(int(tool_count), max_tools)
+    tools = []
+    for entry in str(text).split(','):
+        entry = entry.strip()
+        if not entry:
+            raise ValueError(
+                "T=%s holds an empty entry between two commas" % (text,))
+        try:
+            tool = int(entry)
+        except ValueError:
+            raise ValueError(
+                "T=%s holds the entry %r, which is not a tool number"
+                % (text, entry))
+        if tool < 0 or tool >= limit:
+            if tool_count is None:
+                raise ValueError(
+                    "T=%s names T%d, and the tools this plugin accepts are T0 "
+                    "through T%d" % (text, tool, max_tools - 1))
+            raise ValueError(
+                "T=%s names T%d, and tool_count is %d, so the tools are T0 "
+                "through T%d" % (text, tool, int(tool_count), limit - 1))
+        if tool in tools:
+            raise ValueError("T=%s names T%d twice" % (text, tool))
+        tools.append(tool)
+    return tools
+
+
+def baseline_first(tools, baseline_tool):
+    """Order a tool list so the baseline tool is measured before the rest.
+
+    Every other tool's offsets are differences against the baseline tool, so
+    the baseline is measured first however the list was written. The other
+    tools keep the order they were given in. A list without the baseline tool
+    is returned unchanged.
+    """
+    ordered = [t for t in tools if t == baseline_tool]
+    ordered.extend(t for t in tools if t != baseline_tool)
+    return ordered
 
 
 def offset_template_context(tool, offsets, calibrate_z):
@@ -1050,6 +1180,33 @@ class EddyToolCalibration:
         self.has_apply_offsets_gcode = bool(
             config.get('apply_offsets_gcode', '').strip())
 
+        # Nozzle temperature. How the frequency reads against height depends on
+        # how hot the nozzle is, so every measurement is taken at one
+        # temperature: EDDY_CALIBRATE_Z measures at calibration_temp and
+        # records what the heater actually read, and an offset run brings each
+        # tool back to its own recorded temperature before measuring.
+        self.calibration_temp = config.getfloat(
+            'calibration_temp', 150.0, minval=0.0)
+        if self.calibrate_z and self.calibration_temp <= 0.0:
+            raise config.error(
+                "%s: set calibration_temp above 0, or set calibrate_z to "
+                "False. A Z reference measured with the nozzle cold could "
+                "only be compared against a later measurement taken cold as "
+                "well, and a nozzle that has been hot does not come back to "
+                "cold inside a calibration run." % (self.name,))
+        # The heater block reaches its target well before the nozzle tip does,
+        # so both commands dwell here after the target is reached and measure
+        # the same thermal state.
+        self.calibration_settle_time = config.getfloat(
+            'calibration_settle_time', 30.0, minval=0.0)
+        # A fleet preheat sets targets on tools that are not mounted, so the
+        # heater of every tool has to be nameable without mounting it.
+        try:
+            self.tool_extruders = parse_tool_extruders(
+                config.get('tool_extruders', None), self.tool_count)
+        except ValueError as e:
+            raise config.error("%s: %s." % (self.name, e))
+
         # Session state.
         self.center = None
         self.baseline = None
@@ -1077,6 +1234,11 @@ class EddyToolCalibration:
             from klippy.extras import tools_calibrate
             self.switch_endstop = tools_calibrate.ProbeEndstopWrapper(
                 SwitchPinConfig(config, self.switch_pin), 'z')
+
+        # The heater sections are still being created while this one is
+        # parsed, so the tool heaters are resolved at connect instead.
+        self.printer.register_event_handler(
+            'klippy:connect', self._handle_connect)
 
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command(
@@ -1140,8 +1302,12 @@ class EddyToolCalibration:
             return decode_state(text)
         except ValueError as e:
             raise config.error(
-                "%s: %s (%s). Delete the file to start over and re-run "
-                "EDDY_CALIBRATE_Z for each tool." % (self.name, e, path))
+                "%s: %s (%s). Delete that file and run EDDY_CALIBRATE_Z again "
+                "for each tool, which measures every reference it held from "
+                "scratch. A state file written by an earlier version of this "
+                "plugin can be missing a field this version needs, and the "
+                "references in it cannot be converted."
+                % (self.name, e, path))
 
     def _write_state(self, gcmd):
         """Persist the anchors, replacing the state file atomically.
@@ -1200,21 +1366,30 @@ class EddyToolCalibration:
                 "command after the printer has finished starting up.")
         return dump
 
-    def _optional_tool_index(self, gcmd):
-        """The tool named by T=, or None when T= was left out.
+    def _requested_tools(self, gcmd, command):
+        """The tools a command runs over, in the order it measures them.
 
-        An omitted T= is a request for every tool rather than a mistake, so
-        the two cases are handed back to the caller to dispatch over.
+        T= names one tool or a comma separated list of them, and leaving T=
+        out names every tool of the fleet. All three produce a plain tool list
+        that the rest of the run treats alike.
         """
-        tool = gcmd.get_int('T', None, minval=0, maxval=MAX_TOOLS - 1)
-        if tool is None:
-            return None
-        if self.tool_count is not None and tool >= self.tool_count:
+        text = gcmd.get('T', None)
+        if text is None:
+            return self._sweep_tools(gcmd, command)
+        try:
+            tools = parse_tool_list(text, self.tool_count, MAX_TOOLS)
+        except ValueError as e:
             raise gcmd.error(
-                "T=%d is beyond the last tool. tool_count is %d in the [%s] "
-                "config section, so the tools are T0 through T%d."
-                % (tool, self.tool_count, self.name, self.tool_count - 1))
-        return tool
+                "%s. Give T= one tool number such as T=0, or a comma "
+                "separated list such as T=0,1,2, or leave T= out to run every "
+                "tool of the fleet." % (e,))
+        if len(tools) > 1 and not self.has_toolchange_gcode:
+            raise gcmd.error(
+                "Add toolchange_gcode to the [%s] config section and restart, "
+                "or run %s T=%d to calibrate one tool at a time. A T= list "
+                "mounts each tool it measures, which needs the lines that "
+                "mount a tool." % (self.name, command, tools[0]))
+        return tools
 
     def _sweep_tools(self, gcmd, command):
         """The tools a run without T= covers, or the error naming what is
@@ -1485,6 +1660,117 @@ class EddyToolCalibration:
                     "after a failed calibration move")
             raise
         self._retreat()
+
+    # -- nozzle temperature -----------------------------------------------
+
+    def _startup_error(self, message):
+        """A startup failure of this section, named the way klippy names it."""
+        return self.printer.config_error("%s: %s" % (self.name, message))
+
+    def _handle_connect(self):
+        """Resolve every tool's heater once the heaters exist.
+
+        Extruder sections are still being created while this section is
+        parsed, so the names cannot be resolved at config load; connect is the
+        first moment they all exist. A wrong name is a startup failure rather
+        than a surprise partway into a calibration run, where it would have
+        heated whatever the name did resolve to. Nothing heats with
+        calibrate_z False, so the check runs only where a wrong name could
+        reach a hotend, and without tool_count the tools are not known here,
+        so each one is resolved when a command names it instead.
+        """
+        if not self.calibrate_z or self.tool_count is None:
+            return
+        for tool in range(self.tool_count):
+            self._tool_heater(tool, self._startup_error)
+
+    def _tool_heater(self, tool, error):
+        """The heater holding one tool's nozzle, as (section name, heater).
+
+        A fleet preheat sets a target on tools that are not mounted, so the
+        heater is looked up by section name rather than through whichever
+        extruder happens to be active. error builds the exception the caller
+        needs: a gcode error inside a command, a startup error at connect.
+        """
+        try:
+            name = tool_extruder_name(self.tool_extruders, tool)
+        except ValueError as e:
+            raise error(
+                "%s. List one heater section name per tool in tool_extruders, "
+                "in tool number order." % (e,))
+        pheaters = self.printer.lookup_object('heaters', None)
+        if pheaters is None:
+            raise error(
+                "Configure a hotend before calibrating. This printer carries "
+                "no heater at all, so the nozzle cannot be brought to the "
+                "calibration temperature.")
+        try:
+            return name, pheaters.lookup_heater(name)
+        except self.printer.config_error as e:
+            raise error(
+                "T%d would be heated by the heater %s, which is not "
+                "configured: %s. Set tool_extruders to the heater section "
+                "names of your tools, in tool number order. Without that "
+                "option each tool is assumed to follow Klipper's extruder "
+                "naming: extruder for T0, extruder1 for T1, and so on."
+                % (tool, name, e))
+
+    def _tool_temperature(self, gcmd, tool):
+        """What one tool's heater reads right now, in degrees Celsius."""
+        _name, heater = self._tool_heater(tool, gcmd.error)
+        current, _target = heater.get_temp(
+            self.printer.get_reactor().monotonic())
+        return current
+
+    def _preheat(self, gcmd, targets, source):
+        """Bring every listed tool to its target and let the nozzles settle.
+
+        targets is a list of (tool, temperature). Every target is set before
+        any waiting starts, so the tools heat side by side rather than one
+        after another, and the settle dwell then runs once for all of them.
+        The waiting itself is Kalico's own heater wait, the one M109 uses, so
+        a tool that has to cool to its target is waited for the same way.
+        """
+        if not targets:
+            raise gcmd.error(
+                "Internal error: a preheat was asked to heat no tools.")
+        resolved = []
+        for tool, temperature in targets:
+            name, heater = self._tool_heater(tool, gcmd.error)
+            resolved.append((tool, name, heater, float(temperature)))
+        pheaters = self.printer.lookup_object('heaters')
+        eventtime = self.printer.get_reactor().monotonic()
+        rows = ["heating every listed tool before measuring:"]
+        for tool, name, heater, temperature in resolved:
+            current, _target = heater.get_temp(eventtime)
+            rows.append(
+                "T%d heater %s: %.1f C now, %.1f C target"
+                % (tool, name, current, temperature))
+        rows.append(
+            "settle time after reaching target: %.1f s"
+            % (self.calibration_settle_time,))
+        rows.append(
+            "The command waits for every listed tool to reach its target, "
+            "including a tool that has to cool down to it.")
+        gcmd.respond_info("\n".join(rows))
+        for tool, name, heater, temperature in resolved:
+            try:
+                pheaters.set_temperature(heater, temperature, False)
+            except self.printer.command_error as e:
+                raise gcmd.error(
+                    "T%d could not be held at %.1f C by the heater %s: %s. "
+                    "That temperature comes from %s."
+                    % (tool, temperature, name, e, source))
+        # Every target is already set, so the tools are heating side by side
+        # while these waits run one after another. Setting the same target
+        # again is what carries the wait: it is the only heater wait Kalico
+        # offers a module, and re-setting a target a heater already holds
+        # changes nothing about it.
+        for tool, name, heater, temperature in resolved:
+            pheaters.set_temperature(heater, temperature, True)
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.dwell(self.calibration_settle_time)
+        toolhead.wait_moves()
 
     # -- contact switch probing -------------------------------------------
 
@@ -2042,26 +2328,24 @@ class EddyToolCalibration:
         gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_CALIBRATE_Z_help = (
-        "One-time Z reference setup for the tool named by T=, or for every "
+        "One-time Z reference setup for the tools named by T=, or for every "
         "tool when T= is left out. Presses the contact switch and binds the "
-        "result to the eddy sensor's reading. Run it after changing a nozzle "
-        "or a hotend, or after moving the coil or the switch. This is the "
-        "setup step, not the routine offset measurement; that is "
-        "EDDY_CALIBRATE_OFFSET. Add DEBUG=1 to print each scan pass's "
-        "diagnostic rows.")
+        "result to the eddy sensor's reading, at calibration_temp. Run it "
+        "after changing a nozzle or a hotend, after moving the coil or the "
+        "switch, or after changing calibration_temp. This is the setup step, "
+        "not the routine offset measurement; that is EDDY_CALIBRATE_OFFSET. "
+        "Add DEBUG=1 to print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_CALIBRATE_Z(self, gcmd):
         self._require_switch_config(gcmd)
         self._ensure_homed(gcmd)
         debug = self._debug_flag(gcmd)
-        tool = self._optional_tool_index(gcmd)
-        if tool is None:
-            tools = self._sweep_tools(gcmd, 'EDDY_CALIBRATE_Z')
-            sweeping = True
-        else:
-            tools = [tool]
-            sweeping = False
+        tools = self._requested_tools(gcmd, 'EDDY_CALIBRATE_Z')
+        sweeping = len(tools) > 1
         self._require_switch_z_range(gcmd)
+        self._preheat(
+            gcmd, [(tool, self.calibration_temp) for tool in tools],
+            'calibration_temp in the [%s] config section' % (self.name,))
         for tool in tools:
             self._anchor_tool(gcmd, tool, debug, sweeping)
 
@@ -2082,6 +2366,11 @@ class EddyToolCalibration:
                 self._move(
                     self.switch_x, self.switch_y, travel_z, self.z_speed)
             with self._phase(gcmd, tool, 'measurement', sweeping):
+                # What the heater actually reads, not the target it was given,
+                # because that is the state a later offset run has to
+                # reproduce before its descent can be compared against this
+                # one.
+                temperature = self._tool_temperature(gcmd, tool)
                 center_x, center_y, agg = self._measure_xy(gcmd, debug)
                 curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
         self._merge_aggregate(agg, agg_z)
@@ -2089,6 +2378,7 @@ class EddyToolCalibration:
         record = {
             'anchor_height': anchor_height,
             'anchor_frequency': anchor_freq,
+            'temperature': temperature,
             'trigger_z': trigger_z,
             'curve_low_z': curve[0][0],
             'curve_high_z': curve[-1][0],
@@ -2129,27 +2419,28 @@ class EddyToolCalibration:
         rows.extend([
             "anchor height above trigger plane: %.4f mm" % (anchor_height,),
             "anchor frequency: %.3f Hz" % (anchor_freq,),
+            "nozzle temperature: %.1f C" % (temperature,),
             "state file: %s" % (self._state_path(),),
         ])
         rows.extend(self._aggregate_rows(agg))
         gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_CALIBRATE_OFFSET_help = (
-        "Measure the tool named by T= over the coil and print its offsets "
+        "Measure the tools named by T= over the coil and print their offsets "
         "relative to T0, or measure every tool in turn when T= is left out. "
-        "T=0 measures the baseline every other tool is compared against, so "
-        "run it first. Add DEBUG=1 to print each scan pass's diagnostic rows.")
+        "T=0 measures the baseline every other tool is compared against, and "
+        "it is measured first whatever order T= lists it in. With "
+        "calibrate_z True each tool is heated to the temperature its "
+        "EDDY_CALIBRATE_Z reference was measured at. Add DEBUG=1 to print "
+        "each scan pass's diagnostic rows.")
 
     def cmd_EDDY_CALIBRATE_OFFSET(self, gcmd):
         self._ensure_homed(gcmd)
         debug = self._debug_flag(gcmd)
-        tool = self._optional_tool_index(gcmd)
-        if tool is None:
-            tools = self._sweep_tools(gcmd, 'EDDY_CALIBRATE_OFFSET')
-            sweeping = True
-        else:
-            tools = [tool]
-            sweeping = False
+        tools = baseline_first(
+            self._requested_tools(gcmd, 'EDDY_CALIBRATE_OFFSET'),
+            BASELINE_TOOL)
+        sweeping = len(tools) > 1
         if BASELINE_TOOL not in tools and self.baseline is None:
             raise gcmd.error(
                 "Run EDDY_CALIBRATE_OFFSET T=%d first, with the baseline tool "
@@ -2163,6 +2454,7 @@ class EddyToolCalibration:
             if BASELINE_TOOL not in tools:
                 needed.append(self.baseline['tool'])
             self._require_anchors(gcmd, needed)
+            self._preheat_anchored(gcmd, tools)
         summary = []
         for tool in tools:
             summary.append(
@@ -2211,6 +2503,28 @@ class EddyToolCalibration:
                     self._apply_offsets(gcmd, tool, offsets)
         return {'tool': tool, 'offsets': offsets}
 
+    def _preheat_anchored(self, gcmd, tools):
+        """Heat every listed tool to the temperature its anchor was taken at.
+
+        An offset run never measures at calibration_temp. It reproduces the
+        thermal state each anchor was taken in, so the descent it compares
+        against that anchor was measured at the same nozzle temperature. A
+        tool anchored at another temperature than calibration_temp is
+        measured at its own and reported here, rather than measured at a
+        temperature its anchor says nothing about.
+        """
+        targets = []
+        for tool in tools:
+            recorded = self.anchors[tool]['temperature']
+            warning = temperature_warning(
+                tool, recorded, self.calibration_temp)
+            if warning is not None:
+                gcmd.respond_info(warning)
+            targets.append((tool, recorded))
+        self._preheat(
+            gcmd, targets,
+            'the temperature EDDY_CALIBRATE_Z recorded for that tool')
+
     def _require_anchors(self, gcmd, tools):
         """Refuse to measure Z for a tool that has no stored anchor."""
         missing = sorted(set(t for t in tools if t not in self.anchors))
@@ -2230,7 +2544,12 @@ class EddyToolCalibration:
         curve = None
         z_crossing = None
         z_trigger = None
+        temperature = None
         if self.calibrate_z:
+            # Read before the descent and reported beside the anchor's own
+            # temperature, so a curve measured in the wrong thermal state is
+            # visible in the readout rather than only in the offset it moved.
+            temperature = self._tool_temperature(gcmd, tool)
             curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
             self._merge_aggregate(agg, agg_z)
             z_trigger, z_crossing = self._trigger_plane(gcmd, tool, curve)
@@ -2240,6 +2559,7 @@ class EddyToolCalibration:
             'z_curve': curve,
             'z_crossing': z_crossing,
             'z_trigger': z_trigger,
+            'temperature': temperature,
             'agg': agg,
             # Both stamped by the caller, which publishes the result only once
             # the session baseline it belongs to is in place.
@@ -2286,6 +2606,8 @@ class EddyToolCalibration:
             "anchor frequency: %.3f Hz" % (anchor['anchor_frequency'],),
             "anchor height above trigger plane: %.4f mm"
             % (anchor['anchor_height'],),
+            "anchor temperature: %.1f C" % (anchor['temperature'],),
+            "nozzle temperature: %.1f C" % (result['temperature'],),
             "z crossing (machine Z): %.4f mm" % (result['z_crossing'],),
             "switch trigger plane (machine Z): %.4f mm"
             % (result['z_trigger'],),
@@ -2339,6 +2661,7 @@ class EddyToolCalibration:
             anchors[str(tool)] = {
                 'anchor_height': record['anchor_height'],
                 'anchor_frequency': record['anchor_frequency'],
+                'temperature': record['temperature'],
                 'trigger_z': record['trigger_z'],
                 'updated': record['updated'],
             }
