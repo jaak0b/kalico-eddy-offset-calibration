@@ -171,6 +171,7 @@ scan_angles: 45, 135
 pair_scans: True
 samples_min: 100
 save_csv: True                  # keep raw scan data while validating
+#csv_dir: EddyToolCalibration    # optional: folder name for scan CSV files
 ```
 
 **Do not add `frequency:` unless your Kalico is from March 2026 or

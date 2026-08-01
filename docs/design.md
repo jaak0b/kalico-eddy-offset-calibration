@@ -58,6 +58,7 @@ pair_scans: True                # forward+reverse averaging (latency cancellatio
 samples_min: 100                # abort fit below this sample count per pass
 query_time: 0.5                 # seconds EDDY_QUERY samples for
 save_csv: False                 # dump raw scan data for analysis
+csv_dir: EddyToolCalibration     # folder name, relative to the config dir, for scan CSV files
 # --- fit tuning ---
 fit_window_radius: 1.0          # mm each side of the extremum; coil_inner_diameter / 2
 fit_sigma_fraction: 0.5         # Gaussian weight sigma as a fraction of the window

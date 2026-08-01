@@ -638,6 +638,7 @@ class EddyToolCalibration:
             raise config.error("%s: scan_angles: %s" % (self.name, e))
         self.samples_min = config.getint('samples_min', 100, minval=3)
         self.save_csv = config.getboolean('save_csv', False)
+        self.csv_dir = config.get('csv_dir', 'EddyToolCalibration')
         self.query_time = config.getfloat(
             'query_time', QUERY_COLLECT_TIME_DEFAULT, above=0.0)
 
@@ -988,18 +989,21 @@ class EddyToolCalibration:
 
     def _save_csv(self, gcmd, label, samples):
         config_file = self.printer.get_start_args()['config_file']
-        directory = os.path.dirname(os.path.abspath(config_file))
+        config_dir = os.path.dirname(os.path.abspath(config_file))
+        directory = os.path.join(config_dir, self.csv_dir)
         path = os.path.join(
             directory, "eddy_scan_%s.csv" % (label.replace(' ', '_'),))
         try:
+            os.makedirs(directory, exist_ok=True)
             with open(path, 'w') as f:
                 f.write("print_time,frequency,x,y\n")
                 for print_time, freq, x, y in samples:
                     f.write("%.6f,%.3f,%.4f,%.4f\n" % (print_time, freq, x, y))
-        except IOError as e:
+        except OSError as e:
             raise gcmd.error(
-                "Could not write the scan data to %s: %s. Set save_csv to "
-                "False or fix the directory permissions." % (path, e))
+                "Could not write the scan data to %s (directory %s): %s. "
+                "Set save_csv to False or fix the directory permissions."
+                % (path, directory, e))
         gcmd.respond_info("scan data: %s" % (path,))
 
     # -- measurement ------------------------------------------------------
