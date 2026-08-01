@@ -290,6 +290,58 @@ def test_rejects_a_descent_whose_stop_lies_above_its_start():
         etc.z_descent_targets(0.5, 5.0, 0.05)
 
 
+# --- vertical geometry convention ------------------------------------------
+#
+# scan_height, z_start and z_stop are heights above the coil top face, so
+# 0 mm is the nozzle touching the face. Every literal below is a position
+# relative to that face, read off the convention itself, not off the code.
+
+
+def test_accepts_a_scan_plane_and_descent_that_clear_the_coil_top_face():
+    # Arrange / Act: the shipped defaults, scanning 1.0 mm above the face and
+    # descending from 5.0 mm to 0.5 mm above it.
+    # Assert: a valid geometry raises nothing, so reaching the next line is
+    # the assertion.
+    etc.validate_vertical_geometry(1.0, 5.0, 0.5)
+
+
+def test_rejects_a_descent_that_stops_at_the_coil_top_face():
+    # 0.0 mm is the nozzle touching the face, so a descent ending there is a
+    # collision rather than a measurement.
+    with pytest.raises(ValueError, match="z_stop"):
+        etc.validate_vertical_geometry(1.0, 5.0, 0.0)
+
+
+def test_rejects_a_descent_that_stops_below_the_coil_top_face():
+    # A negative height is inside the coil.
+    with pytest.raises(ValueError, match="z_stop"):
+        etc.validate_vertical_geometry(1.0, 5.0, -0.5)
+
+
+def test_rejects_a_scan_plane_at_the_coil_top_face():
+    with pytest.raises(
+            ValueError, match="scan_height .* not above the coil top face"):
+        etc.validate_vertical_geometry(0.0, 5.0, 0.5)
+
+
+def test_rejects_a_scan_plane_below_the_coil_top_face():
+    with pytest.raises(
+            ValueError, match="scan_height .* not above the coil top face"):
+        etc.validate_vertical_geometry(-1.0, 5.0, 0.5)
+
+
+def test_rejects_a_scan_plane_level_with_the_descent_start():
+    # The scan plane has to sit inside the descent range, so 5.0 mm is not a
+    # valid scan height for a descent that starts at 5.0 mm.
+    with pytest.raises(ValueError, match="must lie below z_start"):
+        etc.validate_vertical_geometry(5.0, 5.0, 0.5)
+
+
+def test_rejects_a_scan_plane_above_the_descent_start():
+    with pytest.raises(ValueError, match="must lie below z_start"):
+        etc.validate_vertical_geometry(6.0, 5.0, 0.5)
+
+
 # --- pair averaging --------------------------------------------------------
 
 

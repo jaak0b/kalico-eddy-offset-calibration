@@ -399,8 +399,38 @@ def expand_scan_angles(angles, pair_scans):
     return out
 
 
+def validate_vertical_geometry(scan_height, z_start, z_stop):
+    """Check the configured heights against the coil-relative convention.
+
+    scan_height, z_start and z_stop are all heights above the coil top face,
+    where 0 mm is the nozzle touching the face. The descent therefore has to
+    stop before it reaches the face, and the XY scan plane has to sit below
+    the top of the descent so both measurements share one range. Raises
+    ValueError naming the option at fault. The z_start above z_stop ordering
+    is not checked here: z_descent_targets owns the descent list and already
+    rejects it.
+    """
+    if z_stop <= 0.0:
+        raise ValueError(
+            "z_stop %.4f mm is not above the coil top face, where 0 mm is "
+            "the nozzle touching the face" % (z_stop,))
+    if scan_height <= 0.0:
+        raise ValueError(
+            "scan_height %.4f mm is not above the coil top face, where 0 mm "
+            "is the nozzle touching the face" % (scan_height,))
+    if scan_height >= z_start:
+        raise ValueError(
+            "scan_height %.4f mm must lie below z_start %.4f mm so the XY "
+            "scan plane sits inside the descent range"
+            % (scan_height, z_start))
+
+
 def z_descent_targets(z_start, z_stop, z_step):
     """Descent heights from z_start down to z_stop inclusive.
+
+    Works in whatever vertical frame the caller uses; the plugin hands it the
+    configured heights above the coil top face and converts each returned
+    target to machine Z when it commands the move.
 
     The descent has to end exactly at z_stop, so the span must be a whole
     number of steps. Raises ValueError when it is not, rather than truncating
@@ -560,14 +590,28 @@ class EddyToolCalibration:
         self.coil_y = config.getfloat('coil_y', 5.0)
         self.coil_inner_diameter = config.getfloat(
             'coil_inner_diameter', 2.0, above=0.0)
-        # Machine Z of the coil top face, the origin every scan height and
-        # descent height in this plugin is measured from.
+        # Machine Z of the coil top face, the origin every other vertical
+        # option in this section is measured from. _machine_z is the one
+        # place that converts those heights into machine coordinates.
         self.coil_z = config.getfloat('coil_z', 0.0)
+        # Height above the coil top face the XY scan passes run at.
         self.scan_height = config.getfloat('scan_height', 1.0)
+        # Extra clearance above the scan height for travel moves.
         self.scan_safe_z = config.getfloat('scan_safe_z', 2.0, above=0.0)
+        # Heights above the coil top face the Z descent runs between.
         self.z_start = config.getfloat('z_start', 5.0)
         self.z_stop = config.getfloat('z_stop', 0.5)
         self.z_step = config.getfloat('z_step', 0.05, above=0.0)
+        try:
+            validate_vertical_geometry(
+                self.scan_height, self.z_start, self.z_stop)
+        except ValueError as e:
+            raise config.error(
+                "%s: %s. Set coil_z to the machine Z of the coil top face, "
+                "and keep scan_height, z_start and z_stop as heights above "
+                "that face." % (self.name, e))
+        # The targets stay in the configured frame, heights above the coil
+        # top face, and are converted as each move is commanded.
         try:
             self.z_targets = z_descent_targets(
                 self.z_start, self.z_stop, self.z_step)
@@ -774,6 +818,16 @@ class EddyToolCalibration:
                 "than the kinematics can resolve land on the same height and "
                 "collapse into one measurement.")
 
+    def _machine_z(self, height):
+        """Machine Z of a height above the coil top face.
+
+        scan_height, z_start and z_stop are all heights above the coil top
+        face, so this is the only place the configured frame becomes a
+        machine coordinate. Heights read back off the kinematics during a
+        descent are already machine Z and never pass through here.
+        """
+        return self.coil_z + height
+
     def _move(self, x, y, z, z_speed):
         """Travel to (x, y, z), never crossing the coil below the target Z.
 
@@ -933,7 +987,7 @@ class EddyToolCalibration:
     def _measure_center(self, gcmd, center_x, center_y, length, label):
         """One full multi-direction XY measurement around a center estimate."""
         angles = expand_scan_angles(self.scan_angles, self.pair_scans)
-        scan_z = self.coil_z + self.scan_height
+        scan_z = self._machine_z(self.scan_height)
         peaks = []
         for angle in angles:
             result, stats = self._scan_pass(
@@ -981,6 +1035,11 @@ class EddyToolCalibration:
         Ported from probe_eddy_current's calibration moves: every step is
         approached from above, samples are bucketed by an explicit per-step
         time window, and the height stored is the real kinematic position.
+
+        The descent targets are heights above the coil top face and become
+        machine Z as each move is commanded, so no move ever goes below the
+        face. The curve itself holds the machine Z the kinematics reported,
+        not the commanded height.
         """
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
@@ -997,7 +1056,8 @@ class EddyToolCalibration:
             msgs.append(msg)
             return True
 
-        self._move(center_x, center_y, self.z_start + Z_APPROACH_HOP,
+        self._move(center_x, center_y,
+                   self._machine_z(self.z_start + Z_APPROACH_HOP),
                    self.z_speed)
         self.sensor.add_client(handle_batch)
         times = []
@@ -1005,8 +1065,10 @@ class EddyToolCalibration:
             toolhead.dwell(DESCENT_SETTLE_DWELL)
             for target in self.z_targets:
                 toolhead.manual_move(
-                    [None, None, target + Z_APPROACH_HOP], self.z_speed)
-                toolhead.manual_move([None, None, target], self.z_speed)
+                    [None, None, self._machine_z(target + Z_APPROACH_HOP)],
+                    self.z_speed)
+                toolhead.manual_move(
+                    [None, None, self._machine_z(target)], self.z_speed)
                 start_query_time = (
                     toolhead.get_last_move_time() + SAMPLE_SETTLE_TIME)
                 end_query_time = start_query_time + SAMPLE_WINDOW_TIME
@@ -1023,7 +1085,8 @@ class EddyToolCalibration:
             reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
         finally:
             state['running'] = False
-        self._move(center_x, center_y, self.z_start + Z_APPROACH_HOP,
+        self._move(center_x, center_y,
+                   self._machine_z(self.z_start + Z_APPROACH_HOP),
                    self.z_speed)
         self._close_collection(stats)
         self._report_sensor_health(gcmd, stats)
@@ -1132,7 +1195,8 @@ class EddyToolCalibration:
             "center x: %.4f" % (result['x'],),
             "center y: %.4f" % (result['y'],),
             "z curve steps: %d" % (len(curve),),
-            "z curve range: %.4f to %.4f mm" % (curve[0][0], curve[-1][0]),
+            "z curve range (machine Z): %.4f to %.4f mm"
+            % (curve[0][0], curve[-1][0]),
             "z curve frequency range: %.3f to %.3f Hz"
             % (curve[-1][1], curve[0][1]),
         ]
@@ -1148,12 +1212,12 @@ class EddyToolCalibration:
                     % (tool, e, tool))
             result['z_cross'] = z_cross
             rows.append("z reference frequency: %.3f Hz" % (ref_freq,))
-            rows.append("z crossing: %.4f mm" % (z_cross,))
+            rows.append("z crossing (machine Z): %.4f mm" % (z_cross,))
             rows.append("z vs anchor: %+.4f mm" % (z_cross - ref_z,))
         else:
             rows.append(
-                "z crossing: not available, run EDDY_SET_Z_REF T=%d Z=<mm>"
-                % (tool,))
+                "z crossing: not available, run EDDY_SET_Z_REF T=%d "
+                "Z=<machine Z>" % (tool,))
         if self.baseline is not None:
             base = self.baseline
             rows.append("baseline tool: T%d" % (base['tool'],))
@@ -1195,7 +1259,8 @@ class EddyToolCalibration:
 
     cmd_EDDY_SET_Z_REF_help = (
         "Bind the current tool's measured frequency curve to a real Z "
-        "offset obtained by another method (Z= parameter).")
+        "obtained by another method. Z= is a machine Z coordinate, the same "
+        "frame the descent curve is reported in.")
 
     def cmd_EDDY_SET_Z_REF(self, gcmd):
         tool = self._tool_index(gcmd)
@@ -1209,12 +1274,14 @@ class EddyToolCalibration:
             ref_freq = z_curve_freq_at(result['z_curve'], z)
         except ValueError as e:
             raise gcmd.error(
-                "Z=%.4f does not fall inside the measured descent: %s. "
-                "Widen z_start and z_stop to cover it." % (z, e))
+                "Z=%.4f does not fall inside the measured descent: %s. Pass "
+                "a machine Z, and widen the descent by raising z_start or "
+                "lowering z_stop, which are heights above the coil top "
+                "face." % (z, e))
         self.z_refs[tool] = (z, ref_freq)
         gcmd.respond_info(
             "tool: T%d\n"
-            "z anchor: %.4f mm\n"
+            "z anchor (machine Z): %.4f mm\n"
             "z reference frequency: %.3f Hz\n"
             "config z_ref_t%d: %.4f:%.3f"
             % (tool, z, ref_freq, tool, z, ref_freq))

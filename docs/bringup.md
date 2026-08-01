@@ -148,7 +148,8 @@ i2c_address: 42                 # LDC1612 default address (0x2A)
 # 12 MHz, which is the BTT Eddy Coil's real CLKIN, so the correct value
 # needs no config line. Setting frequency: on a Kalico older than March
 # 2026 is a startup error: that Kalico has no such option (section 1).
-reg_drive_current: 22           # placeholder; replace with the value from
+reg_drive_current: 15           # BTT's and Kalico's own default (4.1);
+                                 # replace with the value from
                                  # LDC_CALIBRATE_DRIVE_CURRENT in section 5,
                                  # step 2
 # --- geometry: measure with a ruler before EDDY_LOCATE refines it ---
@@ -156,11 +157,12 @@ coil_x: 350.0                   # approximate bed X of the coil center
 coil_y: 5.0                     # approximate bed Y of the coil center
 coil_z: 0.0                     # machine Z of the coil top face; measure
                                  # this against your Z endstop or gantry
-coil_inner_diameter: 8.0        # mm; BTT Eddy Coil bore, not the crab coil
-scan_height: 1.0                # nozzle height above the coil top for XY
+coil_inner_diameter: 8.0        # mm; unverified estimate, BTT publishes no
+                                 # bore spec (4.1)
+scan_height: 1.0                # mm above the coil top face for XY scans
 scan_safe_z: 2.0                # extra mm of clearance for travel moves
-z_start: 5.0                    # Z descent start, above the coil
-z_stop: 0.5                     # closest approach; never touches the coil
+z_start: 5.0                    # descent start, mm above the coil top face
+z_stop: 0.5                     # descent end, mm above the coil top face
 z_step: 0.05                    # descent step size
 # --- scan tuning: upstream defaults, unchanged for bring-up ---
 scan_speed: 4.0
@@ -174,10 +176,40 @@ save_csv: True                  # keep raw scan data while validating
 **Do not add `frequency:` unless your Kalico is from March 2026 or
 newer.**
 
+**Measure `coil_z` on the machine; it is the only vertical value here in
+machine coordinates.** `scan_height`, `z_start` and `z_stop` are heights
+above the coil top face, and the plugin adds `coil_z` to each of them. It
+refuses to start if `z_stop` is not above the face.
+
 Use `coil_inner_diameter: 8.0` for the BTT Eddy Coil bore (larger than the
 crab board's coil); the plugin derives `fit_window_radius` from it, so an
 undersized value here narrows the fit window below the coil's real response.
-Verify the actual bore against BTT's Eddy Coil manual for your unit.
+**This number is an unverified estimate.** Section 4.1 below confirms BTT
+publishes no coil bore or outer-diameter specification in any source
+checked. Measure the physical coil's bore with calipers before treating
+this value as accurate.
+
+### 4.1 Config cross-check against BTT's published Eddy Coil documentation
+
+A verification aid, not new configuration: compares each geometry- and
+sensor-related value above against what BTT itself publishes, so a wrong
+guess is visible before it reaches the sensor.
+
+| Our option              | Our value                         | BTT's documented value or fact                                                                                                   | Source |
+|--------------------------|------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|--------|
+| Sensor supply voltage    | 5V (section 2)                    | "Voltage: 5V" (Product Information table)                                                                                       | BTT Eddy Series User Manual, section 1 |
+| `i2c_address`             | 42 (0x2A)                         | Left as `#i2c_address:` (commented out) in BTT's own sample config, so the LDC1612's factory default (0x2A) applies              | BTT `sample-bigtreetech-eddy.cfg` |
+| `i2c_speed`                | not set (Kalico defaults to 400000) | Not present in BTT's sample config either                                                                                       | BTT `sample-bigtreetech-eddy.cfg` |
+| `frequency`                | omitted (Kalico defaults to 12 MHz) | No clock or frequency option appears anywhere in BTT's sample config                                                            | BTT `sample-bigtreetech-eddy.cfg` |
+| `reg_drive_current`        | 15 (was 22; corrected, see above) | BTT's own troubleshooting FAQ treats 15 as the normal starting value ("increase the `reg_drive_current` value to 16 from 15 if it is currently set to 15"); matches Kalico's own default | BTT README / User Manual FAQ item 1; `kalico/klippy/extras/ldc1612.py`, `DRIVECUR = 15` |
+| `coil_inner_diameter`      | 8.0 mm (unverified guess)         | No bore or outer-diameter number anywhere checked: not the wiki, not the README, not either sample config, not the PDF manual's dimension diagram (which covers the Eddy USB housing only) | Unverified, see "Facts not verified" |
+| `scan_height` (context)    | 1.0 mm above the coil top face for XY scans | BTT recommends 2 to 3 mm (2.5 mm optimal) above the bed for a toolhead-mounted Eddy. A different geometry (moving sensor over a fixed bed, not our fixed coil under a moving nozzle), so not directly comparable | BTT README / wiki / manual, "Installation Height" |
+| Coil connector             | 4-pin ZH1.5, pin order unconfirmed | "Eddy Coil: 4-2.54mm DuPont female header, one end with ZH1 5mm 4P connector"; no pin-by-pin order published anywhere checked      | BTT Eddy Series User Manual, section 1 |
+| I2C logic voltage (SCL/SDA) | unconfirmed                       | Not stated anywhere checked; only the 5V supply rail is documented, not the logic-level tolerance of the data lines               | Unverified, see "Facts not verified" |
+
+Where this table marks a row unverified, do not substitute a guess: measure
+the physical coil or ask BTT support before relying on it for real
+hardware.
 
 ## 5. First power-up checklist
 
@@ -187,9 +219,42 @@ Verify the actual bore against BTT's Eddy Coil manual for your unit.
    ```
    A traceback naming `eddy_tool_calibration` or `ldc1612` at startup means a
    config or wiring problem; fix it before continuing.
-2. Calibrate the sensor's drive current, then persist it:
+2. Position the nozzle before calibrating drive current, then calibrate.
+
+   **Move the nozzle directly above the coil (`coil_x` / `coil_y`), to
+   `coil_z` plus `z_start`, before running the command below.** This is
+   roughly the top of the configured Z descent range, the farthest point
+   above the coil a real scan reaches. BTT's and Klipper's own instructions
+   are written for the opposite geometry (a sensor that moves toward a
+   fixed bed) and say to calibrate far from the mounting height, not at it:
+   "Place Eddy approx. 20mm above the bed" (BTT Eddy Series User Manual,
+   section 7.1), a deliberate contrast with the 2 to 3 mm mounting height
+   used for actual probing. No source addresses a fixed, bed-mounted coil
+   directly, so the position above is this document's inference from that
+   principle, not a sourced number: it is the conservative choice, because
+   too little drive current, not too much, is the failure mode that loses
+   the signal entirely (see the facts below).
+
+   Then run:
    ```
    LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration
+   ```
+   - It performs no toolhead motion of its own: it only dwells, waits for
+     prior moves to finish, and reads and restores the sensor's config
+     register (`kalico/klippy/extras/ldc1612.py`, lines 37 to 86). It is
+     safe to run with the coil fixed under the nozzle.
+   - It prints the drive current the chip's own auto-calibration selected
+     and writes nothing itself. Only `SAVE_CONFIG` writes `printer.cfg` and
+     restarts Kalico, so read the printed value and decide before saving.
+   - Kalico rejects a `reg_drive_current` outside 0 to 31 at config load as
+     a config error (`minval`/`maxval` on the option), rather than writing
+     an out-of-range value.
+   - Every code in that range drives the coil between 16 uA and 1.56 mA
+     (TI LDC1612/LDC1614 datasheet SNOSCY9A, Table 42): none of them can
+     damage the sensor or coil, only make a reading noisier or invalid.
+
+   Once satisfied with the printed value, persist it:
+   ```
    SAVE_CONFIG
    ```
    This restarts Kalico. Wait for it to reconnect before the next step.
@@ -226,10 +291,10 @@ connects, that is a warning, not a failure. It is not a reason to reflash.
 
 ## 7. Safety notes
 
-- **Confirm `coil_z` and `scan_height` before the first Z descent.** The
-  descent goes to `z_stop` (0.5 mm machine Z above the coil by default).
-  Confirm the coil's physical top face sits below that machine Z, or the
-  nozzle will crash into it.
+- **Verify `coil_z` against the real coil before the first Z descent.** The
+  descent ends `z_stop` above whatever machine Z you put in `coil_z` (0.5 mm
+  above it by default), so a `coil_z` set below the real top face drives the
+  nozzle into the coil by that difference.
 - Run the first `EDDY_CALIBRATE_TOOL` with the printer's Z already at a
   safe height above the coil, and keep a finger near the emergency stop
   for the whole descent.
@@ -294,13 +359,60 @@ otherwise the same as this bring-up.
   pin names (PF3/PF4/PF5 for XYZ endstops, PC0 on the spare Motor4
   connector), used here as candidate software I2C pins in the absence of a
   confirmed dedicated I2C connector for V1.x.
+- https://raw.githubusercontent.com/bigtreetech/Eddy/master/sample-bigtreetech-eddy.cfg:
+  BTT's own `[probe_eddy_current btt_eddy]` example, shared between Eddy
+  USB and Eddy Coil (comments mark `i2c_mcu` / `i2c_bus` as the only lines
+  to change for Eddy Coil). No `reg_drive_current`, `i2c_speed`, or
+  `frequency` line is set, and `i2c_address` is left commented out (4.1).
+- https://raw.githubusercontent.com/bigtreetech/Eddy/master/README.md: FAQ
+  item 1 treats 15 as the normal `reg_drive_current` starting value before
+  suggesting 16; "Installation Height" states the 20mm calibration height
+  is deliberately distinct from the 2 to 3mm mounting height (4.1, 5 step
+  2).
+- BIGTREETECH Eddy Series User Manual, v1.02 (2025-05-07), fetched from
+  https://raw.githubusercontent.com/bigtreetech/Eddy/master/BIGTRRETECH%20Eddy%20Series%20User%20Manual%2020250507.pdf:
+  Product Information table (5V supply, 4-pin ZH1.5 connector, no pin
+  order given); section 3.1 dimension diagram (Eddy USB housing only, no
+  coil bore or diameter given anywhere in the document); section 7.1,
+  "Place Eddy approx. 20mm above the bed" for drive current calibration;
+  FAQ item 1 matches the README's `reg_drive_current` guidance (4.1, 5
+  step 2).
+- https://www.klipper3d.org/Eddy_Probe.html: "Home the printer and
+  navigate the toolhead so that the sensor is near the center of the bed
+  and is about 20mm above the bed," Klipper's own instruction for
+  positioning before `LDC_CALIBRATE_DRIVE_CURRENT` (5, step 2).
+- kalico/docs/G-Codes.md (local clone): the same instruction under
+  `LDC_CALIBRATE_DRIVE_CURRENT`, confirming Kalico kept Klipper's wording
+  verbatim (5, step 2).
+- kalico/klippy/extras/ldc1612.py, `DriveCurrentCalibrate` class (lines 37
+  to 86, read directly): the command dwells and waits for prior moves but
+  never issues a move of its own, reads and restores `REG_CONFIG`, reads
+  back `REG_DRIVE_CURRENT0`, and only stages the value for `SAVE_CONFIG`,
+  never writing `printer.cfg` itself. `DRIVECUR = 15` is the default used
+  when `reg_drive_current` is omitted, and `minval=0, maxval=31` is
+  enforced at config load (4.1, 5 step 2).
+- https://www.ti.com/lit/ds/symlink/ldc1612.pdf (LDC1612, LDC1614
+  datasheet, TI document SNOSCY9A, December 2014, revised March 2018):
+  section 7.3.5 "Sensor Current Drive Control" states the IDRIVE range as
+  16 uA to 1.6 mA; Table 42 in section 8.1.5 gives the current at every
+  code (0 = 16 uA, 31 = 1563 uA); section 8.1.5.2 "Automatic IDRIVE
+  Setting with RP_OVERRIDE_EN" instructs setting the target at the
+  maximum planned operating distance before auto-calibrating, and states
+  the only failure effects of a wrong drive current: an ESD-clamp-
+  triggered frequency shift when too high, or SNR loss and complete
+  signal collapse at near-zero range when too low, neither described as
+  physical damage to the chip (5, step 2).
 
 Facts not verified, treat as unconfirmed until checked on the bench:
 - The BTT Eddy Coil V1.0 connector's exact pin order (which of the 4 pins
-  is 5V, GND, SCL, SDA and in what sequence).
-- Whether Eddy Coil V1.0 is 3.3V-only or genuinely 5V-tolerant on its logic
-  lines (the wiki states 5V supply but does not discuss logic-level
-  tolerance).
+  is 5V, GND, SCL, SDA and in what sequence). Checked the wiki, the
+  GitHub README, and the official PDF manual; none give a pin-by-pin
+  order.
+- Whether Eddy Coil V1.0 is 3.3V-only or genuinely 5V-tolerant on its
+  logic lines. The 5V supply rail is now confirmed by two independent BTT
+  sources (the wiki and the PDF manual's Product Information table), but
+  neither, nor any other source checked, discusses the logic-level
+  tolerance of the SCL/SDA lines specifically.
 - A confirmed, labeled I2C connector on the Manta M8P V1.x boards; the two
   pins recommended above are spare general-purpose pins, not a documented
   I2C connector.

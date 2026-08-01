@@ -53,9 +53,10 @@ i2c_software_sda_pin: PB7
 i2c_address: 42
 frequency: 24000000
 reg_drive_current: 22
-# --- geometry ---
+# --- geometry: every height below is measured from the coil top face ---
 coil_x: 350.0
 coil_y: 5.0
+coil_z: 0.0                     # machine Z of the coil top face
 scan_height: 1.0
 z_start: 5.0
 z_stop: 0.5
@@ -80,8 +81,9 @@ See `docs/design.md` for the full schema description and rationale.
   mounted tool and print its offsets relative to the T0 baseline.
 - `EDDY_SET_BASELINE`: declare the currently mounted tool as the T0
   baseline for this session.
-- `EDDY_SET_Z_REF [T=<n>] Z=<real_offset>`: bind the current tool's
-  measured frequency curve to a real Z offset obtained by another method.
+- `EDDY_SET_Z_REF [T=<n>] Z=<machine Z>`: bind the current tool's measured
+  frequency curve to a real Z obtained by another method. `Z=` is a machine
+  coordinate, the same frame the descent curve is reported in.
 
 ## Moonraker update_manager
 

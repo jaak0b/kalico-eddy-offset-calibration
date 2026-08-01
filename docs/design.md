@@ -42,10 +42,10 @@ coil_x: 350.0                   # approximate coil center (refined by EDDY_LOCAT
 coil_y: 5.0
 coil_z: 0.0                     # machine Z of the coil top face
 coil_inner_diameter: 2.0        # mm, coil bore; sets the default fit window
-scan_height: 1.0                # nozzle height above coil top during XY scans
+scan_height: 1.0                # mm above the coil top face during XY scans
 scan_safe_z: 2.0                # mm above the scan height for travel moves
-z_start: 5.0                    # Z descent start for Z curves
-z_stop: 0.5                     # closest approach (never touches)
+z_start: 5.0                    # descent start, mm above the coil top face
+z_stop: 0.5                     # descent end, mm above the coil top face
 z_step: 0.05                    # descent step; must divide z_start - z_stop
 # --- scan tuning ---
 scan_speed: 4.0                 # mm/s
@@ -68,6 +68,16 @@ freq_min: 1000000.0             # Hz; samples below this are discarded as noise
 z_ref_t0: 0.2000:12345678.000   # "<z>:<reference frequency>", one per tool 0 to 15
 ```
 
+`coil_z` is the only vertical option in machine coordinates. `scan_height`,
+`z_start` and `z_stop` are heights above the coil top face, so the plugin adds
+`coil_z` to each of them and never commands a Z below the face. A geometry that
+breaks that (a `z_stop` at or below the face, or a `scan_height` at or below
+the face or at or above `z_start`) is a config error at load, never clamped.
+Measured Z is the other direction: the descent curve stores the machine Z the
+kinematics report,
+so the curve range, the `EDDY_SET_Z_REF` `Z=` anchor and the reported crossing
+are all machine Z.
+
 Display precision in every readout: millimetres to 4 decimals, frequencies to
 3 decimals. Values are printed exactly as measured at that precision, never
 rounded further and never clamped.
@@ -87,7 +97,8 @@ reference it; decide during implementation, wrapper preferred.)
      forward and reverse; parabolic fit of the response extremum per pass;
      average pairs; least-squares reconstruct the center from the two
      directional results; iterate once more at the refined center.
-  2. Z: hold the XY center, descend z_start -> z_stop stepwise (probe_eddy_current
+  2. Z: hold the XY center, descend from z_start to z_stop stepwise, both
+     heights above the coil top face (probe_eddy_current
      calibration-move pattern: step, dwell, window-average samples), producing a
      freq-vs-Z curve; report the Z at which frequency crosses the tool's stored
      reference frequency (see EDDY_SET_Z_REF). Without a reference, prints the
@@ -96,10 +107,12 @@ reference it; decide during implementation, wrapper preferred.)
      baseline if one exists in this session.
 - `EDDY_SET_BASELINE`: declare the currently mounted tool as T0 baseline
   (stores its center + Z curve for the session).
-- `EDDY_SET_Z_REF [T=<n>] Z=<real_offset>`: one-time per-tool anchor: after the
+- `EDDY_SET_Z_REF [T=<n>] Z=<machine Z>`: one-time per-tool anchor: after the
   owner measures true Z by their existing method (paper/pin), this binds the
   measured frequency curve to reality; stored in memory and printed so the owner
-  can persist it in config (`z_ref_t<n>:` option) for reuse.
+  can persist it in config (`z_ref_t<n>:` option) for reuse. `Z=` is a machine
+  coordinate, the frame the descent curve is measured in, not a height above
+  the coil top face.
 - All output as labeled raw-value rows, not prose.
 
 ## Algorithm notes (ported from upstream, with provenance)
