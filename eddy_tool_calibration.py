@@ -12,15 +12,11 @@
 # Free Software Foundation, either version 3 of the License, or (at your
 # option) any later version. See LICENSE for the full text.
 
-"""Kalico klippy plugin module: EDDY_QUERY, EDDY_LOCATE, EDDY_CALIBRATE_Z,
-EDDY_CALIBRATE_OFFSET and EDDY_REPEATABILITY gcode commands for eddy-current
-based per-tool nozzle offset calibration. See docs/design.md for the full
-design and config schema.
+"""Kalico klippy plugin: eddy-current per-tool nozzle offset calibration.
 
-Constraint: this module must import cleanly on a machine without klippy
-installed (unit tests run standalone). Any import of klippy modules
-(klippy.extras.ldc1612, motion_report, etc.) must happen inside a function or
-method body, never at module scope.
+This module must import cleanly on a machine without klippy installed, so
+every import of a klippy module (klippy.extras.ldc1612, motion_report and the
+rest) happens inside a function or method body, never at module scope.
 """
 
 import contextlib
@@ -33,24 +29,21 @@ import time
 
 # ---------------------------------------------------------------------------
 # Framework-agnostic math.
-#
-# Everything in this section takes plain numbers and lists, imports nothing
-# from klippy, and raises ValueError with a specific message on invalid input.
-# The klippy-facing layer below is the only place that converts those into
-# gcode errors. See tests/ for the standalone unit tests.
 # ---------------------------------------------------------------------------
 
 # Provenance: upstream tool_eddy_calibration drops samples below 1 MHz as
 # invalid startup or noise readings. The threshold sits well below any real
 # coil resonance of an LDC1612 eddy board, so it separates garbage from
-# signal rather than trimming real data. Exposed as the freq_min config
-# option; this is the default.
+# signal rather than trimming real data.
 FREQ_MIN_DEFAULT = 1000000.0
+
+# Kalico's DEFAULT_LDC1612_FREQ (ldc1612.py:16), the clock a build without the
+# frequency config option holds the sensor at.
+DEFAULT_SENSOR_CLOCK = 12000000
 
 # Provenance: upstream peak-type auto-detection compares the average of the
 # scan edges against the average of the middle band, taken as 35% to 65% of
-# the pass. The band only has to sit clear of the edges for the comparison to
-# have a defined sign, so it is kept as the upstream convention.
+# the pass.
 PEAK_TYPE_CENTER_LOW_FRACTION = 0.35
 PEAK_TYPE_CENTER_HIGH_FRACTION = 0.65
 
@@ -68,9 +61,7 @@ PEAK_TYPES = ('peak', 'valley')
 
 
 def detect_peak_type(freqs, edge_margin):
-    """Return 'peak' or 'valley' for a scan pass.
-
-    Ported from upstream's auto-detection: the response is a peak when the
+    """Ported from upstream's auto-detection: the response is a peak when the
     middle band of the pass reads higher than its two edges, a valley when it
     reads lower. edge_margin is the fraction of the pass treated as edge.
     """
@@ -102,11 +93,6 @@ def detect_peak_type(freqs, edge_margin):
 
 
 def find_extremum_index(freqs, peak_type, edge_margin):
-    """Return the index of the response extremum, excluding the pass edges.
-
-    Raises ValueError when the extremum lands on the edge of the search
-    window, which means the scan did not cross the coil center.
-    """
     n = len(freqs)
     if n < 3:
         raise ValueError(
@@ -140,12 +126,11 @@ def find_extremum_index(freqs, peak_type, edge_margin):
 
 def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
                       vertex_limit):
-    """Gaussian-weighted quadratic least-squares fit around peak_idx.
-
-    Ported from upstream's _refine_peak_position. Returns the vertex position
-    as a fractional sample offset relative to peak_idx. Upstream clamped a
-    vertex that fell outside the window; a clamp turns a failed fit into a
-    plausible looking number, so this raises instead.
+    """Ported from upstream's _refine_peak_position: a Gaussian-weighted
+    quadratic least-squares fit. Returns the vertex position as a fractional
+    sample offset relative to peak_idx. Deliberate deviation from upstream,
+    which clamped a vertex that fell outside the window; a clamp turns a
+    failed fit into a plausible looking number, so this raises instead.
     """
     n = len(freqs)
     if peak_idx < 0 or peak_idx >= n:
@@ -246,13 +231,8 @@ def interpolate_position(xs, ys, index):
 
 def fit_scan_pass(xs, ys, freqs, half_window, sigma, edge_margin,
                   vertex_limit):
-    """Fit the response extremum of one directional scan pass.
-
-    This is the whole estimator for one pass and the single swappable unit:
-    peak-type detection, extremum search, Gaussian-weighted quadratic fit,
-    and interpolation of the fitted vertex back onto the scan path. Returns
-    a dict with peak_x, peak_y, peak_type, extremum_index, vertex_offset and
-    sample_count.
+    """Fit one directional scan pass, returning a dict with peak_x, peak_y,
+    peak_type, extremum_index, vertex_offset and sample_count.
     """
     n = len(freqs)
     if len(xs) != n or len(ys) != n:
@@ -290,9 +270,7 @@ def project_peaks(peaks):
 
 
 def average_paired_projections(peaks):
-    """Average each scan axis' forward and reverse peak projections.
-
-    Ported from upstream's paired-averaging mode: both peaks of an opposed
+    """Ported from upstream's paired-averaging mode: both peaks of an opposed
     pair are projected onto the forward direction's axis and averaged, which
     cancels the constant position bias that transport latency and backlash
     add along the direction of travel. A pass without an opposite is kept
@@ -325,11 +303,9 @@ def average_paired_projections(peaks):
 
 
 def solve_center_lsq(projections):
-    """Least-squares reconstruction of a center from axis projections.
-
-    projections is a list of (angle_deg, projection). Solves the overdetermined
-    system tx*cos(t) + ty*sin(t) = projection by normal equations. Raises
-    ValueError when the angle set cannot constrain both axes.
+    """projections is a list of (angle_deg, projection). Solves the
+    overdetermined system tx*cos(t) + ty*sin(t) = projection by normal
+    equations.
     """
     if not projections:
         raise ValueError("center reconstruction needs at least one scan pass")
@@ -355,9 +331,7 @@ def solve_center_lsq(projections):
 
 
 def scan_endpoints(center_x, center_y, angle_deg, length):
-    """Start and end point of a scan of the given length through a center.
-
-    0 degrees runs along X+, 90 degrees along Y+. Returns
+    """0 degrees runs along X+, 90 degrees along Y+. Returns
     (start_x, start_y, end_x, end_y).
     """
     if length <= 0.0:
@@ -370,13 +344,11 @@ def scan_endpoints(center_x, center_y, angle_deg, length):
 
 
 def normalize_scan_angles(angles, pair_scans):
-    """Normalize configured scan angles to [0, 360) and reject duplicates.
+    """Normalize scan angles to [0, 360) and reject duplicates.
 
-    Two passes along the same direction add no information and would enter the
-    pair-averaging map twice, so a repeated angle is an error rather than a
-    silently dropped pass. With pair_scans enabled the opposite of every
-    configured angle is scanned as well, so a configured pair of opposites is
-    the same duplicate one step later and is rejected here too.
+    With pair_scans the opposite of every configured angle is scanned as well,
+    so a configured pair of opposites is the same duplicate one step later and
+    is rejected here too.
     """
     if not angles:
         raise ValueError("at least one scan angle is required")
@@ -396,7 +368,6 @@ def normalize_scan_angles(angles, pair_scans):
 
 
 def expand_scan_angles(angles, pair_scans):
-    """Full pass list for a normalized angle set, adding opposites if paired."""
     out = list(angles)
     if pair_scans:
         for angle in list(angles):
@@ -405,15 +376,10 @@ def expand_scan_angles(angles, pair_scans):
 
 
 def validate_vertical_geometry(scan_height, z_start, z_stop):
-    """Check the configured heights against the coil-relative convention.
-
-    scan_height, z_start and z_stop are all heights above the coil top face,
-    where 0 mm is the nozzle touching the face. The descent therefore has to
-    stop before it reaches the face, and the XY scan plane has to sit below
-    the top of the descent so both measurements share one range. Raises
-    ValueError naming the option at fault. The z_start above z_stop ordering
-    is not checked here: z_descent_targets owns the descent list and already
-    rejects it.
+    """scan_height, z_start and z_stop are heights above the coil top face,
+    where 0 mm is the nozzle touching the face. The z_start above z_stop
+    ordering is not checked here: z_descent_targets owns the descent list and
+    already rejects it.
     """
     if z_stop <= 0.0:
         raise ValueError(
@@ -433,13 +399,9 @@ def validate_vertical_geometry(scan_height, z_start, z_stop):
 def z_descent_targets(z_start, z_stop, z_step):
     """Descent heights from z_start down to z_stop inclusive.
 
-    Works in whatever vertical frame the caller uses; the plugin hands it the
-    configured heights above the coil top face and converts each returned
-    target to machine Z when it commands the move.
-
-    The descent has to end exactly at z_stop, so the span must be a whole
-    number of steps. Raises ValueError when it is not, rather than truncating
-    and stopping short.
+    Works in whatever vertical frame the caller uses; the plugin hands it
+    heights above the coil top face and converts each target to machine Z as
+    it commands the move.
     """
     if z_step <= 0.0:
         raise ValueError("z_step must be greater than 0, got %r" % (z_step,))
@@ -456,9 +418,7 @@ def z_descent_targets(z_start, z_stop, z_step):
 
 
 def build_z_curve(points):
-    """Validate and order a frequency-vs-Z descent curve.
-
-    points is a list of (z, frequency). Returns the list sorted by ascending
+    """points is a list of (z, frequency). Returns the list sorted by ascending
     Z. Ported from probe_eddy_current's calibration validation: frequency must
     increase strictly at every step down, otherwise the descent did not
     measure a usable response.
@@ -481,7 +441,6 @@ def build_z_curve(points):
 
 
 def z_curve_freq_at(curve, z):
-    """Linear interpolation of the curve frequency at a height."""
     if len(curve) < 2:
         raise ValueError(
             "Z curve needs at least 2 steps to interpolate, got %d"
@@ -500,7 +459,6 @@ def z_curve_freq_at(curve, z):
 
 
 def z_curve_z_at_freq(curve, freq):
-    """Linear interpolation of the height at which the curve crosses freq."""
     if len(curve) < 2:
         raise ValueError(
             "Z curve needs at least 2 steps to interpolate, got %d"
@@ -522,9 +480,8 @@ def z_curve_z_at_freq(curve, freq):
 
 
 def z_curve_shared_reference(curve):
-    """Reference height and frequency at the middle of a curve's Z range.
+    """Returns (z, frequency) at the midpoint by height of the measured range.
 
-    Returns (z, frequency) at the midpoint by height of the measured range.
     The midpoint is the height furthest from both ends of the descent, so a
     reference taken there leaves the widest margin on either side for another
     tool's curve to still bracket that frequency.
@@ -539,11 +496,9 @@ def z_curve_shared_reference(curve):
 
 # --- contact switch anchoring ----------------------------------------------
 
-# The switch is pressed four times and the first press is discarded. A first
-# press on a cold or unseated switch travels differently from the rest, so it
-# is a warm-up rather than a measurement, and it is dropped by its position in
-# the sequence rather than by any test on its value. The remaining three give
-# an unambiguous median with no even-count rule to pick.
+# A first press on a cold or unseated switch travels differently from the
+# rest, so it is a warm-up rather than a measurement and is dropped by its
+# position in the sequence rather than by any test on its value.
 SWITCH_PRESS_COUNT = 4
 SWITCH_PRESS_DISCARDED = 1
 
@@ -553,9 +508,7 @@ def aggregate_switch_presses(heights, tolerance):
 
     heights holds the trigger height of every press in the order it was made.
     Returns (median, counted, spread), where counted holds the presses that
-    were kept. Raises ValueError when the counted presses disagree by more
-    than tolerance: a switch that cannot repeat inside its tolerance has a
-    mechanical cause that another press does not fix.
+    were kept.
     """
     if len(heights) != SWITCH_PRESS_COUNT:
         raise ValueError(
@@ -581,12 +534,9 @@ def aggregate_switch_presses(heights, tolerance):
 def switch_anchor(curve, trigger_z):
     """Anchor height above a trigger plane, and the frequency there.
 
-    The anchor is taken at the midpoint by height of the tool's own measured
-    descent, the height furthest from both ends of that descent, so a later
-    descent keeps the widest margin on either side to still bracket the anchor
-    frequency. What is returned is the height above the switch trigger plane
-    rather than a machine Z, so the switch's own height cancels out of every
-    comparison between two tools.
+    What is returned is the height above the switch trigger plane rather than
+    a machine Z, so the switch's own height cancels out of every comparison
+    between two tools.
     """
     anchor_z, anchor_freq = z_curve_shared_reference(curve)
     return anchor_z - float(trigger_z), anchor_freq
@@ -595,10 +545,7 @@ def switch_anchor(curve, trigger_z):
 def trigger_plane_from_anchor(curve, anchor_height, anchor_frequency):
     """Machine Z of the trigger plane a stored anchor implies for a curve.
 
-    Finds the height at which a freshly measured curve reaches the stored
-    anchor frequency, then subtracts the stored height above the trigger
-    plane. Returns (trigger_z, crossing_z). Raises ValueError when the stored
-    frequency lies outside the measured curve.
+    Returns (trigger_z, crossing_z).
     """
     crossing = z_curve_z_at_freq(curve, anchor_frequency)
     return crossing - float(anchor_height), crossing
@@ -608,10 +555,8 @@ def trigger_plane_from_anchor(curve, anchor_height, anchor_frequency):
 
 
 def default_tool_extruder(tool):
-    """Klipper's extruder section name for a tool number.
-
-    Klipper names extruder sections extruder, extruder1, extruder2 and so on,
-    so a machine that follows that convention needs no tool_extruders option.
+    """Klipper's extruder section name for a tool number: extruder,
+    extruder1, extruder2 and so on.
     """
     index = int(tool)
     if index < 0:
@@ -642,7 +587,6 @@ def parse_tool_extruders(text, tool_count):
 
 
 def tool_extruder_name(names, tool):
-    """The heater section name holding one tool's nozzle temperature."""
     if names is None:
         return default_tool_extruder(tool)
     index = int(tool)
@@ -656,13 +600,9 @@ def tool_extruder_name(names, tool):
 def temperature_warning(tool, anchored_setpoint, configured_setpoint):
     """Warning text when a tool was anchored at another setpoint.
 
-    Both values are setpoints: the one the anchor was measured at and the
-    calibration_temp the config carries now. They differ only when the option
-    was changed after the tool was anchored, so any difference at all is
-    reported rather than absorbed by a margin. An offset run heats to the
-    anchored setpoint either way, because the anchor frequency was measured in
-    that thermal state and only a measurement taken in the same state can be
-    compared against it.
+    Both values are setpoints, so they differ only when the option was changed
+    after the tool was anchored, and any difference at all is reported rather
+    than absorbed by a margin.
     """
     if float(anchored_setpoint) == float(configured_setpoint):
         return None
@@ -679,9 +619,9 @@ def temperature_in_band(reading, setpoint, band):
     """Whether a nozzle reading counts as being at its setpoint.
 
     The band applies in both directions, so a nozzle that overshot only has to
-    fall back inside it rather than come to rest on the setpoint. A hotend
-    under PID control wanders around its setpoint instead of sitting on it, so
-    a band narrower than that wander is a wait for a coincidence.
+    fall back inside it. A hotend under PID control wanders around its
+    setpoint instead of sitting on it, so a band narrower than that wander is
+    a wait for a coincidence.
     """
     return abs(float(reading) - float(setpoint)) <= float(band)
 
@@ -690,9 +630,7 @@ def preheat_plan_rows(entries, band, settle_time):
     """Labeled rows a preheat prints before it starts waiting.
 
     entries is a list of (tool, heater section name, current reading,
-    setpoint), one per tool the preheat covers. The rows name what each tool
-    reads now and what it is being taken to, so a wait that turns out long is
-    read against the distance it had to cover.
+    setpoint), one per tool the preheat covers.
     """
     if not entries:
         raise ValueError("a preheat plan needs at least one tool")
@@ -714,23 +652,16 @@ def preheat_plan_rows(entries, band, settle_time):
 
 # --- persisted calibration state -------------------------------------------
 
-# Directory next to the printer config that holds everything this plugin
-# writes, and the state file inside it.
 STATE_DIR = 'EddyToolCalibration'
 STATE_FILENAME = 'calibration_state.json'
 
-# The only document version this build reads or writes.
 STATE_VERSION = 1
 
-# The five fields an offset run reads: the anchor pair its descent is
-# evaluated against, setpoint_temperature, the heater setpoint it has to
-# bring the nozzle back to before it measures, and freq_conv and
-# drive_current, the sensor settings that pair is only meaningful for. The
-# rest of an anchor record is diagnostic and is never fed back into a
-# measurement: observed_temperature is what the heater read while the anchor
-# was taken, which shows whether the tool did reach its setpoint, and the
-# remaining fields let a stale anchor be recognised after the coil or the
-# switch moves.
+# The five fields an offset run reads back: the anchor pair its descent is
+# evaluated against, the setpoint it has to bring the nozzle back to before
+# it measures, and freq_conv and drive_current, the sensor settings that pair
+# is only meaningful for. The rest of an anchor record is diagnostic and is
+# never fed back into a measurement.
 ANCHOR_NUMBER_FIELDS = (
     'anchor_height', 'anchor_frequency', 'setpoint_temperature',
     'freq_conv', 'drive_current',
@@ -856,9 +787,8 @@ def decode_state(text):
 def sweep_tool_order(tool_count):
     """Tool numbers a fleet run visits, in the order it visits them.
 
-    Tools are numbered from zero upward with no holes, so the order is simply
-    T0 through T(tool_count-1). The baseline tool comes first, which is what
-    lets a fleet offset run satisfy the baseline rule on its own.
+    The baseline tool comes first, which is what lets a fleet offset run
+    satisfy the baseline rule on its own.
     """
     if tool_count is None:
         raise ValueError(
@@ -875,8 +805,7 @@ def parse_tool_list(text, tool_count, max_tools):
     """Tool numbers a T= parameter names, in the order it lists them.
 
     text is the raw parameter: a single tool number, a comma separated list of
-    them, or None when T= was left out, which names every tool of the fleet
-    and so goes through the same list the fleet order produces.
+    them, or None when T= was left out, which names every tool of the fleet.
     """
     if text is None:
         return sweep_tool_order(tool_count)
@@ -915,9 +844,7 @@ def baseline_first(tools, baseline_tool):
     """Order a tool list so the baseline tool is measured before the rest.
 
     Every other tool's offsets are differences against the baseline tool, so
-    the baseline is measured first however the list was written. The other
-    tools keep the order they were given in. A list without the baseline tool
-    is returned unchanged.
+    it is measured first however the list was written.
     """
     ordered = [t for t in tools if t == baseline_tool]
     ordered.extend(t for t in tools if t != baseline_tool)
@@ -928,9 +855,7 @@ def offset_template_context(tool, offsets, calibrate_z):
     """Names an apply_offsets_gcode template is rendered with.
 
     With calibrate_z False no descent ran, so offset_z is left out of the
-    context rather than passed as zero: a template that applies a Z offset
-    that was never measured would move the nozzle on the strength of a number
-    nothing produced.
+    context rather than passed as zero.
     """
     context = {
         'tool': int(tool),
@@ -971,12 +896,7 @@ def fleet_summary_rows(entries):
 
 
 def validate_data_dir(option, directory):
-    """Reject a data directory that would sit on the state file's own.
-
-    A directory this plugin writes working files into is cleared out from time
-    to time, and the saved Z references must not go with them, so neither one
-    ever shares a directory with the state file.
-    """
+    """Reject a data directory that would sit on the state file's own."""
     if os.path.normpath(directory) == os.path.normpath(STATE_DIR):
         raise ValueError(
             "%s %r is the directory the calibration state file lives in. "
@@ -987,12 +907,7 @@ def validate_data_dir(option, directory):
 
 
 def validate_log_dir(log_dir, csv_dir):
-    """Reject a log directory the scan dumps are cleared out of.
-
-    The scan dumps are working files, cleared whenever they have been looked
-    at. The drift logs and the study files are the record a claim about drift
-    over time rests on, so the two never share a directory.
-    """
+    """Reject a log directory the scan dumps are cleared out of."""
     if os.path.normpath(log_dir) == os.path.normpath(csv_dir):
         raise ValueError(
             "log_dir %r is the directory csv_dir names. Point log_dir at a "
@@ -1020,9 +935,8 @@ def spread(values):
     """Minimum, maximum and population standard deviation of a sample set.
 
     The population form is what EDDY_QUERY's frequency stream needs: those
-    thousands of samples are the whole of one steady reading rather than a
-    small sample drawn from a wider population. A repeatability study is the
-    other case, and its spreads come from repeatability_statistics.
+    samples are the whole of one steady reading rather than a small sample
+    drawn from a wider population.
     """
     if not values:
         raise ValueError("spread needs at least one value")
@@ -1038,14 +952,12 @@ def spread(values):
 def step_distance_rows(step_distances):
     """Labeled rows naming how far one microstep moves each XY stepper.
 
-    step_distances is a list of (stepper section name, millimetres per step),
-    read off the kinematics. Each row is that one stepper's own microstep
-    distance, which is the machine's positional quantum only where a single
-    stepper drives the axis on its own: on kinematics that drive an axis from
-    a combination of steppers, CoreXY among them, the quantum is a combination
-    of the listed distances rather than either one. An empty list produces no
-    rows, because a figure the machine did not report is better left out than
-    guessed at.
+    step_distances is a list of (stepper section name, millimetres per step).
+    Each row is that one stepper's own microstep distance, which is the
+    machine's positional quantum only where a single stepper drives the axis
+    on its own: on kinematics that drive an axis from a combination of
+    steppers, CoreXY among them, the quantum is a combination of the listed
+    distances rather than either one.
     """
     return ["stepper microstep distance %s: %.6f mm" % (name, distance)
             for name, distance in step_distances]
@@ -1075,22 +987,17 @@ COLLECT_TAIL_TIME = 0.200
 def log_timestamp(seconds=None):
     """The timestamp a log row or an anchor record carries.
 
-    Written in UTC with a trailing Z rather than in local time. A local time
-    without an offset reorders a log across a daylight saving rollback, where
-    an hour of rows repeats an hour that is already in the file.
+    UTC with a trailing Z rather than local time: a local time without an
+    offset reorders a log across a daylight saving rollback.
     """
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(seconds))
 
 
 # The drift log's columns, in file order, each with the format its values are
-# written in. Millimetres carry 4 decimals and temperatures 1, the same
-# precision the console rows show. A value that was not measured is written
-# as an empty field rather than a zero. baseline_session names the session
-# whose baseline measurement the offsets were taken against, so a drift in the
-# baseline is not read as a drift of the tool. The two temperature columns are
-# the heater setpoint the run was held at and the reading taken at measurement
-# time, so a row shows both the thermal state that was asked for and the one
-# the tool was actually in.
+# written in. A value that was not measured is written as an empty field
+# rather than a zero. baseline_session names the session whose baseline
+# measurement the offsets were taken against, so a drift in the baseline is
+# not read as a drift of the tool.
 HISTORY_COLUMNS = (
     ('timestamp', '%s'),
     ('command', '%s'),
@@ -1107,31 +1014,21 @@ HISTORY_COLUMNS = (
     ('samples_used', '%d'),
 )
 
-# A repeatability study writes the same columns with the cycle and the run
-# number in front, so a study file and a drift log carry the same fields and
-# can be read by the same script.
 STUDY_COLUMNS = (('cycle', '%d'), ('run', '%d')) + HISTORY_COLUMNS
 
 
 def csv_header(columns):
-    """Header line for a column layout."""
     return ",".join(name for name, _format in columns) + "\n"
 
 
 def csv_row(columns, entry):
     """One CSV line for a column layout.
 
-    Every column has to be present in entry, and no other name may be, so a
-    misspelled field is an error rather than a column silently written empty.
-    A column whose value is None is written as an empty field, which is how a
-    run that measured no Z or had no baseline to compare against reports that
-    it did not measure the value at all.
-
-    The fields are joined on commas and never quoted. That holds because every
-    string column of these layouts is produced by this plugin: a timestamp in
-    the format above and a gcode command name, neither of which can carry a
-    comma, a quote or a newline. A layout that ever takes free text from
-    elsewhere needs the csv module here instead.
+    The fields are joined on commas and never quoted, which holds only because
+    every string column of these layouts is produced by this plugin: a
+    timestamp and a gcode command name, neither of which can carry a comma, a
+    quote or a newline. A layout that ever takes free text from elsewhere
+    needs the csv module here instead.
     """
     known = set(name for name, _format in columns)
     unknown = sorted(set(entry) - known)
@@ -1152,12 +1049,6 @@ def csv_row(columns, entry):
 
 def append_csv(path, columns, entry):
     """Append one measurement to a log file, creating it with its header.
-
-    A file that does not exist yet and a file that exists but is empty are
-    both written a header first, so an interrupted create cannot leave a log
-    whose rows have no columns above them. A file whose first line names other
-    columns is refused rather than appended to, because the rows underneath
-    would not line up with the header the reader sees.
 
     Raises OSError or ValueError, which the callers turn into a gcode error
     naming what was already completed.
@@ -1182,16 +1073,13 @@ def append_csv(path, columns, entry):
 
 
 def history_filename(tool):
-    """File name of one tool's drift log."""
     return "history_T%d.csv" % (int(tool),)
 
 
 def next_study_filename(existing, tool):
     """File name for a repeatability study that cannot overwrite an earlier one.
 
-    existing holds the names already in the directory. The index is one above
-    the highest index already there, so a study never lands on the file
-    another study wrote, whatever order the files were created in.
+    existing holds the file names already in the directory.
     """
     prefix = "repeatability_T%d_" % (int(tool),)
     suffix = ".csv"
@@ -1200,9 +1088,8 @@ def next_study_filename(existing, tool):
         if not name.startswith(prefix) or not name.endswith(suffix):
             continue
         index = name[len(prefix):len(name) - len(suffix)]
-        # isdigit accepts digits int() cannot parse, superscripts among them,
-        # so a file name is only read as an index when it is plain ASCII
-        # digits. Anything else is another file and is skipped.
+        # str.isdigit accepts digits int() cannot parse, superscripts among
+        # them, so an index is only read off a name that is plain ASCII digits.
         if not index.isascii() or not index.isdigit():
             continue
         highest = max(highest, int(index))
@@ -1212,18 +1099,15 @@ def next_study_filename(existing, tool):
 # --- repeatability studies -------------------------------------------------
 
 # Whether a study docks the measured tool between its cycles, and why it does
-# not when it cannot. A cycle exercises the docking by mounting another tool
-# and remounting the measured one, which needs both a second tool and the
-# lines that mount one.
+# not when it cannot.
 DOCKING_STATES = ('through_tool', 'no_other_tool', 'no_toolchange_gcode')
 
 
 def study_docking(tool, tool_count, has_toolchange_gcode):
     """The tool a study docks through, as (state, tool number).
 
-    The docking tool is the lowest tool number of the fleet that is not the
-    measured one. Returns a state out of DOCKING_STATES and the tool number,
-    which is None whenever no docking can run.
+    The state is one of DOCKING_STATES; the tool number is None whenever no
+    docking can run.
     """
     if not has_toolchange_gcode:
         return 'no_toolchange_gcode', None
@@ -1235,12 +1119,7 @@ def study_docking(tool, tool_count, has_toolchange_gcode):
 
 
 def docking_row(state, docking_tool, cycles):
-    """The labeled row saying whether a study exercised the docking.
-
-    A study of more than one cycle that cannot dock is a control run: its
-    cycles still separate, but what separates them is the time between them
-    rather than a docking, so the row says that where it applies.
-    """
+    """The labeled row saying whether a study exercised the docking."""
     if state == 'through_tool':
         return ("docking between cycles: each cycle mounts T%d and remounts "
                 "the measured tool" % (int(docking_tool),))
@@ -1259,9 +1138,7 @@ def docking_row(state, docking_tool, cycles):
 
 
 # Whether a study heats the measured tool before it measures, and why it does
-# not when it cannot. Heating reproduces the thermal state the tool's Z
-# reference was measured in, which needs Z calibration and a stored reference
-# for that tool.
+# not when it cannot.
 HEATING_STATES = ('to_anchor_temperature', 'no_anchor', 'z_calibration_off')
 
 
@@ -1295,7 +1172,6 @@ def heating_row(state, setpoint):
 
 def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
                     heating_state, heating_setpoint):
-    """Labeled rows describing a study before it starts moving."""
     if runs < 2:
         raise ValueError(
             "a study needs at least 2 runs per cycle, got %r" % (runs,))
@@ -1320,19 +1196,12 @@ STUDY_AXIS_FIELDS = (('x', 'x'), ('y', 'y'), ('z', 'z_trigger'))
 
 
 def study_axes(include_z):
-    """The axes a study summarises, in the order it reports them.
-
-    Z is there only when the descent ran, because without a descent there is
-    no measured height for a spread to be taken over. The labels come from the
-    field map above, so the axes a study collects and the fields it reads them
-    from cannot drift apart.
-    """
+    """The axes a study summarises, in the order it reports them."""
     return [label for label, _field in STUDY_AXIS_FIELDS
             if label != 'z' or include_z]
 
 
 def study_axis_field(axis):
-    """The measurement field one study axis reads."""
     for label, field in STUDY_AXIS_FIELDS:
         if label == axis:
             return field
@@ -1346,9 +1215,7 @@ def reports_offsets(tool, baseline_tool, has_baseline):
 
     The baseline tool's own offsets are zero by definition, so they are left
     out rather than written as zeros, and a run with no baseline measurement
-    in the session has nothing to difference against at all. Every command
-    that logs a measurement asks here, so an offset column means the same
-    thing in every file.
+    in the session has nothing to difference against at all.
     """
     return int(tool) != int(baseline_tool) and has_baseline
 
@@ -1373,9 +1240,7 @@ def repeatability_statistics(cycles):
     measurement's own variance divided by the number of runs, so that share
     is subtracted. The manual's convention when the subtraction leaves nothing
     is followed here: the component is reported as zero and flagged as
-    unresolved, never as a negative variance. Both figures are returned, so
-    the corrected component is always readable next to the raw spread it came
-    from.
+    unresolved, never as a negative variance.
     """
     if not cycles:
         raise ValueError("a repeatability study needs at least one cycle")
@@ -1391,8 +1256,8 @@ def repeatability_statistics(cycles):
                 "decomposition needs the same number of runs in every cycle"
                 % (index + 1, len(runs), run_count))
         # A value that is not finite passes every ordered comparison the
-        # summary makes and would come back out as a confident zero spread
-        # beside a plausible range, so it is refused here instead.
+        # summary makes and comes back out as a confident zero spread beside a
+        # plausible range, so it is refused here.
         for run_index, value in enumerate(runs):
             if not math.isfinite(value):
                 raise ValueError(
@@ -1424,9 +1289,6 @@ def repeatability_statistics(cycles):
         'cycle_mean_spread': mean_spread,
         'between': between,
         'between_resolved': between_resolved,
-        # The degrees of freedom the between-cycle figures rest on. Two cycles
-        # leave one, which is a wide confidence interval, so the number is
-        # printed beside the component rather than left to be worked out.
         'between_dof': None if cycle_count < 2 else cycle_count - 1,
         'range': max(values) - min(values),
         'max_deviation': max(abs(value - grand_mean) for value in values),
@@ -1437,8 +1299,7 @@ def measurement_progress_row(cycle, cycles, run, runs):
     """The labeled row printed just before one measurement of a study runs.
 
     cycle and run are the 1-based position of the measurement about to start;
-    cycles and runs are the study's totals. Printed ahead of the measurement
-    it names, so a long study never goes quiet while a run is in progress.
+    cycles and runs are the study's totals.
     """
     return ("progress: cycle %d of %d, measurement %d of %d"
             % (cycle, cycles, run, runs))
@@ -1447,10 +1308,7 @@ def measurement_progress_row(cycle, cycles, run, runs):
 def cycle_progress_rows(cycle, axes):
     """Labeled rows closing one cycle of a study.
 
-    axes is a list of (axis label, values measured in that cycle). The
-    standard deviation is the estimator the closing summary uses, run over the
-    one cycle, so a cycle row and the summary never carry two different
-    numbers for the same quantity.
+    axes is a list of (axis label, values measured in that cycle).
     """
     rows = []
     for label, values in axes:
@@ -1466,7 +1324,6 @@ def cycle_progress_rows(cycle, axes):
 
 
 def repeatability_rows(label, stats):
-    """Labeled rows for one axis of a study summary."""
     rows = [
         "%s mean: %.4f mm" % (label, stats['mean']),
         "%s within-cycle spread (the measurement): %.4f mm"
@@ -1515,9 +1372,7 @@ MAX_TOOLS = 16
 # The tool every other tool's offsets are measured against.
 BASELINE_TOOL = 0
 
-# The stages a fleet run reports a failure against. A failure is always
-# attributed to exactly one of these, so the message says which part of the
-# run stopped.
+# The stages a fleet run reports a failure against.
 TOOL_PHASES = ('toolchange', 'switch probing', 'measurement', 'apply')
 
 # The switch options EDDY_CALIBRATE_Z cannot run without. They are read at
@@ -1528,14 +1383,12 @@ SWITCH_REQUIRED_OPTIONS = (
 
 # Chosen value, not from probe_eddy_current: half a second at the sensor's
 # 250 Hz sample rate gives about 125 samples, enough for a meaningful spread
-# without making a wiring check feel slow. Exposed as the query_time config
-# option; this is the default.
+# without making a wiring check feel slow.
 QUERY_COLLECT_TIME_DEFAULT = 0.500
 
 # Chosen value: a scan pass has to cross the whole response and still leave
 # margin on both sides for the fit window, and the response is about as wide
-# as the bore, so the default scan length is one and a half times the coil
-# bore diameter.
+# as the bore.
 SCAN_LENGTH_BORE_FACTOR = 1.5
 
 
@@ -1545,33 +1398,26 @@ def default_scan_length(coil_inner_diameter):
 
 
 # Chosen value: the coarse locate pass has to cover the uncertainty in the
-# configured coil position, which is much larger than the coil itself, so the
-# default locate length is three times the regular scan length.
+# configured coil position, which is much larger than the coil itself.
 LOCATE_SCAN_LENGTH_FACTOR = 3.0
 
 # The scan rounds one XY measurement runs, in order, and the label each one
-# reports under. The first round starts from the current center estimate and
-# every round after it re-centers on the result of the one before, so the
-# scan passes end up centered on the response rather than on the estimate.
+# reports under.
 XY_MEASUREMENT_ROUNDS = ('measurement coarse', 'measurement refine')
 
 # The scan rounds EDDY_LOCATE runs, in order, and the label each one reports
 # under. A locate round covers locate_scan_length rather than scan_length, so
-# it is a different measurement from the measurement rounds above and carries
-# a label of its own: the same word in both places would name two different
-# things in two commands' output.
+# it carries a label of its own.
 LOCATE_ROUNDS = ('locate coarse', 'locate refine')
 
 
 class SwitchPinConfig:
     """Read-only config view presenting switch_pin under the name pin.
 
-    tools_calibrate's endstop wrapper reads a single option named pin. Our own
-    section names it switch_pin so the option stays descriptive next to the
-    other switch options, and this view is what bridges the two names. Any
-    other option is refused rather than passed through, so a future upstream
-    change that starts reading a second option fails here instead of silently
-    picking up one of our unrelated options.
+    tools_calibrate's ProbeEndstopWrapper reads a single option named pin. Any
+    other option is refused rather than passed through, so an upstream change
+    that starts reading a second option fails here instead of silently picking
+    up an unrelated option of ours.
     """
 
     def __init__(self, config, pin):
@@ -1597,34 +1443,23 @@ class SwitchPinConfig:
 
 
 class EddyToolCalibration:
-    """Klippy extra: EDDY_QUERY / EDDY_LOCATE / EDDY_CALIBRATE_Z /
-    EDDY_CALIBRATE_OFFSET gcode commands.
-    """
 
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name()
 
-        # Geometry. coil_x, coil_y and coil_z are machine coordinates specific
-        # to where the coil is mounted on this printer; no default can be
-        # correct for an unknown machine, so they are required.
+        # Geometry. coil_x, coil_y and coil_z are machine coordinates.
         self.coil_x = config.getfloat('coil_x')
         self.coil_y = config.getfloat('coil_y')
-        # The coil bore diameter is specific to the physical coil fitted;
-        # a wrong value silently missizes the fit window, so it is required.
         self.coil_inner_diameter = config.getfloat(
             'coil_inner_diameter', above=0.0)
         # Machine Z of the coil top face, the origin every other vertical
-        # option in this section is measured from. _machine_z is the one
-        # place that converts those heights into machine coordinates.
+        # option in this section is measured from.
         self.coil_z = config.getfloat('coil_z')
-        # Height above the coil top face the XY scan passes run at.
         self.scan_height = config.getfloat('scan_height', 1.0)
-        # Extra clearance above the scan height for travel moves.
         self.scan_safe_z = config.getfloat('scan_safe_z', 2.0, above=0.0)
-        # Heights above the coil top face the Z descent runs between. 2.5 mm
-        # is where the sensor's usable range ends above the coil top face;
-        # higher and the descent curve stops being monotonic.
+        # 2.5 mm is where the sensor's usable range ends above the coil top
+        # face; higher and the descent curve stops being monotonic.
         self.z_start = config.getfloat('z_start', 2.5)
         self.z_stop = config.getfloat('z_stop', 0.5)
         self.z_step = config.getfloat('z_step', 0.05, above=0.0)
@@ -1636,8 +1471,6 @@ class EddyToolCalibration:
                 "%s: %s. Set coil_z to the machine Z of the coil top face, "
                 "and keep scan_height, z_start and z_stop as heights above "
                 "that face." % (self.name, e))
-        # The targets stay in the configured frame, heights above the coil
-        # top face, and are converted as each move is commanded.
         try:
             self.z_targets = z_descent_targets(
                 self.z_start, self.z_stop, self.z_step)
@@ -1666,17 +1499,9 @@ class EddyToolCalibration:
             raise config.error("%s: scan_angles: %s" % (self.name, e))
         self.samples_min = config.getint('samples_min', 100, minval=3)
         self.save_csv = config.getboolean('save_csv', False)
-        # The drift log is a different concept from the raw scan dumps: it
-        # holds one line per completed measurement, which is the record a
-        # claim about drift over time rests on, so it is on by default and
-        # not tied to save_csv.
         self.save_history = config.getboolean('save_history', True)
         self.csv_dir = config.get(
             'csv_dir', os.path.join(STATE_DIR, 'data').replace('\\', '/'))
-        # The drift logs and the study files keep their own directory. They
-        # are the record a drift claim rests on, and the scan dumps beside
-        # them are working files that get cleared, so clearing those cannot
-        # take the logs with them.
         self.log_dir = config.get(
             'log_dir', os.path.join(STATE_DIR, 'logs').replace('\\', '/'))
         try:
@@ -1688,11 +1513,9 @@ class EddyToolCalibration:
         self.query_time = config.getfloat(
             'query_time', QUERY_COLLECT_TIME_DEFAULT, above=0.0)
 
-        # Fit tuning. The window radius defaults to the coil inner radius, so
-        # the fit sees exactly the sample span the coil bore responds over.
-        # Deliberate deviation from upstream, which shrinks the bore by a
-        # further 0.5 mm before halving it; that shrink is unexplained and an
-        # unexplained constant is not carried over.
+        # Fit tuning. Deliberate deviation from upstream, which shrinks the
+        # bore by a further 0.5 mm before halving it; that shrink is
+        # unexplained and an unexplained constant is not carried over.
         self.fit_window_radius = config.getfloat(
             'fit_window_radius', self.coil_inner_diameter / 2.0, above=0.0)
         # Upstream's convention: a Gaussian weight whose standard deviation is
@@ -1706,18 +1529,13 @@ class EddyToolCalibration:
         self.freq_min = config.getfloat(
             'freq_min', FREQ_MIN_DEFAULT, minval=0.0)
 
-        # Options this plugin no longer has. A removed option is refused at
-        # load rather than ignored, so a config that means something it can no
-        # longer do says so instead of quietly measuring something else.
         self._reject_removed_options(config)
 
-        # Whether the Z descent runs at all. The descent is the slow part of a
-        # calibration, so it stays off until Z offsets are wanted.
         self.calibrate_z = config.getboolean('calibrate_z', False)
 
         # Contact switch. switch_x, switch_y and switch_probe_z_start are
-        # machine coordinates, not heights above the coil top face, because
-        # the switch is a separate fixture with no fixed relation to the coil.
+        # machine coordinates, not heights above the coil top face: the switch
+        # is a separate fixture with no fixed relation to the coil.
         self.switch_pin = config.get('switch_pin', None)
         self.switch_x = config.getfloat('switch_x', None)
         self.switch_y = config.getfloat('switch_y', None)
@@ -1734,9 +1552,6 @@ class EddyToolCalibration:
             'switch_probe_sample_retract_dist', 2.0, above=0.0)
         self.switch_probe_tolerance = config.getfloat(
             'switch_probe_tolerance', 0.020, above=0.0)
-        # Each press starts from wherever the previous one retracted to, so a
-        # retract at or beyond the travel allowance puts the switch out of
-        # reach of every press after the first.
         if (self.switch_probe_sample_retract_dist
                 >= self.switch_probe_max_travel):
             raise config.error(
@@ -1748,9 +1563,7 @@ class EddyToolCalibration:
                 % (self.name, self.switch_probe_sample_retract_dist,
                    self.switch_probe_max_travel))
 
-        # Fleet options. They are what a run without T= needs: how many tools
-        # there are, and the lines that mount one. Without them each tool is
-        # still calibrated on its own with T=.
+        # Fleet options.
         self.tool_count = config.getint(
             'tool_count', None, minval=1, maxval=MAX_TOOLS)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
@@ -1759,22 +1572,17 @@ class EddyToolCalibration:
         self.apply_offsets_gcode = gcode_macro.load_template(
             config, 'apply_offsets_gcode', '')
         # An empty template is how klippy spells "the owner did not set this
-        # option", and both options change what the commands do rather than
-        # only what they emit, so the plain text is checked once here.
+        # option", so the plain text is what says whether either was set.
         self.has_toolchange_gcode = bool(
             config.get('toolchange_gcode', '').strip())
         self.has_apply_offsets_gcode = bool(
             config.get('apply_offsets_gcode', '').strip())
 
-        # Nozzle temperature. How the frequency reads against height depends on
-        # how hot the nozzle is, so every measurement is taken in one thermal
-        # state: EDDY_CALIBRATE_Z heats to calibration_temp and records that
-        # setpoint in the anchor, and an offset run heats each tool back to its
-        # own recorded setpoint before measuring. The setpoint is what makes
-        # the state reproducible. A hotend under PID control wanders around its
-        # setpoint rather than sitting on it, so the reading at any one moment
-        # is a sample of that wander, and holding a later run to that sample
-        # would chase a number the controller never aims for.
+        # Nozzle temperature. How the frequency reads against height depends
+        # on how hot the nozzle is, and the reproducible name for a thermal
+        # state is the heater setpoint: a hotend under PID control wanders
+        # around its setpoint rather than sitting on it, so a reading taken at
+        # any one moment is a sample of that wander.
         self.calibration_temp = config.getfloat(
             'calibration_temp', 150.0, minval=0.0)
         if self.calibrate_z and self.calibration_temp <= 0.0:
@@ -1784,22 +1592,12 @@ class EddyToolCalibration:
                 "only be compared against a later measurement taken cold as "
                 "well, and a nozzle that has been hot does not come back to "
                 "cold inside a calibration run." % (self.name,))
-        # How close to its setpoint a nozzle has to read before the settle
-        # dwell starts. The band is what a preheat waits for, in both
-        # directions: a hotend wanders around its setpoint under PID control,
-        # and the frequency shift across a couple of degrees is small beside
-        # the time a tighter band spends waiting for an exact reading, most of
-        # all when a tool has to cool into it with nothing but ambient air to
-        # do the work.
         self.calibration_temp_band = config.getfloat(
             'calibration_temp_band', 2.0, above=0.0)
         # The heater block reaches its setpoint well before the nozzle tip
-        # does, so both commands dwell here after the band is reached and
-        # measure the same thermal state.
+        # does, so both commands dwell here after the band is reached.
         self.calibration_settle_time = config.getfloat(
             'calibration_settle_time', 30.0, minval=0.0)
-        # A fleet preheat sets a setpoint on tools that are not mounted, so the
-        # heater of every tool has to be nameable without mounting it.
         try:
             self.tool_extruders = parse_tool_extruders(
                 config.get('tool_extruders', None), self.tool_count)
@@ -1824,10 +1622,9 @@ class EddyToolCalibration:
         from klippy.extras import ldc1612
         self.sensor = ldc1612.LDC1612(config)
 
-        # The contact switch endstop, reused from the toolchanger probing
-        # tools. It reads only the pin, allows the pin to be shared with an
-        # existing [tools_calibrate] section, and registers no commands and no
-        # pin chip of its own, so nothing here collides with that section.
+        # tools_calibrate's endstop wrapper reads only the pin, marks it
+        # multi-use so an existing [tools_calibrate] section may share it, and
+        # registers no commands and no pin chip of its own.
         self.switch_endstop = None
         if self.switch_pin is not None:
             from klippy.extras import tools_calibrate
@@ -1859,7 +1656,6 @@ class EddyToolCalibration:
     # -- config and persisted state ---------------------------------------
 
     def _reject_removed_options(self, config):
-        """Refuse a config that still carries an option this plugin dropped."""
         if config.get('z_offset_mode', None) is not None:
             raise config.error(
                 "%s: remove z_offset_mode and set calibrate_z instead. Every "
@@ -1880,7 +1676,6 @@ class EddyToolCalibration:
                 % (self.name, tool, tool, self._state_path()))
 
     def _config_dir(self):
-        """Directory the printer config lives in, the root of our own files."""
         config_file = self.printer.get_start_args()['config_file']
         return os.path.dirname(os.path.abspath(config_file))
 
@@ -1912,12 +1707,7 @@ class EddyToolCalibration:
                 % (self.name, e, path))
 
     def _write_state(self, gcmd):
-        """Persist the anchors, replacing the state file atomically.
-
-        The document is written to a temporary file in the same directory and
-        moved over the target, so an interrupted write cannot leave a
-        truncated state file behind.
-        """
+        """Persist the anchors, replacing the state file atomically."""
         path = self._state_path()
         directory = os.path.dirname(path)
         try:
@@ -1964,12 +1754,7 @@ class EddyToolCalibration:
         return motion_report.trapqs['toolhead']
 
     def _requested_tools(self, gcmd, command):
-        """The tools a command runs over, in the order it measures them.
-
-        T= names one tool or a comma separated list of them, and leaving T=
-        out names every tool of the fleet. All three produce a plain tool list
-        that the rest of the run treats alike.
-        """
+        """The tools a command runs over, in the order it measures them."""
         text = gcmd.get('T', None)
         if text is None:
             return self._sweep_tools(gcmd, command)
@@ -2014,11 +1799,7 @@ class EddyToolCalibration:
 
     @contextlib.contextmanager
     def _phase(self, gcmd, tool, phase, sweeping):
-        """Name the tool and the stage a failure inside a fleet run came from.
-
-        A single-tool run reports its own error unchanged: the tool is the one
-        named on the command line and there is nothing to disambiguate.
-        """
+        """Name the tool and the stage that a fleet run's failure came from."""
         if phase not in TOOL_PHASES:
             raise gcmd.error(
                 "Internal error: the calibration stage %r is not one of %r."
@@ -2037,30 +1818,19 @@ class EddyToolCalibration:
         """Run the configured toolchange lines for a tool.
 
         With no toolchange_gcode configured the plugin works on whatever tool
-        is mounted, which is how it behaves on a machine that changes tools by
-        hand. It never learns anything about the toolchanger either way: it
-        runs the lines the owner wrote and nothing else.
-
-        Every command that works on a tool comes through here, so this is
-        where the tool the rest of the run is about is recorded for the status
-        readout, on a machine that mounts it and on one that does not.
+        is mounted.
         """
         if self.has_toolchange_gcode:
             context = self.toolchange_gcode.create_template_context()
             context['tool'] = tool
             self.toolchange_gcode.run_gcode_from_command(context)
-            # A toolchange moves the toolhead, and the measurement reads
-            # positions out of the motion queue, so the change is finished
-            # before the measurement starts.
+            # The measurement reads positions out of the motion queue, so the
+            # toolchange has to have left it before the measurement starts.
             self.printer.lookup_object('toolhead').wait_moves()
         self.last_tool = tool
 
     def _apply_offsets(self, gcmd, tool, offsets):
-        """Run the configured apply lines with a tool's measured offsets.
-
-        The tool is named by the caller, which knows the stage the failure
-        belongs to, so the messages here describe the failure only.
-        """
+        """Run the configured apply lines with a tool's measured offsets."""
         if not self.has_apply_offsets_gcode:
             return
         try:
@@ -2114,7 +1884,6 @@ class EddyToolCalibration:
         stats['overflows'] = max(stats['overflows'], msg['overflows'])
 
     def _sample_drop_rows(self, stats):
-        """Labeled diagnostic rows for the samples a collection discarded."""
         return [
             "raw samples: %d" % (stats['raw_count'],),
             "dropped below freq_min: %d" % (stats['dropped_low_freq'],),
@@ -2128,7 +1897,6 @@ class EddyToolCalibration:
         return gcmd.get_int('DEBUG', 0, minval=0, maxval=1)
 
     def _new_aggregate(self):
-        """Zeroed accumulator for the summary block's sample counters."""
         return {
             'samples_used': 0,
             'dropped_low_freq': 0,
@@ -2147,12 +1915,7 @@ class EddyToolCalibration:
             agg[key] += other[key]
 
     def _aggregate_rows(self, agg):
-        """Labeled summary rows: total samples used, and drops if any.
-
-        The drop counters stay hidden when they are all zero, so quiet mode
-        does not grow rows over nothing, but any nonzero drop across the
-        whole measurement stays visible even with DEBUG=0.
-        """
+        """Labeled summary rows: total samples used, and drops if any."""
         rows = ["samples used: %d" % (agg['samples_used'],)]
         if (agg['dropped_low_freq'] or agg['dropped_no_position']
                 or agg['dropped_outside_move']):
@@ -2167,11 +1930,7 @@ class EddyToolCalibration:
         return rows
 
     def _no_sample_cause(self, stats):
-        """Name the likely cause when a collection yielded nothing usable.
-
-        The three filters a sample can die in have three different causes, so
-        the message names whichever one consumed the samples.
-        """
+        """Name the likely cause when a collection yielded nothing usable."""
         if stats['raw_count'] == 0:
             return ("Check the sensor wiring and the I2C bus configuration. "
                     "The sensor delivered no samples at all.")
@@ -2202,19 +1961,16 @@ class EddyToolCalibration:
     def _machine_z(self, height):
         """Machine Z of a height above the coil top face.
 
-        scan_height, z_start and z_stop are all heights above the coil top
-        face, so this is the only place the configured frame becomes a
-        machine coordinate. Heights read back off the kinematics during a
-        descent are already machine Z and never pass through here.
+        This is the only place the configured frame becomes a machine
+        coordinate. Heights read back off the kinematics during a descent are
+        already machine Z and never pass through here.
         """
         return self.coil_z + height
 
     def _move(self, x, y, z, z_speed):
         """Travel to (x, y, z), never crossing the coil below the target Z.
 
-        XY always travels at travel_speed and the Z leg at z_speed. A move to
-        a higher Z raises Z first; a move to a lower Z travels in XY first, so
-        the nozzle never approaches at a height below where it is going.
+        XY travels at travel_speed and the Z leg at z_speed.
         """
         toolhead = self.printer.lookup_object('toolhead')
         if z > toolhead.get_position()[2]:
@@ -2226,11 +1982,7 @@ class EddyToolCalibration:
         toolhead.wait_moves()
 
     def _retreat(self):
-        """Lift the toolhead clear of the coil and the switch.
-
-        The same height the descent already ends at, so a run that stops
-        anywhere leaves the nozzle where a successful run would have left it.
-        """
+        """Lift the toolhead clear of the coil and the switch."""
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.manual_move(
             [None, None, self._machine_z(self.z_start + Z_APPROACH_HOP)],
@@ -2242,9 +1994,7 @@ class EddyToolCalibration:
         """Run a block of motion and lift clear afterwards, however it ends.
 
         A lift that fails while another error is already on its way up is
-        logged instead of raised, so the message the console shows is the one
-        naming the original cause rather than the failure to move away from
-        it.
+        logged rather than raised, so the console shows the original cause.
         """
         try:
             yield
@@ -2261,7 +2011,6 @@ class EddyToolCalibration:
     # -- nozzle temperature -----------------------------------------------
 
     def _startup_error(self, message):
-        """A startup failure of this section, named the way klippy names it."""
         return self.printer.config_error("%s: %s" % (self.name, message))
 
     def _handle_connect(self):
@@ -2269,12 +2018,9 @@ class EddyToolCalibration:
 
         Extruder sections are still being created while this section is
         parsed, so the names cannot be resolved at config load; connect is the
-        first moment they all exist. A wrong name is a startup failure rather
-        than a surprise partway into a calibration run, where it would have
-        heated whatever the name did resolve to. Nothing heats with
-        calibrate_z False, so the check runs only where a wrong name could
-        reach a hotend, and without tool_count the tools are not known here,
-        so each one is resolved when a command names it instead.
+        first moment they all exist. Nothing heats with calibrate_z False, and
+        without tool_count the tools are not known here, so each one is
+        resolved when a command names it instead.
         """
         if not self.calibrate_z or self.tool_count is None:
             return
@@ -2315,9 +2061,8 @@ class EddyToolCalibration:
     def _observed_temperature(self, gcmd, tool):
         """What one tool's heater reads right now, in degrees Celsius.
 
-        This is the reading, not the setpoint: it says what thermal state the
-        tool is in at this moment, and it is recorded as evidence rather than
-        reproduced by a later run.
+        This is the reading, not the setpoint: it is recorded as evidence
+        rather than reproduced by a later run.
         """
         _name, heater = self._tool_heater(tool, gcmd.error)
         current, _target = heater.get_temp(
@@ -2329,12 +2074,7 @@ class EddyToolCalibration:
 
         targets is a list of (tool, setpoint). Every setpoint is set before any
         waiting starts, so the tools heat side by side rather than one after
-        another, and the settle dwell then runs once for all of them. The wait
-        ends when a nozzle reads inside calibration_temp_band of its setpoint,
-        in either direction, rather than when its controller has settled: a
-        hotend that is already within a degree or two of its setpoint is in the
-        thermal state the measurement needs, and waiting for the controller to
-        come to rest there can take minutes with no measurable gain.
+        another, and the settle dwell then runs once for all of them.
         """
         if not targets:
             raise gcmd.error(
@@ -2360,8 +2100,6 @@ class EddyToolCalibration:
                     "T%d could not be held at %.1f C by the heater %s: %s. "
                     "That setpoint comes from %s."
                     % (tool, setpoint, name, e, source))
-        # Every setpoint is already set, so the tools approach them side by
-        # side while these waits run one after another.
         for tool, name, heater, setpoint in resolved:
             self._wait_for_band(gcmd, tool, name, heater, setpoint)
         toolhead = self.printer.lookup_object('toolhead')
@@ -2408,9 +2146,7 @@ class EddyToolCalibration:
 
         Returns a list of (stepper section name, millimetres per step).
         Kinematics that drive no stepper_x or stepper_y at all, delta, polar
-        and winch among them, report none, which leaves the rows out of the
-        readout: the figure is a comparison aid beside a measurement, and
-        losing it must not cost the measurement.
+        and winch among them, report none.
         """
         toolhead = self.printer.lookup_object('toolhead')
         distances = []
@@ -2430,11 +2166,7 @@ class EddyToolCalibration:
     # -- contact switch probing -------------------------------------------
 
     def _kin_z_limits(self):
-        """The kinematic Z travel limits, as (minimum, maximum).
-
-        The single place the plugin reads the machine's vertical limits, so
-        every check against them, and the probing move's own clamp, agree.
-        """
+        """The kinematic Z travel limits, as (minimum, maximum)."""
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
         kin_status = toolhead.get_kinematics().get_status(curtime)
@@ -2477,12 +2209,10 @@ class EddyToolCalibration:
     def _probe_switch_once(self, gcmd, press):
         """One downward probing move onto the switch, returning its trigger Z.
 
-        Ported from tools_calibrate's PrinterProbeMultiAxis: the target is the
-        current position lowered by the travel allowance and clamped to the
-        kinematic Z minimum, and the move itself is the homing module's
-        probing_move, which returns the position computed from step counts at
-        trigger time. press is the 1-based position of this press in the
-        sequence.
+        Ported from tools_calibrate's PrinterProbeMultiAxis: the move is the
+        homing module's probing_move, which returns the position computed from
+        step counts at trigger time. press is the 1-based position of this
+        press in the sequence.
         """
         phoming = self.printer.lookup_object('homing')
         toolhead = self.printer.lookup_object('toolhead')
@@ -2542,12 +2272,10 @@ class EddyToolCalibration:
         Ported from tools_calibrate's run_probe sample loop, with its
         aggregation replaced: the presses are a fixed four, the first is
         discarded as a warm-up, and the median of the remaining three is the
-        result. A spread above switch_probe_tolerance is an error rather than
-        a retry, because a switch that cannot repeat inside its tolerance has
-        a mechanical cause another press does not fix.
+        result.
 
         Every press retracts, the last one included, so the nozzle is never
-        left standing on the switch while the presses are aggregated.
+        left standing on the switch.
         """
         toolhead = self.printer.lookup_object('toolhead')
         _minimum_z, maximum_z = self._kin_z_limits()
@@ -2617,25 +2345,22 @@ class EddyToolCalibration:
         """Run one directional scan pass and return its mapped samples.
 
         Returns (samples, stats) where samples is a list of
-        (print_time, frequency, x, y). Positions come from the toolhead
-        motion queue at each sample's own timestamp, so acceleration ramps
-        map correctly.
+        (print_time, frequency, x, y). Positions come from the toolhead motion
+        queue at each sample's own timestamp rather than from an assumed
+        constant velocity, so acceleration ramps map correctly.
 
-        Positions are resolved only after the scan move has completed, never
-        inside the sensor callback. motion_report's get_trapq_position reads
-        the trapq through trapq_extract_old, which walks the trapq's history
-        list alone. A move reaches that history list only when the toolhead's
-        flush loop calls trapq_finalize_moves with a free time past the move's
-        end, so while the scan move is still executing it sits in the trapq's
-        pending "moves" list and is invisible to the query. The query then
-        finds the newest already-finalized move instead, clamps its move_time
-        to that move's own duration, and returns its end position: the scan
-        start point. That is a real tuple, not None, so a mid-move query
-        silently yields a stale position for nearly every sample and the
-        pass "finds" its extremum at the scan start. Queried after
-        wait_moves(), the whole move is in history (retained for
-        MOVE_HISTORY_EXPIRE, 30 s in toolhead.py, far longer than a pass),
-        so every timestamp maps correctly and a None result again genuinely
+        They are resolved only after the scan move has completed, never inside
+        the sensor callback. motion_report's get_trapq_position reads the
+        trapq through trapq_extract_old, which walks the trapq's history list
+        alone, and a move reaches that list only when the toolhead's flush
+        loop calls trapq_finalize_moves with a free time past the move's end.
+        A query made while the move is still executing therefore finds the
+        newest already-finalized move, clamps move_time to that move's own
+        duration and returns its end position, the scan start point: a real
+        tuple, not None, so the pass would "find" its extremum at the scan
+        start. Queried after wait_moves() the whole move is in history,
+        retained for MOVE_HISTORY_EXPIRE (30 s in toolhead.py, far longer than
+        a pass), so every timestamp maps correctly and a None result again
         means the timestamp lies outside known motion.
         """
         reactor = self.printer.get_reactor()
@@ -2749,13 +2474,7 @@ class EddyToolCalibration:
         """The fields one completed measurement contributes to a log row.
 
         offsets is None when the measurement had no baseline to be compared
-        against, which leaves the offset columns empty rather than zero. The
-        offsets that are written are differences against the session baseline,
-        so the row carries the session that baseline belongs to: a baseline
-        that moved between two sessions is then visible as such rather than
-        read as a drift of the tool. Both temperature columns come from the
-        measurement: the setpoint it was held at, empty when it heated nothing,
-        and the reading taken while it ran.
+        against, which leaves the offset columns empty rather than zero.
         """
         return {
             'timestamp': log_timestamp(),
@@ -2776,11 +2495,9 @@ class EddyToolCalibration:
     def _append_history(self, gcmd, tool, entry, completed):
         """Append one completed measurement to the tool's drift log.
 
-        The log is what a claim about drift over time would rest on, so a
-        write that fails is reported rather than skipped. It is written last,
-        after the work of the command is finished and reported, so a log that
-        cannot be written never costs a measurement. completed is the sentence
-        naming what is already in place when that happens.
+        Called last, after the work of the command is finished and reported,
+        so a log that cannot be written never costs a measurement. completed
+        is the sentence naming what is already in place when that happens.
         """
         if not self.save_history:
             return
@@ -2803,9 +2520,9 @@ class EddyToolCalibration:
     def _measure_center(self, gcmd, center_x, center_y, length, label, debug):
         """One full multi-direction XY measurement around a center estimate.
 
-        With DEBUG=0 the per-pass diagnostic rows are held back and only
-        flushed if this measurement ends up failing, so a failed pass still
-        reports its diagnostics in full.
+        With DEBUG=0 the per-pass diagnostic rows are held back and flushed
+        only if this measurement fails, so a failed pass still reports its
+        diagnostics in full.
         """
         angles = expand_scan_angles(self.scan_angles, self.pair_scans)
         scan_z = self._machine_z(self.scan_height)
@@ -2873,12 +2590,9 @@ class EddyToolCalibration:
 
         Ported from probe_eddy_current's calibration moves: every step is
         approached from above, samples are bucketed by an explicit per-step
-        time window, and the height stored is the real kinematic position.
-
-        The descent targets are heights above the coil top face and become
-        machine Z as each move is commanded, so no move ever goes below the
-        face. The curve itself holds the machine Z the kinematics reported,
-        not the commanded height.
+        time window, and the height stored is the real kinematic position. The
+        curve holds the machine Z the kinematics reported, not the commanded
+        height.
         """
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
@@ -3064,12 +2778,6 @@ class EddyToolCalibration:
                 self._move(
                     self.switch_x, self.switch_y, travel_z, self.z_speed)
             with self._phase(gcmd, tool, 'measurement', sweeping):
-                # The reading beside the setpoint the tool was held at. It is
-                # recorded as evidence that the tool did reach its setpoint,
-                # and it is the setpoint itself that a later offset run
-                # reproduces: a hotend wanders around its setpoint, so this
-                # reading is one sample of that wander and aiming a later run
-                # at it would chase a value the controller never targets.
                 observed = self._observed_temperature(gcmd, tool)
                 center_x, center_y, agg = self._measure_xy(gcmd, debug)
                 curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
@@ -3079,7 +2787,7 @@ class EddyToolCalibration:
             'anchor_height': anchor_height,
             'anchor_frequency': anchor_freq,
             'setpoint_temperature': self.calibration_temp,
-            'freq_conv': self.sensor.freq_conv,
+            'freq_conv': self._sensor_freq_conv(),
             'drive_current': self.sensor.dccal.get_drive_current(),
             'observed_temperature': observed,
             'trigger_z': trigger_z,
@@ -3094,8 +2802,7 @@ class EddyToolCalibration:
         try:
             self._write_state(gcmd)
         except Exception:
-            # An anchor that did not persist would be gone at the next
-            # restart, so the in-memory state goes back to what it was.
+            # An anchor that did not persist would be gone at the next restart.
             if previous is None:
                 del self.anchors[tool]
             else:
@@ -3103,8 +2810,7 @@ class EddyToolCalibration:
             raise
         # The tool's session measurements were taken against the reference this
         # anchor just replaced, so they are dropped rather than compared across
-        # two references. Re-anchoring the baseline tool drops the baseline too,
-        # which makes the next offset run measure T0 again.
+        # two references.
         self.results.pop(tool, None)
         if self.baseline is not None and self.baseline['tool'] == tool:
             self.baseline = None
@@ -3137,8 +2843,6 @@ class EddyToolCalibration:
         # The descent of an anchor run defines the anchor rather than being
         # evaluated against one, so it has no crossing to log; what the run
         # contributes to the drift record is the trigger plane it pressed.
-        # The log is written last, once the anchor is stored and reported, so
-        # a log that cannot be written never costs the anchor.
         self._append_history(
             gcmd, tool,
             self._log_entry(
@@ -3176,7 +2880,7 @@ class EddyToolCalibration:
                 % (BASELINE_TOOL,))
         if self.calibrate_z:
             # Checked before any motion, so a machine that is only half
-            # anchored fails in a second rather than partway through the run.
+            # anchored fails before it moves.
             needed = list(tools)
             if BASELINE_TOOL not in tools:
                 needed.append(self.baseline['tool'])
@@ -3226,15 +2930,12 @@ class EddyToolCalibration:
                 offsets = self._offsets(result, self.calibrate_z)
             if offsets is not None:
                 # The baseline tool's offsets are zero by definition, and
-                # applying zeros would overwrite whatever the owner set for it,
-                # so only the other tools reach the apply lines.
+                # applying zeros would overwrite whatever the owner set for it.
                 with self._phase(gcmd, tool, 'apply', sweeping):
                     self._apply_offsets(gcmd, tool, offsets)
-            # The drift log is written once the tool's work is finished, so a
-            # log that cannot be written never discards a measurement that was
-            # already applied. An apply that fails leaves no log row, which is
-            # the deliberate cost: a row would claim an offset the machine
-            # never received.
+            # An apply that fails leaves no log row, which is the deliberate
+            # cost of this order: a row would claim an offset the machine never
+            # received.
             self._append_history(
                 gcmd, tool,
                 self._log_entry('EDDY_CALIBRATE_OFFSET', result, offsets),
@@ -3245,12 +2946,8 @@ class EddyToolCalibration:
     def _preheat_anchored(self, gcmd, tools):
         """Heat every listed tool to the setpoint its anchor was taken at.
 
-        An offset run reproduces the thermal state each anchor was taken in by
-        heating to the same setpoint, so the descent it compares against that
-        anchor was measured with the nozzle held the same way. A tool whose
-        anchor carries another setpoint than calibration_temp is heated to its
-        own and reported here, rather than to a setpoint its anchor says
-        nothing about.
+        The anchor frequency was measured in that thermal state, and only a
+        measurement taken in the same state can be compared against it.
         """
         targets = []
         for tool in tools:
@@ -3265,20 +2962,31 @@ class EddyToolCalibration:
             'the setpoint EDDY_CALIBRATE_Z recorded for that tool')
 
     def _anchored_setpoint(self, gcmd, tool):
-        """The setpoint an offset run holds one tool at, or None for no heating.
-
-        With calibrate_z False nothing is heated at all, so the measurement
-        carries no setpoint rather than a number nothing was held to.
+        """The setpoint an offset run holds one tool at, None with
+        calibrate_z False, where nothing is heated at all.
         """
         if not self.calibrate_z:
             return None
         return self._anchor(gcmd, tool)['setpoint_temperature']
 
+    def _sensor_freq_conv(self):
+        """The driver's count to hertz conversion.
+
+        Kalico exposes freq_conv on the LDC1612 object only from the build
+        that added the frequency config option (ldc1612.py:103-109). Older
+        builds hold the clock at DEFAULT_LDC1612_FREQ with a divider of 2 and
+        expose nothing, so their conversion is fixed and cannot move.
+        """
+        conv = getattr(self.sensor, 'freq_conv', None)
+        if conv is None:
+            return float(DEFAULT_SENSOR_CLOCK * 2) / (1 << 28)
+        return conv
+
     def _anchor(self, gcmd, tool):
         """One tool's stored anchor, refused when the sensor settings moved."""
         anchor = self.anchors[tool]
         mismatch = anchor_sensor_mismatch(
-            tool, anchor, self.sensor.freq_conv,
+            tool, anchor, self._sensor_freq_conv(),
             self.sensor.dccal.get_drive_current())
         if mismatch is not None:
             raise gcmd.error(mismatch)
@@ -3300,13 +3008,10 @@ class EddyToolCalibration:
     def _measurement_observed_temperature(self, gcmd, tool, include_z):
         """The nozzle reading one measurement is recorded against.
 
-        Every measurement carries it, because the log row is read against the
-        thermal state the run was in whether or not a descent evaluated an
-        anchor. A descent has to have it, so a heater that cannot be named
-        there is the run's error. An XY only run needs no heater at all, so
-        one that cannot be named leaves the field unmeasured rather than
-        costing a measurement that never depended on it, and the reason is
-        logged so it stays visible in klippy.log.
+        A descent has to have it, so a heater that cannot be named there is
+        the run's error. An XY only run needs no heater at all, so one that
+        cannot be named leaves the field unmeasured rather than costing a
+        measurement that never depended on it.
         """
         if include_z:
             return self._observed_temperature(gcmd, tool)
@@ -3323,8 +3028,7 @@ class EddyToolCalibration:
         """Measure one tool, recorded against the setpoint it was held at.
 
         setpoint is what the caller heated this tool to before the measurement
-        started, and None when it heated nothing, so the measurement carries
-        the thermal state that was asked for as well as the one it read.
+        started, and None when it heated nothing.
         """
         center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
         agg = self._new_aggregate()
@@ -3332,9 +3036,9 @@ class EddyToolCalibration:
         curve = None
         z_crossing = None
         z_trigger = None
-        # Read before any descent and reported beside the anchor's own
-        # temperatures, so a curve measured in the wrong thermal state is
-        # visible in the readout rather than only in the offset it moved.
+        # Read before any descent, so a curve measured in the wrong thermal
+        # state is visible in the readout rather than only in the offset it
+        # moved.
         observed = self._measurement_observed_temperature(
             gcmd, tool, include_z)
         if include_z:
@@ -3350,8 +3054,8 @@ class EddyToolCalibration:
             'setpoint_temperature': setpoint,
             'observed_temperature': observed,
             'agg': agg,
-            # Both stamped by the caller, which publishes the result only once
-            # the session baseline it belongs to is in place.
+            # Stamped by the caller, which publishes the result only once the
+            # session baseline it belongs to is in place.
             'session_id': None,
             'measured_time': None,
         }
@@ -3360,9 +3064,7 @@ class EddyToolCalibration:
     def _trigger_plane(self, gcmd, tool, curve):
         """Machine Z of the switch trigger plane this descent reconstructs.
 
-        Returns (trigger_z, crossing_z). This is the single place a measured
-        curve becomes a comparable height, so the printed rows, the reported
-        offsets and the status readout all read the same number.
+        Returns (trigger_z, crossing_z).
         """
         anchor = self._anchor(gcmd, tool)
         try:
@@ -3376,7 +3078,6 @@ class EddyToolCalibration:
                 % (tool, e, tool))
 
     def _z_curve_rows(self, curve):
-        """Labeled rows describing the measured descent curve itself."""
         return [
             "z curve steps: %d" % (len(curve),),
             "z curve range (machine Z): %.4f to %.4f mm"
@@ -3410,10 +3111,9 @@ class EddyToolCalibration:
     def _offsets(self, result, include_z):
         """Offsets of a measured tool against the session baseline.
 
-        The Z entry is None whenever no descent ran, because there is then no
-        measured Z to report. include_z says whether one did: it is
-        calibrate_z for a calibration run, and a repeatability study may turn
-        the descent off on top of that.
+        The Z entry is None whenever no descent ran. include_z says whether
+        one did: it is calibrate_z for a calibration run, and a repeatability
+        study may turn the descent off on top of that.
         """
         base = self.baseline
         offsets = {
@@ -3471,9 +3171,6 @@ class EddyToolCalibration:
             # Checked before any motion: without an anchor the descent has
             # nothing to be evaluated against.
             self._require_anchors(gcmd, [tool])
-        # The one setpoint the study holds the tool at, resolved once: the plan
-        # names it, the preheat waits for it, and every measurement is recorded
-        # against it.
         setpoint = self._heating_setpoint(gcmd, heating, tool)
         gcmd.respond_info("\n".join(study_plan_rows(
             tool, runs, cycles, include_z, state, docking_tool, heating,
@@ -3486,13 +3183,11 @@ class EddyToolCalibration:
         by_cycle = dict((axis, []) for axis in axes)
         with self._retreating():
             # The first cycle measures whatever is mounted, so the tool is
-            # mounted before it starts. Every cycle mounts it again itself, as
-            # the second half of the docking it exercises.
+            # mounted before it starts.
             self._mount_tool(gcmd, tool)
         for cycle in range(1, cycles + 1):
             # Each cycle retreats on its own, so it ends at the height every
-            # toolchange starts from and the docking of the next cycle begins
-            # where a calibration run's would.
+            # toolchange starts from.
             with self._retreating():
                 measured = self._run_study_cycle(
                     gcmd, tool, cycle, cycles, runs, include_z, setpoint,
@@ -3512,12 +3207,7 @@ class EddyToolCalibration:
             log['path'], axes, by_cycle)
 
     def _heating_setpoint(self, gcmd, heating, tool):
-        """The setpoint a study heats the tool to, or None when it does not.
-
-        The tool's anchor is the only place a study takes a setpoint from, so
-        a state that heats nothing reports none rather than a number the run
-        does not use.
-        """
+        """The setpoint a study heats the tool to, or None when it does not."""
         if heating == 'to_anchor_temperature':
             return self._anchor(gcmd, tool)['setpoint_temperature']
         if heating in ('no_anchor', 'z_calibration_off'):
@@ -3527,11 +3217,7 @@ class EddyToolCalibration:
             % (heating, HEATING_STATES))
 
     def _study_preheat(self, gcmd, heating, tool):
-        """Heat the measured tool to its anchor setpoint, where it has one.
-
-        A tool with no anchor and a machine with Z calibration off are both
-        measured as they are: there is no recorded setpoint to reproduce.
-        """
+        """Heat the measured tool to its anchor setpoint, where it has one."""
         if heating == 'to_anchor_temperature':
             self._preheat_anchored(gcmd, [tool])
             return
@@ -3564,8 +3250,7 @@ class EddyToolCalibration:
         """A required repetition count of a study, or the error naming it.
 
         The bound is checked here rather than handed to get_int, so a count
-        below it and a missing count both reach the message that says what the
-        two counts mean.
+        below it and a missing count both reach the same message.
         """
         value = gcmd.get_int(name, None)
         if value is None or value < minimum:
@@ -3578,13 +3263,6 @@ class EddyToolCalibration:
         return value
 
     def _study_include_z(self, gcmd):
-        """Whether a study runs the Z descent.
-
-        The descent is the slow part of a measurement and a study takes many,
-        so SKIP_Z defaults to 1 and an XY study runs without it. SKIP_Z=0 on a
-        machine that never descends is refused rather than ignored, so a study
-        that was asked for Z data does not quietly return none.
-        """
         skip_z = gcmd.get_int('SKIP_Z', None, minval=0, maxval=1)
         if skip_z == 0 and not self.calibrate_z:
             raise gcmd.error(
@@ -3597,11 +3275,6 @@ class EddyToolCalibration:
         return self.calibrate_z and not skip_z
 
     def _study_csv_path(self, gcmd, tool):
-        """The file this study writes its measurements to.
-
-        The index comes from what is already in the directory, so a study
-        cannot overwrite the data of one that ran before it.
-        """
         directory = os.path.join(self._config_dir(), self.log_dir)
         try:
             os.makedirs(directory, exist_ok=True)
@@ -3617,10 +3290,9 @@ class EddyToolCalibration:
     def _study_step(self, gcmd, phase, cycle, run, log):
         """Name the cycle and the run a study failed in.
 
-        run is None for the toolchange that opens a cycle, which belongs to
-        the cycle rather than to any one measurement. log carries the study
-        file and how many rows have reached it, so the message points at that
-        file only once it holds something.
+        run is None for the toolchange that opens a cycle, which belongs to the
+        cycle rather than to any one measurement. log carries the study file
+        and how many rows have reached it.
         """
         if phase not in TOOL_PHASES:
             raise gcmd.error(
@@ -3658,12 +3330,11 @@ class EddyToolCalibration:
         """One cycle: dock and remount the tool, then measure it runs times.
 
         Returns the measured values of the cycle, keyed by axis label. The
-        session baseline is left alone, because a study repeats one
-        measurement rather than replacing what a calibration run established.
+        session baseline is left alone: a study repeats one measurement rather
+        than replacing what a calibration run established.
         """
-        # The axis to measurement field mapping is resolved once, before the
-        # cycle moves, so an axis this build cannot read is refused rather
-        # than found partway through a run.
+        # Resolved before the cycle moves, so an axis this build cannot read
+        # is refused rather than found partway through a run.
         try:
             fields = [(axis, study_axis_field(axis)) for axis in axes]
         except ValueError as e:
@@ -3705,7 +3376,6 @@ class EddyToolCalibration:
 
     def _report_study(self, gcmd, tool, runs, cycles, include_z, state,
                       docking_tool, path, axes, by_cycle):
-        """The closing summary of a study, as labeled raw-value rows."""
         rows = [
             "repeatability summary:",
             "tool: T%d" % (tool,),
@@ -3730,9 +3400,8 @@ class EddyToolCalibration:
     def get_status(self, eventtime):
         """Anchors and this session's measurements, for macros to read.
 
-        This is a view of the same numbers the printed rows carry, rebuilt on
-        every call. Tool numbers are decimal strings so the dicts survive JSON
-        transport unchanged.
+        Tool numbers are decimal strings so the dicts survive JSON transport
+        unchanged.
         """
         anchors = {}
         for tool, record in self.anchors.items():
@@ -3761,8 +3430,6 @@ class EddyToolCalibration:
             }
         return {
             'calibrate_z': self.calibrate_z,
-            # None when tool_count is not configured, which is the state a
-            # machine calibrated one tool at a time stays in.
             'tool_count': self.tool_count,
             'baseline_tool': (
                 None if self.baseline is None else self.baseline['tool']),
