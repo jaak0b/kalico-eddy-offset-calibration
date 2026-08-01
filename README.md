@@ -105,7 +105,9 @@ the session. Prints the measured center next to the configured `coil_x` and
 
 `EDDY_CALIBRATE_Z [T=<tool>] [DEBUG=1]`: One-time Z reference setup for the tool
 named by `T=`, or for every tool in turn when `T=` is left out. Presses the
-contact switch, measures the tool's descent curve, and binds the two together.
+contact switch (a sexbolt or sexball style Z endstop, or any rigidly mounted
+microswitch the nozzle can press straight down, placed within reach of every
+tool near the coil), measures the tool's descent curve, and binds the two together.
 Requires `calibrate_z: True` and the switch options. Run it after changing a
 nozzle or a hotend, or after moving the coil or the switch. References are
 written to `EddyToolCalibration/calibration_state.json` next to the printer
@@ -331,7 +333,11 @@ Every option and its default. Options shown commented out may be left out.
 #   machine X and Y the nozzle presses the switch at, and
 #   switch_probe_z_start is the machine Z each press starts from: set it
 #   just above the switch. All three are machine coordinates, not heights
-#   above the coil face.
+#   above the coil face. The switch itself is a plain normally-open endstop
+#   switch; sexbolt and sexball style Z endstops work well, and the author
+#   uses a sexbolt. switch_pin may share the pin with an existing
+#   [tools_calibrate] section, since both sides mark the pin multi-use.
+#   Repeatability of a decent switch is a few microns.
 #switch_probe_speed: 5.0
 #   Speed, in mm/s, of a downward press onto the switch.
 #switch_probe_lift_speed:
