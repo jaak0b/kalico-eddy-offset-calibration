@@ -31,7 +31,7 @@ work. An eddy-current coil sidesteps both.
   a press on a contact switch next to the coil. The switch's own height never has
   to be known, because it cancels between tools.
 - The fitting math is ported from chengxg's `tool_eddy_calibration` and Kalico's
-  `probe_eddy_current`. `docs/design.md` has the details.
+  `probe_eddy_current`.
 
 ## Example output
 
@@ -444,12 +444,7 @@ primary_branch: main
 is_system_service: False
 ```
 
-## Documentation
-
-`docs/design.md` holds the internal design record and validation plan,
-including the config schema, the Z reference anchor math and the state file
-schema. For wiring and mounting, follow your sensor board's and mainboard's
-own manuals.
+For wiring and mounting, follow your sensor board's and mainboard's own manuals.
 
 ## License
 
