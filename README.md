@@ -75,12 +75,15 @@ See `docs/design.md` for the full schema description and rationale.
 
 - `EDDY_QUERY`: print the current eddy sensor frequency reading, for a
   wiring sanity check.
-- `EDDY_LOCATE`: coarse raster scan over the configured coil position to
-  find and store the refined coil center for the session.
-- `EDDY_CALIBRATE_TOOL [T=<n>]`: run the full XY and Z measurement for the
-  mounted tool and print its offsets relative to the T0 baseline.
-- `EDDY_SET_BASELINE`: declare the currently mounted tool as the T0
-  baseline for this session.
+- `EDDY_LOCATE [DEBUG=1]`: coarse raster scan over the configured coil
+  position to find and store the refined coil center for the session.
+  `DEBUG=1` also prints each scan pass's diagnostic rows.
+- `EDDY_CALIBRATE_TOOL [T=<n>] [DEBUG=1]`: run the full XY and Z measurement
+  for the mounted tool and print its offsets relative to the T0 baseline.
+  `DEBUG=1` also prints each scan pass's diagnostic rows.
+- `EDDY_SET_BASELINE [DEBUG=1]`: declare the currently mounted tool as the
+  T0 baseline for this session. `DEBUG=1` also prints each scan pass's
+  diagnostic rows.
 - `EDDY_SET_Z_REF [T=<n>] Z=<machine Z>`: bind the current tool's measured
   frequency curve to a real Z obtained by another method. `Z=` is a machine
   coordinate, the same frame the descent curve is reported in.

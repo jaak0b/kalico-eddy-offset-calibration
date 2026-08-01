@@ -786,6 +786,48 @@ class EddyToolCalibration:
             % (stats['dropped_outside_move'],),
         ]
 
+    def _debug_flag(self, gcmd):
+        return gcmd.get_int('DEBUG', 0, minval=0, maxval=1)
+
+    def _new_aggregate(self):
+        """Zeroed accumulator for the summary block's sample counters."""
+        return {
+            'samples_used': 0,
+            'dropped_low_freq': 0,
+            'dropped_no_position': 0,
+            'dropped_outside_move': 0,
+        }
+
+    def _add_to_aggregate(self, agg, stats, kept_count):
+        agg['samples_used'] += kept_count
+        agg['dropped_low_freq'] += stats['dropped_low_freq']
+        agg['dropped_no_position'] += stats.get('dropped_no_position', 0)
+        agg['dropped_outside_move'] += stats['dropped_outside_move']
+
+    def _merge_aggregate(self, agg, other):
+        for key in agg:
+            agg[key] += other[key]
+
+    def _aggregate_rows(self, agg):
+        """Labeled summary rows: total samples used, and drops if any.
+
+        The drop counters stay hidden when they are all zero, so quiet mode
+        does not grow rows over nothing, but any nonzero drop across the
+        whole measurement stays visible even with DEBUG=0.
+        """
+        rows = ["samples used: %d" % (agg['samples_used'],)]
+        if (agg['dropped_low_freq'] or agg['dropped_no_position']
+                or agg['dropped_outside_move']):
+            rows.append(
+                "dropped below freq_min: %d" % (agg['dropped_low_freq'],))
+            rows.append(
+                "dropped without a position: %d"
+                % (agg['dropped_no_position'],))
+            rows.append(
+                "dropped outside the move: %d"
+                % (agg['dropped_outside_move'],))
+        return rows
+
     def _no_sample_cause(self, stats):
         """Name the likely cause when a collection yielded nothing usable.
 
@@ -952,7 +994,7 @@ class EddyToolCalibration:
         return samples, self._close_collection(stats)
 
     def _scan_pass(self, gcmd, center_x, center_y, angle_deg, length, scan_z,
-                   label):
+                   label, debug):
         start_x, start_y, end_x, end_y = scan_endpoints(
             center_x, center_y, angle_deg, length)
         samples, stats = self._collect_scan(
@@ -969,7 +1011,7 @@ class EddyToolCalibration:
                 "samples_min of %d. Lower scan_speed or raise scan_length."
                 % (label, len(samples), self.samples_min))
         if self.save_csv:
-            self._save_csv(gcmd, label, samples)
+            self._save_csv(gcmd, label, samples, debug)
         xs = [s[2] for s in samples]
         ys = [s[3] for s in samples]
         freqs = [s[1] for s in samples]
@@ -987,7 +1029,7 @@ class EddyToolCalibration:
                 "metal sits near the coil." % (label, e))
         return result, stats
 
-    def _save_csv(self, gcmd, label, samples):
+    def _save_csv(self, gcmd, label, samples, debug):
         config_file = self.printer.get_start_args()['config_file']
         config_dir = os.path.dirname(os.path.abspath(config_file))
         directory = os.path.join(config_dir, self.csv_dir)
@@ -1004,19 +1046,33 @@ class EddyToolCalibration:
                 "Could not write the scan data to %s (directory %s): %s. "
                 "Set save_csv to False or fix the directory permissions."
                 % (path, directory, e))
-        gcmd.respond_info("scan data: %s" % (path,))
+        if debug:
+            gcmd.respond_info("scan data: %s" % (path,))
 
     # -- measurement ------------------------------------------------------
 
-    def _measure_center(self, gcmd, center_x, center_y, length, label):
-        """One full multi-direction XY measurement around a center estimate."""
+    def _measure_center(self, gcmd, center_x, center_y, length, label, debug):
+        """One full multi-direction XY measurement around a center estimate.
+
+        With DEBUG=0 the per-pass diagnostic rows are held back and only
+        flushed if this measurement ends up failing, so a failed pass still
+        reports its diagnostics in full.
+        """
         angles = expand_scan_angles(self.scan_angles, self.pair_scans)
         scan_z = self._machine_z(self.scan_height)
         peaks = []
+        agg = self._new_aggregate()
+        pending_rows = []
         for angle in angles:
-            result, stats = self._scan_pass(
-                gcmd, center_x, center_y, angle, length, scan_z,
-                "%s %.0f deg" % (label, angle))
+            try:
+                result, stats = self._scan_pass(
+                    gcmd, center_x, center_y, angle, length, scan_z,
+                    "%s %.0f deg" % (label, angle), debug)
+            except Exception:
+                if not debug:
+                    for block in pending_rows:
+                        gcmd.respond_info(block)
+                raise
             rows = [
                 "pass angle: %.1f deg" % (angle,),
                 "response type: %s" % (result['peak_type'],),
@@ -1027,31 +1083,44 @@ class EddyToolCalibration:
                 "peak y: %.4f" % (result['peak_y'],),
             ]
             rows.extend(self._sample_drop_rows(stats))
-            gcmd.respond_info("\n".join(rows))
+            if debug:
+                gcmd.respond_info("\n".join(rows))
+            else:
+                pending_rows.append("\n".join(rows))
+            self._add_to_aggregate(agg, stats, result['sample_count'])
             peaks.append((angle, result['peak_x'], result['peak_y']))
         if self.pair_scans:
             projections = average_paired_projections(peaks)
         else:
             projections = project_peaks(peaks)
         try:
-            return solve_center_lsq(projections)
+            center_x, center_y = solve_center_lsq(projections)
         except ValueError as e:
+            if not debug:
+                for block in pending_rows:
+                    gcmd.respond_info(block)
             raise gcmd.error(
                 "The scan directions did not reconstruct a center: %s. Set "
                 "scan_angles to two directions at least 30 degrees apart."
                 % (e,))
+        return center_x, center_y, agg
 
-    def _measure_xy(self, gcmd):
+    def _measure_xy(self, gcmd, debug):
         center_x, center_y = self.center if self.center else (
             self.coil_x, self.coil_y)
-        first_x, first_y = self._measure_center(
-            gcmd, center_x, center_y, self.scan_length, "coarse")
-        gcmd.respond_info(
-            "first pass center x: %.4f\nfirst pass center y: %.4f"
-            % (first_x, first_y))
+        first_x, first_y, agg1 = self._measure_center(
+            gcmd, center_x, center_y, self.scan_length, "coarse", debug)
+        if debug:
+            gcmd.respond_info(
+                "first pass center x: %.4f\nfirst pass center y: %.4f"
+                % (first_x, first_y))
         # One iteration re-centered on the first result.
-        return self._measure_center(
-            gcmd, first_x, first_y, self.scan_length, "refine")
+        refined_x, refined_y, agg2 = self._measure_center(
+            gcmd, first_x, first_y, self.scan_length, "refine", debug)
+        agg = self._new_aggregate()
+        self._merge_aggregate(agg, agg1)
+        self._merge_aggregate(agg, agg2)
+        return refined_x, refined_y, agg
 
     def _measure_z_curve(self, gcmd, center_x, center_y):
         """Stepwise descent over the coil center, returning the Z curve.
@@ -1137,12 +1206,19 @@ class EddyToolCalibration:
         points = [(z, sum(freqs) / len(freqs))
                   for z, freqs in buckets.items()]
         try:
-            return build_z_curve(points)
+            curve = build_z_curve(points)
         except ValueError as e:
             raise gcmd.error(
                 "The Z descent did not produce a usable curve: %s. Lower "
                 "z_start so the descent stays inside the sensor's range."
                 % (e,))
+        agg = self._new_aggregate()
+        agg['samples_used'] = (
+            stats['raw_count'] - stats['dropped_low_freq']
+            - stats['dropped_outside_move'])
+        agg['dropped_low_freq'] = stats['dropped_low_freq']
+        agg['dropped_outside_move'] = stats['dropped_outside_move']
+        return curve, agg
 
     # -- commands ---------------------------------------------------------
 
@@ -1171,48 +1247,63 @@ class EddyToolCalibration:
 
     cmd_EDDY_LOCATE_help = (
         "Coarse raster scan over the configured coil position to find and "
-        "store the refined coil center for this session.")
+        "store the refined coil center for this session. Add DEBUG=1 to "
+        "print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_LOCATE(self, gcmd):
         self._ensure_homed(gcmd)
-        coarse_x, coarse_y = self._measure_center(
+        debug = self._debug_flag(gcmd)
+        coarse_x, coarse_y, agg1 = self._measure_center(
             gcmd, self.coil_x, self.coil_y, self.locate_scan_length,
-            "locate coarse")
-        gcmd.respond_info(
-            "coarse center x: %.4f\ncoarse center y: %.4f"
-            % (coarse_x, coarse_y))
-        refined_x, refined_y = self._measure_center(
-            gcmd, coarse_x, coarse_y, self.scan_length, "locate refine")
+            "locate coarse", debug)
+        if debug:
+            gcmd.respond_info(
+                "coarse center x: %.4f\ncoarse center y: %.4f"
+                % (coarse_x, coarse_y))
+        refined_x, refined_y, agg2 = self._measure_center(
+            gcmd, coarse_x, coarse_y, self.scan_length, "locate refine",
+            debug)
         self.center = (refined_x, refined_y)
-        gcmd.respond_info(
-            "coil center x: %.4f\n"
-            "coil center y: %.4f\n"
-            "config coil_x: %.4f\n"
-            "config coil_y: %.4f"
-            % (refined_x, refined_y, self.coil_x, self.coil_y))
+        agg = self._new_aggregate()
+        self._merge_aggregate(agg, agg1)
+        self._merge_aggregate(agg, agg2)
+        rows = [
+            "coil center x: %.4f" % (refined_x,),
+            "coil center y: %.4f" % (refined_y,),
+            "config coil_x: %.4f" % (self.coil_x,),
+            "config coil_y: %.4f" % (self.coil_y,),
+        ]
+        rows.extend(self._aggregate_rows(agg))
+        gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_CALIBRATE_TOOL_help = (
         "Run the full XY and Z eddy-current measurement for the mounted "
-        "tool and print its offsets relative to the T0 baseline.")
+        "tool and print its offsets relative to the T0 baseline. Add "
+        "DEBUG=1 to print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_CALIBRATE_TOOL(self, gcmd):
         self._ensure_homed(gcmd)
         tool = self._tool_index(gcmd)
-        result = self._run_tool_measurement(gcmd, tool)
+        debug = self._debug_flag(gcmd)
+        result = self._run_tool_measurement(gcmd, tool, debug)
         self._report_tool_result(gcmd, tool, result)
 
-    def _run_tool_measurement(self, gcmd, tool):
-        center_x, center_y = self._measure_xy(gcmd)
-        curve = self._measure_z_curve(gcmd, center_x, center_y)
+    def _run_tool_measurement(self, gcmd, tool, debug):
+        center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
+        curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
+        agg = self._new_aggregate()
+        self._merge_aggregate(agg, agg_xy)
+        self._merge_aggregate(agg, agg_z)
         result = {
             'x': center_x,
             'y': center_y,
             'z_curve': curve,
+            'agg': agg,
         }
         self.results[tool] = result
         return result
 
-    def _report_tool_result(self, gcmd, tool, result):
+    def _report_tool_result(self, gcmd, tool, result, is_baseline_run=False):
         curve = result['z_curve']
         rows = [
             "tool: T%d" % (tool,),
@@ -1253,26 +1344,30 @@ class EddyToolCalibration:
             else:
                 rows.append(
                     "offset z: not available, both tools need a Z reference")
+        elif is_baseline_run:
+            rows.append("offsets: baseline tool, zero by definition")
         else:
             rows.append(
                 "offsets: not available, run EDDY_SET_BASELINE on the "
                 "reference tool")
+        rows.extend(self._aggregate_rows(result['agg']))
         gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_SET_BASELINE_help = (
         "Declare the currently mounted tool as the T0 baseline for this "
-        "session.")
+        "session. Add DEBUG=1 to print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_SET_BASELINE(self, gcmd):
         self._ensure_homed(gcmd)
         tool = self._tool_index(gcmd)
+        debug = self._debug_flag(gcmd)
         # A baseline is always a fresh measurement, so the baseline and the
         # tools compared against it come from the same machinery.
-        result = self._run_tool_measurement(gcmd, tool)
+        result = self._run_tool_measurement(gcmd, tool, debug)
         # _report_tool_result owns the reference-frequency crossing, so the
         # baseline stores the value that readout produced instead of
         # evaluating the curve a second time.
-        self._report_tool_result(gcmd, tool, result)
+        self._report_tool_result(gcmd, tool, result, is_baseline_run=True)
         self.baseline = {
             'tool': tool,
             'x': result['x'],

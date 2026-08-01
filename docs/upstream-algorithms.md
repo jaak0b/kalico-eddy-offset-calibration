@@ -164,7 +164,7 @@ Crab board is 24 MHz so takes the `sensor_div=1` branch (correct, but the select
 
 **Init** (`_start_measurements`, 211-241): `REG_RCOUNT0 = clock_freq/(16*data_rate)`; `REG_SETTLECOUNT0 = SETTLETIME*clock_freq/16`; device ID check against `LDC1612_MANUF_ID=0x5449` / `LDC1612_DEV_ID=0x3055`, raises command_error naming wiring/faulty chip.
 
-## E. Constants: principled vs hand-tuned (rule 1 scrutiny for our port)
+## E. Constants: principled vs hand-tuned (scrutiny for our port)
 
 Principled:
 - `freq_conv = clock_freq*sensor_div/2^28`: register bit-width definition.

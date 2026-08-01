@@ -91,9 +91,11 @@ reference it; decide during implementation, wrapper preferred.)
 ## Commands
 
 - `EDDY_QUERY`: print current frequency, sanity check wiring.
-- `EDDY_LOCATE`: coarse raster over the configured coil position, finds and
-  stores the refined coil center for the session; prints it.
-- `EDDY_CALIBRATE_TOOL [T=<n>]`: full XY(+Z) measurement for the mounted tool:
+- `EDDY_LOCATE [DEBUG=1]`: coarse raster over the configured coil position,
+  finds and stores the refined coil center for the session; prints it.
+  `DEBUG=1` also prints each scan pass's diagnostic rows.
+- `EDDY_CALIBRATE_TOOL [T=<n>] [DEBUG=1]`: full XY(+Z) measurement for the
+  mounted tool. `DEBUG=1` also prints each scan pass's diagnostic rows.
   1. XY: for each configured angle, scan through the current center estimate,
      forward and reverse; parabolic fit of the response extremum per pass;
      average pairs; least-squares reconstruct the center from the two
@@ -106,8 +108,9 @@ reference it; decide during implementation, wrapper preferred.)
      curve fit only.
   3. Print labeled results: raw center, and offsets relative to the stored T0
      baseline if one exists in this session.
-- `EDDY_SET_BASELINE`: declare the currently mounted tool as T0 baseline
-  (stores its center + Z curve for the session).
+- `EDDY_SET_BASELINE [DEBUG=1]`: declare the currently mounted tool as T0
+  baseline (stores its center + Z curve for the session). `DEBUG=1` also
+  prints each scan pass's diagnostic rows.
 - `EDDY_SET_Z_REF [T=<n>] Z=<machine Z>`: one-time per-tool anchor: after the
   owner measures true Z by their existing method (paper/pin), this binds the
   measured frequency curve to reality; stored in memory and printed so the owner
