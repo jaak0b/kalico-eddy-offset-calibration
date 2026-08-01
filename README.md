@@ -16,6 +16,10 @@ Z.
 - **Labeled offset rows** on the console, applied by your own macro lines if you
   write them.
 
+[![A calibration run on the author's printer](https://img.youtube.com/vi/lr-eFiMrt0E/hqdefault.jpg)](https://www.youtube.com/watch?v=lr-eFiMrt0E)
+
+A calibration run on the author's printer.
+
 ## Why this exists
 
 Contact-pin offset calibration wants a spotless nozzle, so on a toolchanger you
