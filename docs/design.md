@@ -197,6 +197,10 @@ in whatever state the printer is in.
   offset. `EDDY_CALIBRATE_OFFSET` refuses to run, before any motion, for a
   tool that has no stored reference.
 
+The switch is any rigidly mounted normally-open endstop switch the nozzle can
+press straight down, a sexbolt or sexball style Z endstop among them, placed
+near the coil and within reach of every tool.
+
 The switch trigger point is one fixed physical plane, so the difference
 between two tools' trigger heights is exactly their Z nozzle offset,
 whatever height the switch happens to sit at: the switch's own height is a

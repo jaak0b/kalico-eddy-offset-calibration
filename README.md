@@ -74,102 +74,77 @@ prints its full diagnostics, with or without `DEBUG=1`.
 
 ## Commands
 
+`EDDY_CALIBRATE_Z` and `EDDY_CALIBRATE_OFFSET` take the same tool selection.
+`T=` takes one tool number or a comma separated list with no spaces: `T=0`,
+`T=0,1,2`. Leaving `T=` out runs every tool of the fleet and needs `tool_count`
+and `toolchange_gcode`; a list of more than one tool needs `toolchange_gcode`
+as well.
+
 #### EDDY_QUERY
 
 `EDDY_QUERY`: Print the current eddy sensor frequency reading, for a wiring
-sanity check. Prints sample count, mean, minimum, maximum and standard
+sanity check. Prints the sample count, mean, minimum, maximum and standard
 deviation of the frequency over `query_time` seconds, plus the counts of any
 discarded samples. Performs no motion.
 
 #### EDDY_LOCATE
 
-`EDDY_LOCATE [DEBUG=1]`: Run a coarse scan over the configured coil position
-followed by a refining scan, and store the resulting coil center for the rest of
-the session. Prints the measured center next to the configured `coil_x` and
-`coil_y`. `DEBUG=1` prints each scan pass's diagnostic rows.
-
-Both calibration commands take the same tool selection: `T=` takes one tool
-number or a comma separated list with no spaces: `T=0`, `T=0,1,2`. Leaving `T=`
-out runs every tool of the fleet, which needs `tool_count` and
-`toolchange_gcode`. A list of more than one tool needs `toolchange_gcode` too,
-because it mounts each tool it measures.
+`EDDY_LOCATE [DEBUG=1]`: Scan over the configured coil position and store the
+refined coil center for the rest of the session. Prints the measured center
+next to the configured `coil_x` and `coil_y`. `DEBUG=1` prints each scan pass's
+diagnostic rows.
 
 #### EDDY_CALIBRATE_Z
 
-`EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: One-time Z reference setup for the
-tools named by `T=`, or for every tool in turn when `T=` is left out. Heats
-each tool to `calibration_temp`, presses the contact switch (a sexbolt or
-sexball style Z endstop, or any rigidly mounted microswitch the nozzle can
-press straight down, placed within reach of every tool near the coil),
-measures the tool's descent curve, and binds the two together. Requires
-`calibrate_z: True` and the switch options. Run it after changing a nozzle or a
-hotend, after moving the coil or the switch, or after changing
-`calibration_temp`. References are written to
-`EddyToolCalibration/calibration_state.json` next to the printer config as soon
-as they are measured; there is no `SAVE_CONFIG` step. Each one records two
-temperatures alongside the anchor height and frequency: the setpoint it was
-heated to, which is `calibration_temp` and is what every later run of that tool
-is heated to, and the reading observed while it was measured, which is
-diagnostic only. It also records the two sensor settings that frequency is
-only meaningful under, the drive current and the count-to-hertz conversion the
-driver derives from `frequency`. A later run compares both against the driver
-and refuses a reference whose settings have changed since, naming the tool,
-both values and the command that measures it again; running on it instead
-would report a Z offset wrong by an unknown amount. `DEBUG=1` prints each press
-trigger height and each scan pass's diagnostic rows.
+`EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: Measure the one-time Z reference of
+the tools named by `T=`, or of every tool in turn when `T=` is left out. Heats
+each tool to `calibration_temp`, presses the contact switch, measures the
+tool's descent curve and binds the two together. Requires `calibrate_z: True`
+and the switch options. Run it again after changing a nozzle or a hotend, after
+moving the coil or the switch, and after changing `calibration_temp`. A later
+run refuses a reference whose `frequency` or `reg_drive_current` differs from
+the settings in use, so re-run it after either of those as well. References
+are written to `EddyToolCalibration/calibration_state.json` next to the printer
+config as they are measured; there is no `SAVE_CONFIG` step. `DEBUG=1` prints
+each press trigger height and each scan pass's diagnostic rows.
 
 #### EDDY_CALIBRATE_OFFSET
 
 `EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: Measure the tools named by `T=`
 over the coil and print their offsets relative to T0, or measure every tool in
-turn when `T=` is left out. Run `T=0` first: it is the baseline every other tool
-is compared against, and it is not persisted across a restart. T0 is measured
-first whatever order a list gives it in. With `calibrate_z: True` every tool
-involved needs its `EDDY_CALIBRATE_Z` reference first, and the command stops
-before it moves if one is missing; each tool is then heated to the setpoint its
-own reference was taken at, all of them together, before the first measurement
-starts. An offset run reproduces the setpoint the reference was measured at, so
-the descent it compares against that reference was taken with the nozzle held
-the same way. Each non-baseline result is passed to `apply_offsets_gcode`
-when that option is set. A run over more than one tool ends with a per-tool
-summary. `DEBUG=1` prints each scan pass's diagnostic rows.
+turn when `T=` is left out. T0 is the baseline and is measured first whatever
+order a list gives it in; a run that leaves T0 out requires that T0 was
+measured earlier in the same session, because the baseline is not kept across a
+restart. With `calibrate_z: True` every tool involved needs its
+`EDDY_CALIBRATE_Z` reference, checked before the first move, and each tool is
+then heated to the setpoint that reference was taken at. Each non-baseline
+result is passed to `apply_offsets_gcode` when that option is set. A run over
+more than one tool ends with a per-tool summary. `DEBUG=1` prints each scan
+pass's diagnostic rows.
 
 #### EDDY_REPEATABILITY
 
 `EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] [DEBUG=1]`: Measure
-one tool over and over and report how far the results spread. `T=`, `RUNS=` and
-`CYCLES=` are all required. A cycle mounts another tool and remounts the
-measured one, then takes `RUNS` measurements without touching it again, so the
-runs inside a cycle show the measurement alone and the cycles show what the
-docking adds on top of it.
+one tool repeatedly and report how far the results spread. `T=`, `RUNS=` and
+`CYCLES=` are all required. Each cycle mounts another tool and remounts the
+measured one, then takes `RUNS` measurements without touching it again. Docking
+needs `tool_count` and `toolchange_gcode`; without them the cycles still run,
+and the plan and the summary both say no docking was exercised. `SKIP_Z`
+defaults to 1 and skips the Z descent even with `calibrate_z: True`; `SKIP_Z=0`
+needs `calibrate_z: True` and the tool's `EDDY_CALIBRATE_Z` reference. The tool
+is heated only when `calibrate_z: True` and it has that reference, in which
+case it is held at the setpoint the reference was taken at, and the plan row
+says which case applies. Per axis the summary reports the mean, the
+within-cycle spread, the spread of the cycle means, the between-cycle spread
+with its degrees of freedom, the range and the largest deviation from the mean.
+Every measurement is written to `repeatability_T<n>_<index>.csv` in `log_dir`,
+with a fresh index for every study.
 
-Docking through a second tool needs `tool_count` and `toolchange_gcode`. Without
-them the cycles still run and the plan and the summary both say no docking was
-exercised, which makes such a run a control: its cycles are separated by time
-rather than by a toolchange.
+#### LDC_CALIBRATE_DRIVE_CURRENT
 
-`SKIP_Z` defaults to 1, which skips the Z descent even with `calibrate_z: True`,
-so a study is XY only and fast. `SKIP_Z=0` includes the descent, which needs
-`calibrate_z: True` and the tool's `EDDY_CALIBRATE_Z` reference.
-
-The tool is heated only when `calibrate_z: True` and it has a stored
-`EDDY_CALIBRATE_Z` reference, in which case it is held at the setpoint that
-reference was taken at. The plan row says which of the three cases applies,
-because a study run cold is not comparable with an offset run.
-
-The command prints its plan before it moves, a progress row naming the cycle
-and the measurement about to run before each one starts, each cycle's mean,
-range and standard deviation as that cycle finishes, and a summary at the end.
-Per axis the summary carries the mean, the within-cycle spread (the
-measurement), the spread of the cycle means, the between-cycle spread (the
-docking and any drift between cycles) with its degrees of freedom, the range and
-the largest deviation from the mean. Every individual measurement is written to
-`repeatability_T<n>_<index>.csv` in `log_dir`, the index zero padded to three
-digits and one above the highest already there, so nothing overwrites an earlier
-study.
-
-The LDC1612 driver also registers Kalico's own
-`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`.
+`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`: Kalico's own drive
+current calibration, registered by the LDC1612 driver this plugin loads. Store
+the printed value with `SAVE_CONFIG`.
 
 ## Status and limitations
 
