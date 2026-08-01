@@ -1,8 +1,8 @@
 # Sub-sample peak estimator research (notes)
 
-Source: web research subagent, 2026-07-30. Question: best extremum/symmetry-center
+Source: web research, 2026-07-30. Question: best extremum/symmetry-center
 estimator for our bell-shaped frequency-vs-position scan curves (~250 samples across
-the peak, 16 um spacing at 4 mm/s, sensor noise). Note: the researcher assumed
+the peak, 16 um spacing at 4 mm/s, sensor noise). Note: the survey below assumed
 upstream uses a plain 3-point parabola; the actual upstream uses a Gaussian-weighted
 quadratic least-squares fit over a window (see upstream-algorithms.md), which is
 already close to method 2 below. The comparison remains valid.

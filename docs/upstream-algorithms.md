@@ -1,6 +1,6 @@
 # Upstream algorithm extraction (research notes)
 
-Source: subagent read of `reference/tool_eddy_calibration.py` (chengxg, GPLv3),
+Source: extraction from `reference/tool_eddy_calibration.py` (chengxg, GPLv3),
 `kalico/klippy/extras/probe_eddy_current.py`, `kalico/klippy/extras/ldc1612.py`.
 Verbatim extraction for the implementation spec; line numbers refer to those files.
 

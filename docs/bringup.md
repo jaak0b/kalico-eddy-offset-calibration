@@ -292,7 +292,9 @@ connects, that is a warning, not a failure. It is not a reason to reflash.
    configured `coil_x` / `coil_y`. A result far from your estimate means the
    coarse scan missed the coil; recheck the geometry in section 4.
 4. Run `EDDY_CALIBRATE_OFFSET T=0` with `save_csv: True` already set in config,
-   so every scan pass is written to CSV for offline review. `T=` is required, and `T=0` is the baseline every other tool is
+   so every scan pass is written to CSV for offline review. `T=<n>` calibrates
+   one tool, and omitting `T=` runs all tools once `tool_count` and
+   `toolchange_gcode` are set; `T=0` is the baseline every other tool is
    measured against.
 5. Mount the next tool and run `EDDY_CALIBRATE_OFFSET T=1`, then `T=2` and so
    on for the remaining tools. Each run prints its offsets against the `T=0`

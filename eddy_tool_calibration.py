@@ -1278,23 +1278,26 @@ class EddyToolCalibration:
         self.printer.lookup_object('toolhead').wait_moves()
 
     def _apply_offsets(self, gcmd, tool, offsets):
-        """Run the configured apply lines with a tool's measured offsets."""
+        """Run the configured apply lines with a tool's measured offsets.
+
+        The tool is named by the caller, which knows the stage the failure
+        belongs to, so the messages here describe the failure only.
+        """
         if not self.has_apply_offsets_gcode:
             return
         try:
             values = offset_template_context(tool, offsets, self.calibrate_z)
         except ValueError as e:
-            raise gcmd.error(
-                "The offsets of T%d cannot be applied: %s." % (tool, e))
+            raise gcmd.error("The offsets cannot be applied: %s." % (e,))
         context = self.apply_offsets_gcode.create_template_context()
         context.update(values)
         try:
             self.apply_offsets_gcode.run_gcode_from_command(context)
         except self.printer.command_error as e:
             raise gcmd.error(
-                "apply_offsets_gcode failed for T%d: %s. The lines can use "
+                "apply_offsets_gcode failed: %s. The lines can use "
                 "tool, offset_x and offset_y%s."
-                % (tool, e,
+                % (e,
                    ", and offset_z" if self.calibrate_z else
                    "; offset_z is available only with calibrate_z set to "
                    "True, and it is False, so a line naming offset_z has "
@@ -2059,14 +2062,14 @@ class EddyToolCalibration:
             sweeping = False
         self._require_switch_z_range(gcmd)
         for tool in tools:
-            with self._phase(gcmd, tool, 'toolchange', sweeping):
-                self._mount_tool(gcmd, tool)
             self._anchor_tool(gcmd, tool, debug, sweeping)
 
     def _anchor_tool(self, gcmd, tool, debug, sweeping):
         """Press the switch for one tool and store its Z reference."""
         travel_z = self.switch_probe_z_start + self.scan_safe_z
         with self._retreating():
+            with self._phase(gcmd, tool, 'toolchange', sweeping):
+                self._mount_tool(gcmd, tool)
             with self._phase(gcmd, tool, 'switch probing', sweeping):
                 self._query_switch(gcmd)
                 self._move(
@@ -2095,8 +2098,7 @@ class EddyToolCalibration:
         previous = self.anchors.get(tool)
         self.anchors[tool] = record
         try:
-            with self._phase(gcmd, tool, 'measurement', sweeping):
-                self._write_state(gcmd)
+            self._write_state(gcmd)
         except Exception:
             # An anchor that did not persist would be gone at the next
             # restart, so the in-memory state goes back to what it was.
@@ -2105,6 +2107,13 @@ class EddyToolCalibration:
             else:
                 self.anchors[tool] = previous
             raise
+        # The tool's session measurements were taken against the reference this
+        # anchor just replaced, so they are dropped rather than compared across
+        # two references. Re-anchoring the baseline tool drops the baseline too,
+        # which makes the next offset run measure T0 again.
+        self.results.pop(tool, None)
+        if self.baseline is not None and self.baseline['tool'] == tool:
+            self.baseline = None
         rows = [
             "tool: T%d" % (tool,),
             "counted press triggers (machine Z): %s mm"
@@ -2166,34 +2175,39 @@ class EddyToolCalibration:
         Returns the tool's entry for the fleet summary: its offsets, or None
         for the baseline tool, whose offsets are zero by definition.
         """
-        with self._phase(gcmd, tool, 'toolchange', sweeping):
-            self._mount_tool(gcmd, tool)
         is_baseline_run = tool == BASELINE_TOOL
-        with self._phase(gcmd, tool, 'measurement', sweeping):
-            with self._retreating():
+        with self._retreating():
+            with self._phase(gcmd, tool, 'toolchange', sweeping):
+                self._mount_tool(gcmd, tool)
+            with self._phase(gcmd, tool, 'measurement', sweeping):
                 result = self._run_tool_measurement(gcmd, tool, debug)
-        if is_baseline_run:
-            # A fresh T0 run always replaces the session baseline, so the
-            # comparison never mixes results from two different setups.
-            self.session_id += 1
-            self.baseline = {
-                'tool': tool,
-                'x': result['x'],
-                'y': result['y'],
-                'z_curve': result['z_curve'],
-                'z_trigger': result['z_trigger'],
-            }
-        result['session_id'] = self.session_id
-        result['measured_time'] = self.printer.get_reactor().monotonic()
-        self.last_tool = tool
-        self._report_tool_result(gcmd, tool, result, is_baseline_run)
-        if is_baseline_run:
-            # The baseline tool's offsets are zero by definition, and applying
-            # zeros would overwrite whatever the owner set for it.
-            return {'tool': tool, 'offsets': None}
-        offsets = self._offsets(result)
-        with self._phase(gcmd, tool, 'apply', sweeping):
-            self._apply_offsets(gcmd, tool, offsets)
+            if is_baseline_run:
+                # A fresh T0 run always replaces the session baseline, so the
+                # comparison never mixes results from two different setups.
+                self.session_id += 1
+                self.baseline = {
+                    'tool': tool,
+                    'x': result['x'],
+                    'y': result['y'],
+                    'z_curve': result['z_curve'],
+                    'z_trigger': result['z_trigger'],
+                }
+            # The new baseline and the result measured against it are published
+            # together, with nothing in between, so a status read never pairs a
+            # fresh measurement with the baseline it replaced.
+            result['session_id'] = self.session_id
+            result['measured_time'] = self.printer.get_reactor().monotonic()
+            self.results[tool] = result
+            self.last_tool = tool
+            self._report_tool_result(gcmd, tool, result, is_baseline_run)
+            offsets = None
+            if not is_baseline_run:
+                # The baseline tool's offsets are zero by definition, and
+                # applying zeros would overwrite whatever the owner set for it,
+                # so only the other tools reach the apply lines.
+                offsets = self._offsets(result)
+                with self._phase(gcmd, tool, 'apply', sweeping):
+                    self._apply_offsets(gcmd, tool, offsets)
         return {'tool': tool, 'offsets': offsets}
 
     def _require_anchors(self, gcmd, tools):
@@ -2226,10 +2240,11 @@ class EddyToolCalibration:
             'z_crossing': z_crossing,
             'z_trigger': z_trigger,
             'agg': agg,
-            'session_id': self.session_id,
+            # Both stamped by the caller, which publishes the result only once
+            # the session baseline it belongs to is in place.
+            'session_id': None,
             'measured_time': None,
         }
-        self.results[tool] = result
         return result
 
     def _trigger_plane(self, gcmd, tool, curve):

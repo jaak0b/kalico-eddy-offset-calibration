@@ -183,7 +183,10 @@ reference it; decide during implementation, wrapper preferred.)
   tool's XY center and descent curve and stores the curve midpoint's height
   above that trigger plane together with the frequency there. Written to the
   state file immediately. Requires `calibrate_z: True` and the switch options.
-  A missing `T=` anchors every tool from T0 upward in turn.
+  A missing `T=` anchors every tool from T0 upward in turn. Anchoring a tool
+  discards that tool's measurements from this session, and anchoring the
+  baseline tool clears the session baseline as well, so the next offset run
+  measures T0 again.
 - Both calibration commands share one tool rule. `T=<n>` runs that tool;
   omitting `T=` runs the whole fleet and needs `tool_count` and
   `toolchange_gcode`, naming both when either is missing. With

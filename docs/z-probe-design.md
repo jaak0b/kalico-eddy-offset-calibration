@@ -613,8 +613,9 @@ Every one raises a gcode error naming the fix:
 - Non-cartesian kinematics, that is `axis_minimum`/`axis_maximum` absent from
   the kinematic status: refuse, as `_get_target_position` does.
 - `apply_offsets_gcode` referencing `offset_z` while `calibrate_z` is False:
-  the template rendering raises on the undefined name, and that error is wrapped
-  with the tool number and a line naming `calibrate_z`.
+  the template context omits `offset_z`, so the documented templates render an
+  empty value there and the resulting line fails gcode parsing; that error is
+  wrapped with a line naming `calibrate_z`.
 
 ### Removals
 

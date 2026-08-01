@@ -127,8 +127,9 @@ Both commands take `T=` the same way:
 - Leaving `T=` off calibrates every tool from T0 upward in turn, and needs
   `tool_count` and `toolchange_gcode` in the config. Without them the command
   says so and names both options. An offset sweep ends with a summary table
-  of every tool's offsets, and applies each result as it goes if
-  `apply_offsets_gcode` is set.
+  of every tool's offsets.
+- Each non-baseline tool's result is passed to `apply_offsets_gcode` if that
+  option is set, in a single-tool run as well as in a sweep.
 
 The plugin mounts the tool it is about to work on whenever `toolchange_gcode`
 is configured, with `T=` as well as without it. Without that option it works
