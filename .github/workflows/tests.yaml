@@ -1,0 +1,78 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the plugin
+        uses: actions/checkout@v4
+
+      # Both Kalico requirement sets pin cffi 1.15.1 and greenlet 2.0.2, whose
+      # newest wheels are cp311, so the whole workflow stays on 3.11.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the test requirements
+        run: pip install -r requirements_test.txt
+
+      - name: Run the unit suite
+        run: python -m pytest tests/ -q
+
+  integration:
+    name: Integration (Kalico ${{ matrix.kalico.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        kalico:
+          - name: main
+            ref: main
+          - name: "2025-12-14"
+            ref: 3b98cf51ef4260164a6cd457b7e02c34c31767de
+    steps:
+      - name: Check out the plugin
+        uses: actions/checkout@v4
+
+      - name: Check out Kalico
+        uses: actions/checkout@v4
+        with:
+          repository: KalicoCrew/kalico
+          ref: ${{ matrix.kalico.ref }}
+          path: kalico
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install klippy's Python requirements
+        run: pip install -r kalico/scripts/klippy-requirements.txt
+
+      - name: Record what builds the firmware and the C helper
+        run: |
+          gcc --version
+          make --version
+          git -C kalico log -1 --format='Kalico %H %cI %s'
+
+      - name: Run the integration harness
+        run: python integration_test.py kalico
+
+      - name: Name the Kalico version that failed
+        if: failure()
+        run: >
+          echo "::error title=Integration harness failed::Kalico
+          ${{ matrix.kalico.name }} at ${{ matrix.kalico.ref }}"

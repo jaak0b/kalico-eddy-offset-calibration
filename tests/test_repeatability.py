@@ -169,166 +169,145 @@ def test_a_study_with_no_cycles_is_rejected():
 # --- summary rows ----------------------------------------------------------
 
 
-def test_the_summary_rows_name_which_spread_is_the_measurement():
+def test_the_measurement_spread_row_names_the_within_cycle_figure():
+    assert etc.measurement_spread_row('x', {'within': 0.0057}) == (
+        "x measurement spread: 0.0057 mm")
+
+
+def test_the_docking_spread_row_folds_in_its_degrees_of_freedom():
     stats = {
-        'cycle_count': 2,
-        'run_count': 3,
-        'mean': 10.5,
-        'within': 0.2,
-        'cycle_mean_spread': 0.4242640687119285,
-        'between': 0.4082482904638630,
+        'cycle_mean_spread': 0.005,
+        'between': 0.0031,
         'between_resolved': True,
-        'between_dof': 1,
-        'range': 1.0,
-        'max_deviation': 0.5,
+        'between_dof': 2,
     }
 
-    assert etc.repeatability_rows('x', stats) == [
-        "x mean: 10.5000 mm",
-        "x within-cycle spread (the measurement): 0.2000 mm",
-        "x spread of the cycle means (the docking plus the measurement's "
-        "share of a cycle mean): 0.4243 mm",
-        "x between-cycle spread (the docking and any drift between cycles): "
-        "0.4082 mm",
-        "x between-cycle degrees of freedom: 1",
-        "x range: 1.0000 mm",
-        "x largest deviation from the mean: 0.5000 mm",
-    ]
+    assert etc.docking_spread_row('y', stats) == (
+        "y docking spread: 0.0031 mm (2 degrees of freedom)")
 
 
 def test_an_unresolved_docking_component_says_so_beside_the_zero():
     stats = {
-        'cycle_count': 2,
-        'run_count': 2,
-        'mean': 10.2,
-        'within': 0.2236067977499790,
         'cycle_mean_spread': 0.0,
         'between': 0.0,
         'between_resolved': False,
         'between_dof': 1,
-        'range': 0.4,
-        'max_deviation': 0.2,
+        'within': 0.2236067977499790,
     }
-    rows = etc.repeatability_rows('y', stats)
 
-    assert rows[3] == (
-        "y between-cycle spread (the docking and any drift between cycles): "
-        "0.0000 mm, the cycle means differ by no more than the measurement "
-        "itself")
+    assert etc.docking_spread_row('y', stats) == (
+        "y docking spread: 0.0000 mm (1 degrees of freedom), the cycle "
+        "means differ by no more than the measurement itself")
 
 
 def test_a_study_whose_measurements_never_varied_says_exactly_that():
     # Every measurement read the same value, so there is no measurement noise
     # for the cycle means to hide behind and the zero is not a masked docking.
     stats = {
-        'cycle_count': 2,
-        'run_count': 2,
-        'mean': 10.2,
-        'within': 0.0,
         'cycle_mean_spread': 0.0,
         'between': 0.0,
         'between_resolved': False,
         'between_dof': 1,
-        'range': 0.0,
-        'max_deviation': 0.0,
+        'within': 0.0,
     }
-    rows = etc.repeatability_rows('x', stats)
 
-    assert rows[3] == (
-        "x between-cycle spread (the docking and any drift between cycles): "
-        "0.0000 mm, the measurements did not vary at all")
+    assert etc.docking_spread_row('x', stats) == (
+        "x docking spread: 0.0000 mm (1 degrees of freedom), the "
+        "measurements did not vary at all")
 
 
-def test_a_single_cycle_summary_says_the_docking_was_not_measured():
+def test_a_single_cycle_docking_spread_says_it_was_not_measured():
+    assert etc.docking_spread_row('z', {'cycle_mean_spread': None}) == (
+        "z docking spread: not measured, the study ran one cycle")
+
+
+def test_the_worst_deviation_row_names_the_largest_deviation_from_the_mean():
+    assert etc.worst_deviation_row('x', {'max_deviation': 0.0121}) == (
+        "x worst deviation from the mean: 0.0121 mm")
+
+
+def test_the_summary_lists_settings_then_a_blank_line_then_the_figures():
     stats = {
-        'cycle_count': 1,
-        'run_count': 3,
-        'mean': 10.2,
-        'within': 0.2,
-        'cycle_mean_spread': None,
-        'between': None,
-        'between_resolved': None,
-        'between_dof': None,
-        'range': 0.4,
-        'max_deviation': 0.2,
+        'x': {
+            'within': 0.0057, 'cycle_mean_spread': 0.005, 'between': 0.00001,
+            'between_resolved': True, 'between_dof': 2,
+            'max_deviation': 0.0121,
+        },
+        'y': {
+            'within': 0.0046, 'cycle_mean_spread': 0.005, 'between': 0.0031,
+            'between_resolved': True, 'between_dof': 2,
+            'max_deviation': 0.0103,
+        },
     }
 
-    assert etc.repeatability_rows('z', stats) == [
-        "z mean: 10.2000 mm",
-        "z within-cycle spread (the measurement): 0.2000 mm",
-        "z between-cycle spread (the docking): not measured, the study ran "
-        "one cycle",
-        "z range: 0.4000 mm",
-        "z largest deviation from the mean: 0.2000 mm",
-    ]
-
-
-def test_a_cycle_reports_its_own_mean_range_and_standard_deviation():
-    # 10.0, 10.2 and 10.4 average 10.2 and span 0.4. Their deviations from
-    # the mean are -0.2, 0.0 and +0.2, so the sum of squares is 0.08 over
-    # 3 - 1 = 2 degrees of freedom, a variance of 0.04 and a standard
-    # deviation of exactly 0.2. That is the estimator the closing summary
-    # reports, so the same three runs read the same in both places.
-    assert etc.cycle_progress_rows(2, [('x', [10.0, 10.2, 10.4])]) == [
-        "cycle 2 x mean: 10.2000 mm",
-        "cycle 2 x range: 0.4000 mm",
-        "cycle 2 x standard deviation: 0.2000 mm",
-    ]
-
-
-def test_a_cycle_of_one_run_cannot_be_summarised():
-    with pytest.raises(ValueError, match="at least 2 runs"):
-        etc.cycle_progress_rows(1, [('y', [10.0])])
-
-
-# --- the study plan --------------------------------------------------------
-
-
-def test_the_plan_names_the_docking_tool_and_the_measurement_count():
-    rows = etc.study_plan_rows(
-        1, 10, 3, False, 'through_tool', 0, 'z_calibration_off', None)
+    rows = etc.repeatability_summary_rows(
+        0, 5, 3, 'through_tool', 1, False, ['x', 'y'], stats,
+        [('stepper_x', 0.0125), ('stepper_y', 0.0125)],
+        '/log_dir/repeatability_T0_001.csv')
 
     assert rows == [
-        "repeatability study:",
-        "tool: T1",
-        "runs per cycle: 10",
-        "cycles: 3",
-        "measurements: 30",
-        "z descent: skipped",
-        "nozzle heating: none, calibrate_z is False",
-        "docking between cycles: each cycle mounts T0 and remounts the "
-        "measured tool",
-    ]
-
-
-def test_the_plan_names_the_anchor_setpoint_when_the_tool_has_one():
-    rows = etc.study_plan_rows(
-        0, 5, 1, True, 'no_other_tool', None, 'to_anchor_temperature', 150.0)
-
-    assert rows == [
-        "repeatability study:",
+        "repeatability summary:",
         "tool: T0",
         "runs per cycle: 5",
-        "cycles: 1",
-        "measurements: 5",
-        "z descent: included",
-        "nozzle heating: held at 150.0 C, the setpoint the tool's Z "
-        "reference was measured at",
-        "docking between cycles: not exercised, tool_count names no second "
-        "tool to dock through",
+        "cycles: 3",
+        "measurements: 15",
+        "z descent: skipped",
+        "docking between cycles: each cycle mounts T1 and remounts the "
+        "measured tool",
+        "",
+        "x measurement spread: 0.0057 mm",
+        "y measurement spread: 0.0046 mm",
+        "x docking spread: 0.0000 mm (2 degrees of freedom)",
+        "y docking spread: 0.0031 mm (2 degrees of freedom)",
+        "x worst deviation from the mean: 0.0121 mm",
+        "y worst deviation from the mean: 0.0103 mm",
+        "stepper microstep distance stepper_x: 0.012500 mm",
+        "stepper microstep distance stepper_y: 0.012500 mm",
+        "measurement data: /log_dir/repeatability_T0_001.csv",
     ]
 
 
-def test_a_plan_of_one_run_per_cycle_is_rejected():
-    with pytest.raises(ValueError, match="at least 2 runs"):
-        etc.study_plan_rows(
-            0, 1, 2, False, 'through_tool', 1, 'z_calibration_off', None)
+def test_the_summary_gives_z_the_same_three_rows_as_x_and_y_in_position():
+    stats = {
+        'x': {
+            'within': 0.01, 'cycle_mean_spread': None, 'max_deviation': 0.02,
+        },
+        'y': {
+            'within': 0.01, 'cycle_mean_spread': None, 'max_deviation': 0.02,
+        },
+        'z': {
+            'within': 0.03, 'cycle_mean_spread': None, 'max_deviation': 0.04,
+        },
+    }
+
+    rows = etc.repeatability_summary_rows(
+        0, 3, 1, 'no_other_tool', None, True, ['x', 'y', 'z'], stats, [],
+        '/log_dir/repeatability_T0_002.csv')
+
+    assert rows == [
+        "repeatability summary:",
+        "tool: T0",
+        "runs per cycle: 3",
+        "cycles: 1",
+        "measurements: 3",
+        "z descent: included",
+        "docking between cycles: not exercised, tool_count names no second "
+        "tool to dock through",
+        "",
+        "x measurement spread: 0.0100 mm",
+        "y measurement spread: 0.0100 mm",
+        "z measurement spread: 0.0300 mm",
+        "x docking spread: not measured, the study ran one cycle",
+        "y docking spread: not measured, the study ran one cycle",
+        "z docking spread: not measured, the study ran one cycle",
+        "x worst deviation from the mean: 0.0200 mm",
+        "y worst deviation from the mean: 0.0200 mm",
+        "z worst deviation from the mean: 0.0400 mm",
+        "measurement data: /log_dir/repeatability_T0_002.csv",
+    ]
 
 
-def test_a_plan_of_no_cycles_is_rejected():
-    with pytest.raises(ValueError, match="at least 1 cycle"):
-        etc.study_plan_rows(
-            0, 5, 0, False, 'through_tool', 1, 'z_calibration_off', None)
+# --- the docking row --------------------------------------------------------
 
 
 def test_a_missing_toolchange_gcode_is_named_as_the_reason_for_no_docking():
@@ -360,17 +339,6 @@ def test_a_tool_without_a_stored_reference_is_not_heated():
 
 def test_nothing_is_heated_with_z_calibration_off():
     assert etc.study_heating(False, True) == 'z_calibration_off'
-
-
-def test_an_unheated_tool_says_its_spread_is_not_comparable():
-    assert etc.heating_row('no_anchor', None) == (
-        "nozzle heating: none, the tool has no stored Z reference, so this "
-        "spread is not comparable with an offset run's")
-
-
-def test_an_unhandled_heating_state_is_rejected():
-    with pytest.raises(ValueError, match="unhandled heating state"):
-        etc.heating_row('lukewarm', 150.0)
 
 
 # --- choosing the docking tool ---------------------------------------------

@@ -1209,44 +1209,6 @@ def study_heating(calibrate_z, has_anchor):
     return 'to_anchor_temperature'
 
 
-def heating_row(state, setpoint):
-    """The labeled row saying whether a study heats the tool before measuring.
-
-    setpoint is the heater setpoint the tool's anchor recorded, and is None
-    wherever no heating runs.
-    """
-    if state == 'to_anchor_temperature':
-        return ("nozzle heating: held at %.1f C, the setpoint the tool's Z "
-                "reference was measured at" % (float(setpoint),))
-    if state == 'no_anchor':
-        return ("nozzle heating: none, the tool has no stored Z reference, so "
-                "this spread is not comparable with an offset run's")
-    if state == 'z_calibration_off':
-        return "nozzle heating: none, calibrate_z is False"
-    raise ValueError(
-        "unhandled heating state %r, expected one of %r"
-        % (state, HEATING_STATES))
-
-
-def study_plan_rows(tool, runs, cycles, include_z, state, docking_tool,
-                    heating_state, heating_setpoint):
-    if runs < 2:
-        raise ValueError(
-            "a study needs at least 2 runs per cycle, got %r" % (runs,))
-    if cycles < 1:
-        raise ValueError("a study needs at least 1 cycle, got %r" % (cycles,))
-    return [
-        "repeatability study:",
-        "tool: T%d" % (int(tool),),
-        "runs per cycle: %d" % (runs,),
-        "cycles: %d" % (cycles,),
-        "measurements: %d" % (runs * cycles,),
-        "z descent: %s" % ("included" if include_z else "skipped",),
-        heating_row(heating_state, heating_setpoint),
-        docking_row(state, docking_tool, cycles),
-    ]
-
-
 # What each axis of a study reads off one measurement. The Z figure is the
 # reconstructed switch trigger plane, the height a Z offset is the difference
 # of, so its spread is the spread of the offset the run would have reported.
@@ -1363,60 +1325,52 @@ def measurement_progress_row(cycle, cycles, run, runs):
             % (cycle, cycles, run, runs))
 
 
-def cycle_progress_rows(cycle, axes):
-    """Labeled rows closing one cycle of a study.
-
-    axes is a list of (axis label, values measured in that cycle).
-    """
-    rows = []
-    for label, values in axes:
-        stats = repeatability_statistics([values])
-        rows.append(
-            "cycle %d %s mean: %.4f mm" % (cycle, label, stats['mean']))
-        rows.append(
-            "cycle %d %s range: %.4f mm" % (cycle, label, stats['range']))
-        rows.append(
-            "cycle %d %s standard deviation: %.4f mm"
-            % (cycle, label, stats['within']))
-    return rows
+def measurement_spread_row(label, stats):
+    return "%s measurement spread: %.4f mm" % (label, stats['within'])
 
 
-def repeatability_rows(label, stats):
-    rows = [
-        "%s mean: %.4f mm" % (label, stats['mean']),
-        "%s within-cycle spread (the measurement): %.4f mm"
-        % (label, stats['within']),
-    ]
+def docking_spread_row(label, stats):
     if stats['cycle_mean_spread'] is None:
-        rows.append(
-            "%s between-cycle spread (the docking): not measured, the study "
-            "ran one cycle" % (label,))
-    else:
-        rows.append(
-            "%s spread of the cycle means (the docking plus the "
-            "measurement's share of a cycle mean): %.4f mm"
-            % (label, stats['cycle_mean_spread']))
-        if stats['between_resolved']:
-            rows.append(
-                "%s between-cycle spread (the docking and any drift between "
-                "cycles): %.4f mm" % (label, stats['between']))
-        elif stats['within'] == 0.0 and stats['cycle_mean_spread'] == 0.0:
-            rows.append(
-                "%s between-cycle spread (the docking and any drift between "
-                "cycles): 0.0000 mm, the measurements did not vary at all"
+        return ("%s docking spread: not measured, the study ran one cycle"
                 % (label,))
-        else:
-            rows.append(
-                "%s between-cycle spread (the docking and any drift between "
-                "cycles): 0.0000 mm, the cycle means differ by no more than "
-                "the measurement itself" % (label,))
-        rows.append(
-            "%s between-cycle degrees of freedom: %d"
+    if stats['between_resolved']:
+        return ("%s docking spread: %.4f mm (%d degrees of freedom)"
+                % (label, stats['between'], stats['between_dof']))
+    if stats['within'] == 0.0 and stats['cycle_mean_spread'] == 0.0:
+        return ("%s docking spread: 0.0000 mm (%d degrees of freedom), the "
+                "measurements did not vary at all"
+                % (label, stats['between_dof']))
+    return ("%s docking spread: 0.0000 mm (%d degrees of freedom), the "
+            "cycle means differ by no more than the measurement itself"
             % (label, stats['between_dof']))
-    rows.append("%s range: %.4f mm" % (label, stats['range']))
-    rows.append(
-        "%s largest deviation from the mean: %.4f mm"
-        % (label, stats['max_deviation']))
+
+
+def worst_deviation_row(label, stats):
+    return ("%s worst deviation from the mean: %.4f mm"
+            % (label, stats['max_deviation']))
+
+
+def repeatability_summary_rows(tool, runs, cycles, state, docking_tool,
+                               include_z, axes, stats_by_axis,
+                               step_distances, path):
+    rows = [
+        "repeatability summary:",
+        "tool: T%d" % (tool,),
+        "runs per cycle: %d" % (runs,),
+        "cycles: %d" % (cycles,),
+        "measurements: %d" % (runs * cycles,),
+        "z descent: %s" % ("included" if include_z else "skipped",),
+        docking_row(state, docking_tool, cycles),
+        "",
+    ]
+    rows.extend(
+        measurement_spread_row(axis, stats_by_axis[axis]) for axis in axes)
+    rows.extend(
+        docking_spread_row(axis, stats_by_axis[axis]) for axis in axes)
+    rows.extend(
+        worst_deviation_row(axis, stats_by_axis[axis]) for axis in axes)
+    rows.extend(step_distance_rows(step_distances))
+    rows.append("measurement data: %s" % (path,))
     return rows
 
 
@@ -3234,9 +3188,6 @@ class EddyToolCalibration:
             # nothing to be evaluated against.
             self._require_anchors(gcmd, [tool])
         setpoint = self._heating_setpoint(gcmd, heating, tool)
-        gcmd.respond_info("\n".join(study_plan_rows(
-            tool, runs, cycles, include_z, state, docking_tool, heating,
-            setpoint)))
         axes = study_axes(include_z)
         try:
             fields = [(axis, study_axis_field(axis)) for axis in axes]
@@ -3258,14 +3209,6 @@ class EddyToolCalibration:
                 measured = self._run_study_cycle(
                     gcmd, tool, cycle, cycles, runs, include_z, setpoint,
                     debug, state, docking_tool, log, fields)
-            try:
-                rows = cycle_progress_rows(
-                    cycle, [(axis, measured[axis]) for axis in axes])
-            except ValueError as e:
-                raise gcmd.error(
-                    "Cycle %d could not be summarised: %s. Its measurements "
-                    "are in %s." % (cycle, e, log['path']))
-            gcmd.respond_info("\n".join(rows))
             for axis in axes:
                 by_cycle[axis].append(measured[axis])
         self._report_study(
@@ -3437,25 +3380,17 @@ class EddyToolCalibration:
 
     def _report_study(self, gcmd, tool, runs, cycles, include_z, state,
                       docking_tool, path, axes, by_cycle):
-        rows = [
-            "repeatability summary:",
-            "tool: T%d" % (tool,),
-            "runs per cycle: %d" % (runs,),
-            "cycles: %d" % (cycles,),
-            "measurements: %d" % (runs * cycles,),
-            "z descent: %s" % ("included" if include_z else "skipped",),
-            docking_row(state, docking_tool, cycles),
-        ]
+        stats_by_axis = {}
         for axis in axes:
             try:
-                stats = repeatability_statistics(by_cycle[axis])
+                stats_by_axis[axis] = repeatability_statistics(by_cycle[axis])
             except ValueError as e:
                 raise gcmd.error(
                     "The %s results could not be summarised: %s. The "
                     "measurements themselves are in %s." % (axis, e, path))
-            rows.extend(repeatability_rows(axis, stats))
-        rows.extend(step_distance_rows(self._step_distances()))
-        rows.append("measurement data: %s" % (path,))
+        rows = repeatability_summary_rows(
+            tool, runs, cycles, state, docking_tool, include_z, axes,
+            stats_by_axis, self._step_distances(), path)
         gcmd.respond_info("\n".join(rows))
 
     def get_status(self, eventtime):

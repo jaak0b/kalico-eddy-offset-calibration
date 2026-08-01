@@ -21,6 +21,8 @@ eddy_nozzle_probe/
   reference/
     tool_eddy_calibration.py  # upstream file, unmodified, for algorithm reference
   install.sh                  # symlink into ~/klipper/klippy/plugins/
+  integration_test.py         # runs the cases below against a Kalico checkout
+  integration/                # config and gcode of the Kalico integration test
   docs/ examples/ tests/
 ```
 
@@ -394,26 +396,25 @@ reference it; decide during implementation, wrapper preferred.)
   one, then takes `RUNS` measurements without touching it in between. The tool
   it docks through is the lowest tool number of the fleet that is not the
   measured one, so docking needs `tool_count` and `toolchange_gcode`. Without
-  either one the cycles still run and both the plan and the summary say no
-  docking was exercised and name what is missing; more than one cycle is then a
+  either one the cycles still run and the summary says no docking was
+  exercised and names what is missing; more than one cycle is then a
   control run whose cycles are separated by time rather than by a toolchange.
   Each cycle runs in its own retreat scope, so it ends at the lift height every
   toolchange starts from and the next cycle's docking begins there.
   `SKIP_Z` defaults to 1, which skips the descent even with `calibrate_z:
   True`; `SKIP_Z=0` with `calibrate_z: False` is an error naming `calibrate_z`
-  rather than a silently ignored parameter. Heating has three cases, and the
-  plan names the one that applies: the tool's recorded anchor setpoint, once
-  before the study rather than per cycle, when `calibrate_z` is True and the
-  tool has an anchor; no heating when the tool has no anchor, which the plan
-  says makes the spread not comparable with an offset run's; and no heating at
-  all when `calibrate_z` is False. The study file is resolved before anything
-  is heated, so a directory that cannot be written fails in a second rather
-  than after minutes of heating. The command prints its plan before it moves,
-  a progress row naming the cycle and the measurement about to run before each
-  one starts, each cycle's mean, range and standard deviation as that cycle
-  ends, and the summary below at the end. A cycle's standard deviation is the
-  same estimator the summary pools, run over that one cycle, so the two never
-  disagree about one quantity. A study does not replace the session
+  rather than a silently ignored parameter. Heating has three cases: the
+  tool's recorded anchor setpoint, once before the study rather than per
+  cycle, when `calibrate_z` is True and the tool has an anchor; no heating
+  when the tool has no anchor, whose spread is then not comparable with an
+  offset run's; and no heating at all when `calibrate_z` is False. The study
+  file is resolved before anything is heated, so a directory that cannot be
+  written fails in a second rather than after minutes of heating. The command
+  prints a progress row naming the cycle and the measurement about to run
+  before each one starts, and one summary at the end of the whole study: the
+  run and cycle counts, the descent and docking state, then per axis the
+  measurement spread, the docking spread with its degrees of freedom, and the
+  worst deviation from the mean. A study does not replace the session
   baseline; it repeats one measurement rather than establishing one, and a
   study of the baseline tool leaves the offset columns empty exactly as a
   calibration run of that tool does.
@@ -458,21 +459,17 @@ reference it; decide during implementation, wrapper preferred.)
   decomposition of the AIAG measurement systems analysis manual, in its one-way
   analysis of variance form. The runs inside a cycle differ by the measurement
   alone, so their pooled standard deviation over `cycles * (runs - 1)` degrees
-  of freedom is the within-cycle spread. The cycle means differ by the
-  measurement plus whatever the docking adds, so their standard deviation over
-  `cycles - 1` degrees of freedom is reported as measured, and the docking's own
-  component follows from subtracting the measurement's share of it, the
-  within-cycle variance over the number of runs. Both are printed: the raw
-  spread of the cycle means, labeled as the docking plus the measurement's
-  share of a cycle mean, and the corrected component beside it, labeled as the
-  docking and any drift between cycles, because time passes between two cycles
-  as surely as a toolchange happens. The `cycles - 1` degrees of freedom are
-  printed beside that component, so two cycles read visibly as the one degree
-  of freedom they are. Where the subtraction leaves nothing, the manual's
-  convention is followed and the component is reported as zero, never as a
-  negative variance; a study whose measurements never varied at all says
-  exactly that, rather than blaming measurement noise it did not have. The
-  range and the largest deviation from the grand mean are printed alongside,
+  of freedom is the measurement spread that is printed. The cycle means differ
+  by the measurement plus whatever the docking adds; the docking's own
+  component follows from subtracting the measurement's share of the cycle
+  means' own variance, the within-cycle variance over the number of runs. That
+  corrected component is what is printed, labeled the docking spread, with the
+  `cycles - 1` degrees of freedom folded into the same row so two cycles read
+  visibly as the one degree of freedom they are. Where the subtraction leaves
+  nothing, the manual's convention is followed and the component is reported
+  as zero, never as a negative variance; a study whose measurements never
+  varied at all says exactly that, rather than blaming measurement noise it
+  did not have. The worst deviation from the grand mean is printed alongside,
   because a worst case is what a user comparing against a contact probe asks
   about and a standard deviation does not answer. A value that is not finite is
   refused before any of this, naming the cycle and the run it sat in, rather
@@ -487,13 +484,36 @@ Every failure path raises a gcode error with an actionable message: no samples
 (coil center estimate off: run EDDY_LOCATE), sensor amplitude errors from the
 LDC1612 status register (drive current miscalibrated).
 
+## Automated tests
+
+`tests/` is the unit suite and imports no klippy, so it proves the fit math and
+nothing about the plugin's Kalico-facing lines. `integration_test.py` covers
+those: it builds the `linuxprocess` firmware dictionary from a Kalico checkout,
+installs the plugin into that checkout's `klippy/plugins/`, and runs the cases
+in `integration/` through Kalico's own `scripts/test_klippy.py` against the
+simulated MCU. Both run on every push and pull request from
+`.github/workflows/tests.yaml`, the integration job over two Kalico versions:
+`main`, and commit `3b98cf51` of 2025-12-14, the era of the printer this is used
+on. Neither leg is allowed to fail; a leg later expected to fail for a
+documented reason gets `continue-on-error: true` with the reason beside it.
+
+To run the same thing on a Linux host with `make` and a C compiler:
+
+```bash
+pip install -r requirements_test.txt
+python -m pytest tests/
+git clone https://github.com/KalicoCrew/kalico ~/kalico
+pip install -r ~/kalico/scripts/klippy-requirements.txt
+python integration_test.py ~/kalico
+```
+
 ## Validation plan
 
 1. Bring-up on BTT Eddy Coil (bigger coil, same electronics): EDDY_QUERY,
    EDDY_LOCATE, scan curves visually sane (save_csv + offline plot).
 2. Repeatability: EDDY_REPEATABILITY on one tool, which reports the
-   within-cycle spread, the between-cycle spread, the range and the largest
-   deviation from the mean per axis. Target: XY stddev < 5 um on crab board.
+   measurement spread, the docking spread and the worst deviation from the
+   mean per axis. Target: XY stddev < 5 um on crab board.
 3. Cross-check vs contact method (tools_calibrate / owner's pin) on 2+ tools;
    agreement within the contact method's own repeatability.
 4. Dirty-nozzle test: repeat (2) with deliberately filthy nozzle; deltas vs

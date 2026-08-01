@@ -129,16 +129,17 @@ one tool repeatedly and report how far the results spread. `T=`, `RUNS=` and
 `CYCLES=` are all required. Each cycle mounts another tool and remounts the
 measured one, then takes `RUNS` measurements without touching it again. Docking
 needs `tool_count` and `toolchange_gcode`; without them the cycles still run,
-and the plan and the summary both say no docking was exercised. `SKIP_Z`
-defaults to 1 and skips the Z descent even with `calibrate_z: True`; `SKIP_Z=0`
-needs `calibrate_z: True` and the tool's `EDDY_CALIBRATE_Z` reference. The tool
-is heated only when `calibrate_z: True` and it has that reference, in which
-case it is held at the setpoint the reference was taken at, and the plan row
-says which case applies. Per axis the summary reports the mean, the
-within-cycle spread, the spread of the cycle means, the between-cycle spread
-with its degrees of freedom, the range and the largest deviation from the mean.
-Every measurement is written to `repeatability_T<n>_<index>.csv` in `log_dir`,
-with a fresh index for every study.
+and the summary says no docking was exercised. `SKIP_Z` defaults to 1 and skips
+the Z descent even with `calibrate_z: True`; `SKIP_Z=0` needs `calibrate_z:
+True` and the tool's `EDDY_CALIBRATE_Z` reference. The tool is heated only when
+`calibrate_z: True` and it has that reference, in which case it is held at the
+setpoint the reference was taken at. A progress row announces each measurement
+as it runs; a single summary prints once the study finishes, giving the tool,
+the run and cycle counts, the Z descent and docking state, then per axis the
+measurement spread, the docking spread with its degrees of freedom and the
+worst deviation from the mean. Every measurement is written to
+`repeatability_T<n>_<index>.csv` in `log_dir`, with a fresh index for every
+study.
 
 #### LDC_CALIBRATE_DRIVE_CURRENT
 
@@ -184,8 +185,8 @@ are one setup's figures, not a specification; a smaller coil, a different
 mainboard or a different toolchanger will read differently.
 
 `EDDY_REPEATABILITY` is the command that produces figures like these: it reports
-the within-cycle spread, the between-cycle spread, the range and the largest
-deviation from the mean, and writes every measurement to a CSV file.
+the measurement spread, the docking spread and the worst deviation from the
+mean, and writes every measurement to a CSV file.
 
 | What | Measured | How |
 |---|---|---|
