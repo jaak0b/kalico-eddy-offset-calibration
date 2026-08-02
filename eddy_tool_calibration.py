@@ -20,6 +20,7 @@ rest) happens inside a function or method body, never at module scope.
 """
 
 import contextlib
+import importlib
 import json
 import logging
 import math
@@ -704,6 +705,126 @@ def preheat_plan_rows(entries, band, settle_time):
         "The command waits for every listed tool to read inside its band, "
         "including a tool that has to cool into it.")
     return rows
+
+
+# --- firmware surface: the sensor driver import ----------------------------
+
+SENSOR_IMPORT_STRATEGIES = (
+    ('klippy_package', 'klippy.extras.ldc1612'),
+    ('extras_package', 'extras.ldc1612'),
+)
+SENSOR_IMPORT_STRATEGY_NAMES = tuple(
+    name for name, _path in SENSOR_IMPORT_STRATEGIES)
+
+
+def resolve_sensor_import(import_module):
+    """The strategy that imports the ldc1612 driver module on this firmware
+    build and the module it imports, as (strategy name, module).
+
+    Provenance: Kalico ships klippy/__init__.py, so its modules import under
+    the klippy package; stock Klipper does not, and klippy.py:103 in v0.13.0
+    and on master imports extras modules as extras. plus the name.
+    """
+    for strategy, path in SENSOR_IMPORT_STRATEGIES:
+        try:
+            return strategy, import_module(path)
+        except ImportError as e:
+            # An ImportError whose missing name is the path itself, or a
+            # package on the way to it, means this build does not spell the
+            # module that way. Any other missing name comes from inside a
+            # driver module that does exist, and hiding it would blame the
+            # firmware for the driver's own broken dependency.
+            missing = getattr(e, 'name', None)
+            if missing is not None and (
+                    path == missing or path.startswith(missing + '.')):
+                continue
+            raise
+    raise ValueError(
+        "the sensor driver import cannot be resolved on this firmware "
+        "build.\n"
+        "strategies this plugin knows: %s\n"
+        "klippy.extras.ldc1612 imports: no\n"
+        "extras.ldc1612 imports: no\n"
+        "Report this with the firmware name and version, or install a "
+        "firmware version the requirements name."
+        % (", ".join(SENSOR_IMPORT_STRATEGY_NAMES),))
+
+
+# --- firmware surface: the motion queue dictionary --------------------------
+
+MOTION_QUEUE_STRATEGIES = ('trapqs', 'dtrapqs')
+
+
+def resolve_motion_queue(motion_report):
+    """The strategy that reaches the motion queue dictionary on this firmware
+    build, as the attribute name it is published under.
+
+    Provenance: Kalico development and Kalico 3b98cf51 motion_report.py:210
+    and Klipper v0.13.0 motion_report.py:137 name the dictionary trapqs;
+    Klipper master motion_report.py:149 names it dtrapqs.
+    """
+    if hasattr(motion_report, 'trapqs'):
+        return 'trapqs'
+    if hasattr(motion_report, 'dtrapqs'):
+        return 'dtrapqs'
+    raise ValueError(
+        "the motion queue cannot be resolved on this firmware build.\n"
+        "strategies this plugin knows: %s\n"
+        "motion_report carries trapqs: no\n"
+        "motion_report carries dtrapqs: no\n"
+        "Report this with the firmware name and version, or install a "
+        "firmware version the requirements name."
+        % (", ".join(MOTION_QUEUE_STRATEGIES),))
+
+
+# --- firmware surface: the preheat wait -------------------------------------
+
+PREHEAT_WAIT_STRATEGIES = ('printer_wait_while', 'reactor_poll')
+
+
+def resolve_preheat_wait(printer, heaters):
+    """The strategy the nozzle preheat waits with on this firmware build.
+
+    Provenance: Kalico development printer.py:504 and Kalico 3b98cf51
+    printer.py:624 carry printer.wait_while, the primitive Kalico's own heater
+    wait polls on; stock Klipper carries no wait_while and its heater wait
+    polls the reactor directly (heaters.py:348-351 in v0.13.0, :356-359 on
+    master). Both strategies emit heaters._get_temp, the M105 line of that
+    wait, on every poll, so a build without it fails the row whichever wait
+    it has.
+    """
+    has_wait_while = callable(getattr(printer, 'wait_while', None))
+    has_get_temp = callable(getattr(heaters, '_get_temp', None))
+    if has_get_temp:
+        if has_wait_while:
+            return 'printer_wait_while'
+        return 'reactor_poll'
+    raise ValueError(
+        "the preheat wait cannot be resolved on this firmware build.\n"
+        "strategies this plugin knows: %s\n"
+        "printer carries wait_while: %s\n"
+        "heaters carries _get_temp: no\n"
+        "Report this with the firmware name and version, or install a "
+        "firmware version the requirements name."
+        % (", ".join(PREHEAT_WAIT_STRATEGIES),
+           "yes" if has_wait_while else "no"))
+
+
+def preheat_poll_wait(reactor, is_shutdown, waiting, error, description):
+    """Poll waiting(eventtime) once per second until it returns False.
+
+    Provenance: transcription of stock Klipper's heater wait loop,
+    heaters.py:348-351 in v0.13.0 and :356-359 on master, which polls
+    reactor.pause(eventtime + 1.) while the printer is not shut down. One
+    deviation: a wait ended by a shutdown raises instead of returning,
+    because the caller measures as soon as the wait returns.
+    """
+    eventtime = reactor.monotonic()
+    while waiting(eventtime):
+        if is_shutdown():
+            raise error(
+                "The printer shut down while waiting for %s." % (description,))
+        eventtime = reactor.pause(eventtime + 1.)
 
 
 # --- firmware surface: the LDC1612 reference clock -------------------------
@@ -1816,15 +1937,6 @@ TOOL_PHASES = ('toolchange', 'switch probing', 'measurement', 'apply')
 SWITCH_REQUIRED_OPTIONS = (
     'switch_pin', 'switch_x', 'switch_y', 'switch_probe_z_start')
 
-# The Kalico surfaces the nozzle preheat reaches: printer.wait_while
-# (printer.py:504), the primitive Kalico's own heater wait polls on, and
-# heaters._get_temp (heaters.py:1442), the M105 line that wait emits on every
-# poll. Neither is part of a stable interface, and the build this plugin runs
-# on can be older than the one it was written against, so both are checked at
-# startup rather than trusted.
-PREHEAT_PRINTER_METHODS = ('wait_while',)
-PREHEAT_HEATERS_METHODS = ('_get_temp',)
-
 # Chosen value, not from probe_eddy_current: half a second at the sensor's
 # 250 Hz sample rate gives about 125 samples, enough for a meaningful spread
 # without making a wiring check feel slow.
@@ -2033,12 +2145,20 @@ class EddyToolCalibration:
         # our schema uses those same option names, so our own section is
         # passed through without a wrapper. It also registers
         # LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration for us.
-        from klippy.extras import ldc1612
-        self.sensor_module = ldc1612
-        self.sensor = ldc1612.LDC1612(config)
+        try:
+            self.sensor_import_strategy, self.sensor_module = \
+                resolve_sensor_import(importlib.import_module)
+        except ValueError as e:
+            raise config.error("%s: %s" % (self.name, e))
+        self.sensor = self.sensor_module.LDC1612(config)
         # Resolved at connect behind the calibrate_z gate; a machine measuring
         # XY only stores no anchor and never reads a clock.
         self.sensor_clock = None
+        self.preheat_wait_strategy = None
+        # Resolved at connect whatever calibrate_z says, because every scan
+        # reads it; a printer with no steppers carries no motion_report object
+        # and leaves it unresolved.
+        self.motion_queue_strategy = None
 
         # Ported from tools_calibrate.py:438-476. The pin is marked multi-use
         # before it is looked up, so an existing [tools_calibrate] section may
@@ -2176,14 +2296,20 @@ class EddyToolCalibration:
                 % (" ".join(a.upper() for a in missing),))
 
     def _get_trapq(self, gcmd):
-        motion_report = self.printer.lookup_object('motion_report', None)
-        if motion_report is None:
+        if self.motion_queue_strategy is None:
             raise gcmd.error(
                 "Configure this printer's steppers before calibrating. The "
                 "motion queue is registered by the steppers, and this printer "
                 "has none, so a scan has nothing to read the position of each "
                 "sample from.")
-        return motion_report.trapqs['toolhead']
+        motion_report = self.printer.lookup_object('motion_report')
+        if self.motion_queue_strategy == 'trapqs':
+            return motion_report.trapqs['toolhead']
+        if self.motion_queue_strategy == 'dtrapqs':
+            return motion_report.dtrapqs['toolhead']
+        raise unhandled_member(
+            'motion queue strategy', self.motion_queue_strategy,
+            MOTION_QUEUE_STRATEGIES)
 
     def _requested_tools(self, gcmd, command):
         """The tools a command runs over, in the order it measures them."""
@@ -2380,8 +2506,8 @@ class EddyToolCalibration:
         return self.printer.config_error("%s: %s" % (self.name, message))
 
     def _handle_connect(self):
-        """Check the preheat's Kalico surfaces, resolve the sensor clock and
-        resolve every tool's heater once the heaters exist.
+        """Resolve the motion queue, the preheat wait and the sensor clock,
+        then resolve every tool's heater once the heaters exist.
 
         Extruder sections are still being created while this section is
         parsed, so neither the heater names nor the heaters object can be
@@ -2390,9 +2516,35 @@ class EddyToolCalibration:
         are not known here, so each one is resolved when a command names it
         instead.
         """
+        logging.info(
+            "%s: sensor driver import resolved by %s",
+            self.name, self.sensor_import_strategy)
+        motion_report = self.printer.lookup_object('motion_report', None)
+        if motion_report is not None:
+            try:
+                self.motion_queue_strategy = resolve_motion_queue(
+                    motion_report)
+            except ValueError as e:
+                raise self._startup_error(str(e))
+            logging.info(
+                "%s: motion queue resolved by %s",
+                self.name, self.motion_queue_strategy)
         if not self.calibrate_z:
             return
-        self._require_preheat_surfaces()
+        # A printer with no heater at all carries no heaters object to
+        # resolve against, and it never reaches the wait either: the heater
+        # lookup every preheat starts with refuses such a machine first, and
+        # it names the missing hotend rather than a missing firmware method.
+        pheaters = self.printer.lookup_object('heaters', None)
+        if pheaters is not None:
+            try:
+                self.preheat_wait_strategy = resolve_preheat_wait(
+                    self.printer, pheaters)
+            except ValueError as e:
+                raise self._startup_error(str(e))
+            logging.info(
+                "%s: preheat wait resolved by %s",
+                self.name, self.preheat_wait_strategy)
         try:
             strategy, self.sensor_clock = resolve_sensor_clock(
                 self.sensor, self.sensor_module)
@@ -2405,33 +2557,6 @@ class EddyToolCalibration:
             return
         for tool in range(self.tool_count):
             self._tool_heater(tool, self._startup_error)
-
-    def _require_preheat_surfaces(self):
-        """Refuse at startup a Kalico build the preheat cannot wait on.
-
-        Both surfaces are first reached after a command has already brought
-        every listed tool to its setpoint, and an AttributeError inside a
-        gcode handler is a printer shutdown rather than a message, so a build
-        without them has to fail here instead.
-        """
-        missing = [
-            "printer.%s" % (name,) for name in PREHEAT_PRINTER_METHODS
-            if not callable(getattr(self.printer, name, None))]
-        pheaters = self.printer.lookup_object('heaters', None)
-        if pheaters is not None:
-            missing.extend(
-                "heaters.%s" % (name,) for name in PREHEAT_HEATERS_METHODS
-                if not callable(getattr(pheaters, name, None)))
-        # A printer with no heater at all carries no heaters object to check,
-        # and it never reaches these surfaces either: the heater lookup every
-        # preheat starts with refuses such a machine first, and it names the
-        # missing hotend rather than a missing Kalico method.
-        if missing:
-            raise self._startup_error(
-                "this Kalico build does not carry %s, which the nozzle "
-                "preheat waits on. Update Kalico to a build that carries it, "
-                "or set calibrate_z to False, which heats nothing and runs no "
-                "descent." % (", ".join(missing),))
 
     def _tool_heater(self, tool, error):
         """The heater holding one tool's nozzle, as (section name, heater).
@@ -2515,14 +2640,15 @@ class EddyToolCalibration:
     def _wait_for_band(self, gcmd, tool, name, heater, setpoint):
         """Wait until one nozzle reads inside the band around its setpoint.
 
-        The polling is printer.wait_while, the same primitive Kalico's own
-        heater wait uses, so the reactor keeps running and a shutdown or a
-        gcode interrupt ends the wait as it would end any other. A heater that
+        The polling runs through the preheat wait strategy resolved at
+        connect, so the reactor keeps running and a shutdown or a gcode
+        interrupt ends the wait as it would end any other. A heater that
         never approaches its setpoint is not this plugin's to diagnose: every
-        heater is supervised by Kalico's verify_heater, which shuts the printer
-        down when one stops approaching, and that shutdown ends this wait.
-        Each poll emits the M105 line heaters.py's cmd_TEMPERATURE_WAIT emits,
-        which front ends read to follow a wait that blocks for minutes.
+        heater is supervised by the firmware's verify_heater, which shuts the
+        printer down when one stops approaching, and that shutdown ends this
+        wait. Each poll emits the M105 line heaters.py's cmd_TEMPERATURE_WAIT
+        emits, which front ends read to follow a wait that blocks for
+        minutes.
         """
         # A batch run replays a gcode file against no hardware, so its heaters
         # never move and any wait on a reading would never return. Kalico's own
@@ -2543,7 +2669,19 @@ class EddyToolCalibration:
             gcmd.respond_raw(pheaters._get_temp(eventtime))
             return True
 
-        self.printer.wait_while(waiting)
+        if self.preheat_wait_strategy == 'printer_wait_while':
+            self.printer.wait_while(waiting)
+            return
+        if self.preheat_wait_strategy == 'reactor_poll':
+            preheat_poll_wait(
+                self.printer.get_reactor(), self.printer.is_shutdown,
+                waiting, gcmd.error,
+                "T%d to reach %.1f C on the heater %s"
+                % (tool, setpoint, name))
+            return
+        raise unhandled_member(
+            'preheat wait strategy', self.preheat_wait_strategy,
+            PREHEAT_WAIT_STRATEGIES)
 
     # -- machine resolution -----------------------------------------------
 

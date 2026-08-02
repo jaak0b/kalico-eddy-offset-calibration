@@ -71,7 +71,7 @@ divider 1, `ldc1612.py:223`; Kalico development pairs 12 MHz with divider 2,
 `ldc1612.py:108`), and a fingerprint that folds the divider in would refuse
 anchors whose frequencies are still physically valid after a mere firmware
 update.
-`reactor_poll` is stock Klipper's own heater wait loop (`heaters.py:348-352` in
+`reactor_poll` is stock Klipper's own heater wait loop (`heaters.py:348-351` in
 `v0.13.0`, `:356-359` on master), polling `reactor.pause(eventtime + 1.)` while
 the printer is not shut down and emitting the M105 line on each pass, with one
 deviation: a wait that ends on a shutdown raises rather than returning, because
