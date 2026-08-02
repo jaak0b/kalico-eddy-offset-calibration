@@ -2163,10 +2163,18 @@ class EddyToolCalibration:
         toolhead.wait_moves()
 
     def _retreat(self):
-        """Lift the toolhead clear of the coil and the switch."""
+        """Lift the toolhead clear of the coil and the switch.
+
+        The retreat height sits above the coil, and a tool that failed while
+        probing the switch or while docking stands higher than that, so this
+        only ever raises: commanding the height outright would drive such a
+        tool down through whatever it was standing over.
+        """
         toolhead = self.printer.lookup_object('toolhead')
-        toolhead.manual_move(
-            [None, None, self._retreat_z()], self.z_speed)
+        retreat_z = self._retreat_z()
+        if retreat_z <= toolhead.get_position()[2]:
+            return
+        toolhead.manual_move([None, None, retreat_z], self.z_speed)
         toolhead.wait_moves()
 
     @contextlib.contextmanager
