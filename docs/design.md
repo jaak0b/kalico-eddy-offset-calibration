@@ -29,6 +29,137 @@ eddy_nozzle_probe/
 Install: symlink `eddy_tool_calibration.py` into `klippy/plugins/`. Moonraker
 update_manager entry documented in README.
 
+## Firmware compatibility
+
+The plugin has to run on more than one firmware build, and a handful of the
+things it reaches for are spelled differently from one build to the next. The
+firmware table is the one place those differences are written down: one row per
+surface that differs, and each row names every way the plugin knows how to
+reach that surface. What it buys is a single answer to "which parts of this
+plugin depend on the firmware", and a build the plugin cannot use is refused at
+startup by name instead of failing halfway through a command.
+
+Every row is a closed set of named strategies plus an explicit unsupported
+outcome. Rows resolve by inspecting what the object in front of them carries,
+never by the firmware's name or its version string: the differences do not line
+up with either. The firmware's name appears in messages only, never in a
+decision.
+
+| Row | Surface it covers | Strategies | What is inspected |
+|---|---|---|---|
+| sensor driver import | the Python name the `ldc1612` driver module imports under | `klippy_package`, `extras_package` | `klippy.extras.ldc1612` is tried first and `extras.ldc1612` second; the first that imports wins |
+| motion queue | the dictionary of motion queues `motion_report` publishes, read once per scan | `trapqs`, `dtrapqs` | which of the two attribute names the `motion_report` object carries |
+| preheat wait | the interruptible wait a nozzle preheat polls on | `printer_wait_while`, `reactor_poll` | whether `printer.wait_while` is callable |
+| sensor clock | the LDC1612 reference clock in hertz, stored in every anchor as its fingerprint | `driver_clock_freq`, `driver_frequency`, `module_clock` | whether the driver carries `clock_freq`; failing that, whether it carries `frequency`; failing that, whether the `ldc1612` module carries `LDC1612_FREQ` |
+
+Both preheat strategies also need `heaters._get_temp`, the M105 line the wait
+emits on each poll, so a build without it fails that row whichever wait it has.
+What the four reference builds resolve to, read from their sources:
+
+| Row | Kalico development | Kalico `3b98cf51` (2025-12-14) | Klipper `v0.13.0` | Klipper master |
+|---|---|---|---|---|
+| sensor driver import | `klippy_package` (`klippy/__init__.py` present) | `klippy_package` (present) | `extras_package` (no `klippy/__init__.py`; `klippy.py:103` imports `extras.` plus the name) | `extras_package` (`klippy.py:103`) |
+| motion queue | `trapqs` (`motion_report.py:210`) | `trapqs` (`:210`) | `trapqs` (`:137`) | `dtrapqs` (`:149`) |
+| preheat wait | `printer_wait_while` (`printer.py:504`) | `printer_wait_while` (`printer.py:624`) | `reactor_poll` (no `wait_while` in `klippy.py`) | `reactor_poll` (none) |
+| sensor clock | `driver_clock_freq` (`ldc1612.py:103`) | `module_clock` (`ldc1612.py:16`) | `driver_frequency` (`ldc1612.py:90`) | `driver_clock_freq` (`ldc1612.py:91`) |
+
+The sensor clock row stamps the clock rather than the count-to-hertz
+conversion, because the clock moves only when the hardware moves: a driver may
+split the same physical scale differently between the clock and its sensor
+divider from one build to the next (Kalico `3b98cf51` pairs 12 MHz with
+divider 1, `ldc1612.py:223`; Kalico development pairs 12 MHz with divider 2,
+`ldc1612.py:108`), and a fingerprint that folds the divider in would refuse
+anchors whose frequencies are still physically valid after a mere firmware
+update.
+`reactor_poll` is stock Klipper's own heater wait loop (`heaters.py:348-352` in
+`v0.13.0`, `:356-359` on master), polling `reactor.pause(eventtime + 1.)` while
+the printer is not shut down and emitting the M105 line on each pass, with one
+deviation: a wait that ends on a shutdown raises rather than returning, because
+the caller measures as soon as it returns.
+
+**A row that resolves to nothing is a startup error**, never a strategy that
+absorbs whatever is left. The message names the row, every strategy the row
+knows and what this build was found to carry, as labeled rows:
+
+```
+eddy_tool_calibration: the sensor clock cannot be resolved on this
+firmware build.
+strategies this plugin knows: driver_clock_freq, driver_frequency, module_clock
+ldc1612 driver carries clock_freq: no
+ldc1612 driver carries frequency: no
+ldc1612 module carries LDC1612_FREQ: no
+Report this with the firmware name and version, or install a firmware version
+the requirements name.
+```
+
+**Where resolution happens.** Resolving at startup rather than on first use is
+the whole point, because an unexpected exception inside a gcode handler shuts
+the printer down instead of printing a message. The sensor driver import
+resolves in the plugin's constructor, since the driver module is what
+`LDC1612(config)` is built from; its failure is a config error at load. The
+other three resolve at `klippy:connect`, in `_handle_connect`, whose call to
+`_require_preheat_surfaces` becomes the preheat wait row and is not joined by a
+second check: the method keeps exactly one resolution step, ahead of the
+per-tool heater lookups it already does. It returns early with `calibrate_z`
+False, and the preheat wait and sensor clock rows keep that gate, because
+a machine measuring XY only heats nothing and stores no anchor. The motion
+queue row resolves whatever `calibrate_z` says, because every scan reads it,
+and a printer with no steppers carries no `motion_report` object and leaves it
+unresolved, where a scan still reports `_get_trapq`'s existing error naming the
+missing steppers. Every resolved strategy is logged at connect, so a support
+question can be answered from `klippy.log` alone.
+
+**What each row replaces.** The import row replaces the `from klippy.extras
+import ldc1612` statement at `:2000`. The motion queue row replaces the literal
+`motion_report.trapqs['toolhead']` at `:2146`; `_get_trapq` itself stays,
+including its error for a printer with no motion queue. The preheat wait row
+replaces `self.printer.wait_while(waiting)` at `:2498` and deletes
+`_require_preheat_surfaces` (`:2361-2386`), its call at `:2355`, and the
+constants `PREHEAT_PRINTER_METHODS` and `PREHEAT_HEATERS_METHODS`
+(`:1783-1790`). The sensor clock row replaces the two `_sensor_freq_conv`
+calls and deletes `_sensor_freq_conv` together with `DEFAULT_SENSOR_CLOCK`;
+the two call sites read the clock resolved at connect instead.
+
+**The sensor fingerprint is corrected in the process.** `_sensor_freq_conv`
+falls back to `DEFAULT_SENSOR_CLOCK * 2 / 2^28`, that is 24000000 / 2^28, or
+0.0894069671630859375 Hz per count. The real conversion of a build without
+`freq_conv` is 12000000 / 2^28, or 0.0447034835815429688 Hz per count
+(`Kalico 3b98cf51 ldc1612.py:194`; `Klipper v0.13.0 ldc1612.py:158` with the
+default clock), exactly half, so on those builds the anchor readout prints
+twice the driver's conversion and the doubled number goes into every stored
+anchor. It is not wrong everywhere: Kalico development and Klipper master both
+compute it for a 12 MHz clock, each pairing that clock with a sensor divider of
+2 (`ldc1612.py:108-109`, `:95-96`), which is why the comparison has never fired
+falsely. No measured offset moves, because the number is only ever compared
+against itself and the reported frequencies do not change. The correction is
+the fingerprint change itself: the anchor stores the resolved clock in hertz
+instead of any conversion, so there is no fallback constant left to freeze and
+nothing that doubles.
+
+An anchor stored under the old `freq_conv` field is refused when the state
+file is read, with a message naming the earlier plugin version and
+`EDDY_CALIBRATE_Z T=<n>`, worded apart from the hardware-change refusal:
+every read of a current anchor goes through `_anchor`, which calls
+`anchor_sensor_mismatch` and raises its refusal naming the stored and the
+live clock in hertz and `EDDY_CALIBRATE_Z T=<n>`. There is no migration and
+none is wanted, for the reason the state file section already gives.
+
+**Selection is unit-testable without a firmware.** Each row's selection is a
+pure function of what an object exposes, so each gets a module-level function
+taking plain objects and importing nothing from klippy: the motion queue row
+takes the `motion_report` object, the preheat wait row the printer and heaters
+objects, the sensor clock row the driver object and the driver module, and
+the import row the callable that imports a module by name. Each returns a
+strategy name or raises the unsupported text. Tests build stand-ins carrying
+exactly the attribute set one reference build carries, one per build per row,
+and assert the resolution the table above claims. Expected values are literals
+read out of the firmware source at the file and line the table cites, never
+obtained by calling the plugin: the clock tests assert the literal 12000000
+every reference build defaults to, and a configured-clock test asserts the
+crab board's 24000000. One further test asserts that a stand-in
+matching no strategy raises, and that the text names the row, every strategy
+and each attribute that was looked for.
+
 ## Config schema (single section)
 
 ```ini
@@ -122,7 +253,7 @@ written by `EDDY_CALIBRATE_Z` as soon as a reference is measured.
 The state file holds one JSON object per anchored tool under an `"anchors"`
 key, keyed by decimal tool number as a string, alongside a top-level
 `"version"` field (currently 1). Each entry stores `anchor_height`,
-`anchor_frequency`, `setpoint_temperature`, `freq_conv` and `drive_current`,
+`anchor_frequency`, `setpoint_temperature`, `sensor_clock` and `drive_current`,
 the five fields an offset run reads, plus diagnostic record fields that are
 never fed back into a
 measurement: `observed_temperature`, the reading the heater showed while the
@@ -143,27 +274,27 @@ command that rewrites the references from scratch. There is no migration
 path: every field an anchor record carries comes out of one measurement, so a
 record missing one cannot be completed without measuring again.
 
-`freq_conv` and `drive_current` are the sensor settings the anchor frequency
-was measured with: the driver's count-to-hertz conversion, which folds in both
-the CLKIN frequency and the divider the driver derives from it, and the
-LDC1612 drive current register value. A coil's frequency at a given height
-depends on both, so an anchor frequency describes a height only for the
-settings it was taken under. Every read of a stored anchor compares the two
-against what the driver reports now and refuses the anchor on any difference,
+`sensor_clock` and `drive_current` are the sensor settings the anchor
+frequency was measured with: the LDC1612 reference clock in hertz, resolved
+per the firmware table's sensor clock row, and the LDC1612 drive current
+register value. A coil's frequency at a given height depends on both, so an
+anchor frequency describes a height only for the settings it was taken under.
+Every read of a stored anchor compares the two
+against what the firmware reports now and refuses the anchor on any difference,
 naming the tool, both stored and current values, and `EDDY_CALIBRATE_Z T=<n>`.
 `EDDY_CALIBRATE_OFFSET` and `EDDY_REPEATABILITY` make that comparison before
 they move. Refusing rather than warning is deliberate: the alternative is a Z
 offset wrong by an unknown amount.
 
 The comparison is exact and carries no tolerance. Both are settings rather
-than measurements, the drive current an integer register value and `freq_conv`
-a quotient of an integer clock, so unchanged settings give back an identical
-number and any difference at all is a real change.
+than measurements, the drive current an integer register value and
+`sensor_clock` an integer number of hertz, so unchanged settings give back an
+identical number and any difference at all is a real change.
 
 What this catches: an `LDC_CALIBRATE_DRIVE_CURRENT` run followed by
 `SAVE_CONFIG`, which writes `reg_drive_current` straight back into this
 plugin's own config section; a hand-edited `frequency`; and a move to a board
-whose clock scales counts differently. What it cannot catch: a change that
+whose reference clock differs. What it cannot catch: a change that
 leaves the scale alone. The 12 MHz driver default is paired with a divider of
 2 and so yields the same conversion as a 24 MHz clock, and swapping to a
 different but identically configured coil changes no number either side of the

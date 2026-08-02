@@ -37,10 +37,6 @@ import time
 # signal rather than trimming real data.
 FREQ_MIN_DEFAULT = 1000000.0
 
-# Kalico's DEFAULT_LDC1612_FREQ (ldc1612.py:16), the clock a build without the
-# frequency config option holds the sensor at.
-DEFAULT_SENSOR_CLOCK = 12000000
-
 # Provenance: upstream peak-type auto-detection compares the average of the
 # scan edges against the average of the middle band, taken as 35% to 65% of
 # the pass.
@@ -710,6 +706,39 @@ def preheat_plan_rows(entries, band, settle_time):
     return rows
 
 
+# --- firmware surface: the LDC1612 reference clock -------------------------
+
+SENSOR_CLOCK_STRATEGIES = (
+    'driver_clock_freq', 'driver_frequency', 'module_clock')
+
+
+def resolve_sensor_clock(driver, module):
+    """The strategy that reaches the LDC1612 reference clock on this firmware
+    build and the clock it reads, as (strategy name, clock in Hz).
+
+    Provenance: Kalico development ldc1612.py:103 and Klipper master
+    ldc1612.py:91 hold the configured clock as the clock_freq attribute;
+    Klipper v0.13.0 ldc1612.py:90 holds it as the frequency attribute; Kalico
+    3b98cf51 holds it only as the module constant LDC1612_FREQ
+    (ldc1612.py:16).
+    """
+    if hasattr(driver, 'clock_freq'):
+        return 'driver_clock_freq', float(driver.clock_freq)
+    if hasattr(driver, 'frequency'):
+        return 'driver_frequency', float(driver.frequency)
+    if hasattr(module, 'LDC1612_FREQ'):
+        return 'module_clock', float(module.LDC1612_FREQ)
+    raise ValueError(
+        "the sensor clock cannot be resolved on this firmware build.\n"
+        "strategies this plugin knows: %s\n"
+        "ldc1612 driver carries clock_freq: no\n"
+        "ldc1612 driver carries frequency: no\n"
+        "ldc1612 module carries LDC1612_FREQ: no\n"
+        "Report this with the firmware name and version, or install a "
+        "firmware version the requirements name."
+        % (", ".join(SENSOR_CLOCK_STRATEGIES),))
+
+
 # --- persisted calibration state -------------------------------------------
 
 STATE_DIR = 'EddyToolCalibration'
@@ -718,7 +747,7 @@ STATE_FILENAME = 'calibration_state.json'
 STATE_VERSION = 1
 
 # Every field of an anchor record, the type the state file stores it as, and
-# whether get_status publishes it. freq_conv and drive_current are withheld
+# whether get_status publishes it. sensor_clock and drive_current are withheld
 # because an anchor frequency describes a height only under the sensor
 # settings it was taken with, a comparison the plugin makes itself rather than
 # leaving to a macro, and the curve bounds and the fitted center are
@@ -727,7 +756,7 @@ ANCHOR_FIELDS = (
     ('anchor_height', float, True),
     ('anchor_frequency', float, True),
     ('setpoint_temperature', float, True),
-    ('freq_conv', float, False),
+    ('sensor_clock', float, False),
     ('drive_current', float, False),
     ('observed_temperature', float, True),
     ('trigger_z', float, True),
@@ -746,7 +775,7 @@ ANCHOR_STATUS_FIELDS = tuple(
 
 
 def anchor_record(curve, trigger_z, setpoint_temperature,
-                  observed_temperature, freq_conv, drive_current,
+                  observed_temperature, sensor_clock, drive_current,
                   center_x, center_y):
     """The Z reference one EDDY_CALIBRATE_Z run stores for a tool.
 
@@ -758,7 +787,7 @@ def anchor_record(curve, trigger_z, setpoint_temperature,
         'anchor_height': anchor_height,
         'anchor_frequency': anchor_frequency,
         'setpoint_temperature': setpoint_temperature,
-        'freq_conv': freq_conv,
+        'sensor_clock': sensor_clock,
         'drive_current': drive_current,
         'observed_temperature': observed_temperature,
         'trigger_z': trigger_z,
@@ -798,30 +827,30 @@ def missing_anchor_message(tools):
            ", ".join("T%d" % (t,) for t in tools)))
 
 
-def anchor_sensor_mismatch(tool, anchor, freq_conv, drive_current):
+def anchor_sensor_mismatch(tool, anchor, sensor_clock, drive_current):
     """Refusal text when an anchor's sensor settings are not the live ones.
 
     A coil's frequency at a given height depends on how hard the coil is
-    driven and on the clock the count is scaled by, so an anchor frequency
-    describes a height only under the settings it was taken with. Returns
-    None when both match.
+    driven and on the reference clock the count is scaled by, so an anchor
+    frequency describes a height only under the settings it was taken with.
+    Returns None when both match.
     """
-    stored_conv = float(anchor['freq_conv'])
+    stored_clock = float(anchor['sensor_clock'])
     stored_current = float(anchor['drive_current'])
-    if (stored_conv == float(freq_conv)
+    if (stored_clock == float(sensor_clock)
             and stored_current == float(drive_current)):
         return None
     return (
         "The Z reference for T%d was measured with sensor settings that are "
         "not the ones in use now, so the frequency it stores no longer "
         "describes the same height.\n"
-        "frequency conversion when anchored: %s\n"
-        "frequency conversion now: %s\n"
+        "sensor clock when anchored: %s Hz\n"
+        "sensor clock now: %s Hz\n"
         "drive current when anchored: %s\n"
         "drive current now: %s\n"
         "Run EDDY_CALIBRATE_Z T=%d to measure the reference again with the "
         "settings in use now."
-        % (int(tool), stored_conv, float(freq_conv), stored_current,
+        % (int(tool), stored_clock, float(sensor_clock), stored_current,
            float(drive_current), int(tool)))
 
 
@@ -879,6 +908,13 @@ def decode_state(text):
             raise ValueError(
                 "the anchor for T%d holds a %s where a JSON object was "
                 "expected" % (tool, type(record).__name__))
+        if 'freq_conv' in record and 'sensor_clock' not in record:
+            raise ValueError(
+                "the anchor for T%d was written by an earlier plugin version "
+                "that stored the frequency conversion instead of the sensor "
+                "clock, and the old field cannot be converted. Run "
+                "EDDY_CALIBRATE_Z T=%d to measure the reference again"
+                % (tool, tool))
         entry = {}
         for field in ANCHOR_NUMBER_FIELDS:
             value = require_anchor_field(tool, record, field)
@@ -1998,7 +2034,11 @@ class EddyToolCalibration:
         # passed through without a wrapper. It also registers
         # LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration for us.
         from klippy.extras import ldc1612
+        self.sensor_module = ldc1612
         self.sensor = ldc1612.LDC1612(config)
+        # Resolved at connect behind the calibrate_z gate; a machine measuring
+        # XY only stores no anchor and never reads a clock.
+        self.sensor_clock = None
 
         # Ported from tools_calibrate.py:438-476. The pin is marked multi-use
         # before it is looked up, so an existing [tools_calibrate] section may
@@ -2340,8 +2380,8 @@ class EddyToolCalibration:
         return self.printer.config_error("%s: %s" % (self.name, message))
 
     def _handle_connect(self):
-        """Check the preheat's Kalico surfaces and resolve every tool's heater
-        once the heaters exist.
+        """Check the preheat's Kalico surfaces, resolve the sensor clock and
+        resolve every tool's heater once the heaters exist.
 
         Extruder sections are still being created while this section is
         parsed, so neither the heater names nor the heaters object can be
@@ -2353,6 +2393,14 @@ class EddyToolCalibration:
         if not self.calibrate_z:
             return
         self._require_preheat_surfaces()
+        try:
+            strategy, self.sensor_clock = resolve_sensor_clock(
+                self.sensor, self.sensor_module)
+        except ValueError as e:
+            raise self._startup_error(str(e))
+        logging.info(
+            "%s: sensor clock resolved by %s: %s Hz",
+            self.name, strategy, self.sensor_clock)
         if self.tool_count is None:
             return
         for tool in range(self.tool_count):
@@ -3109,7 +3157,8 @@ class EddyToolCalibration:
         merge_aggregate(agg, agg_z)
         record = anchor_record(
             curve, trigger_z, self.calibration_temp, observed,
-            self._sensor_freq_conv(), self.sensor.dccal.get_drive_current(),
+            self._resolved_sensor_clock(gcmd),
+            self.sensor.dccal.get_drive_current(),
             center_x, center_y)
         previous = self.anchors.get(tool)
         self.anchors[tool] = record
@@ -3140,8 +3189,7 @@ class EddyToolCalibration:
         rows.extend(self._z_curve_rows(curve))
         rows.extend(anchor_rows(record))
         rows.extend([
-            "sensor frequency conversion: %s Hz per count"
-            % (record['freq_conv'],),
+            "sensor clock: %s Hz" % (record['sensor_clock'],),
             "sensor drive current: %d" % (record['drive_current'],),
         ])
         rows.extend(anchor_temperature_rows('nozzle', record))
@@ -3278,18 +3326,18 @@ class EddyToolCalibration:
             return None
         return self._anchor_setpoint(gcmd, tool)
 
-    def _sensor_freq_conv(self):
-        """The driver's count to hertz conversion.
-
-        Kalico exposes freq_conv on the LDC1612 object only from the build
-        that added the frequency config option (ldc1612.py:103-109). Older
-        builds hold the clock at DEFAULT_LDC1612_FREQ with a divider of 2 and
-        expose nothing, so their conversion is fixed and cannot move.
+    def _resolved_sensor_clock(self, gcmd):
+        """The clock resolved at connect. Every caller runs behind the same
+        calibrate_z gate as the resolution, so an unresolved clock here means
+        the gate was bypassed, and it is refused rather than stored.
         """
-        conv = getattr(self.sensor, 'freq_conv', None)
-        if conv is None:
-            return float(DEFAULT_SENSOR_CLOCK * 2) / (1 << 28)
-        return conv
+        if self.sensor_clock is None:
+            raise gcmd.error(
+                "Set calibrate_z to True in the [%s] config section and "
+                "restart. Z calibration is off, so the sensor clock was not "
+                "resolved at startup and no Z reference can be measured or "
+                "read." % (self.name,))
+        return self.sensor_clock
 
     def _anchor(self, gcmd, tool):
         """One tool's stored anchor, refused when it is missing and when the
@@ -3299,7 +3347,7 @@ class EddyToolCalibration:
             raise gcmd.error(missing_anchor_message([tool]))
         anchor = self.anchors[tool]
         mismatch = anchor_sensor_mismatch(
-            tool, anchor, self._sensor_freq_conv(),
+            tool, anchor, self._resolved_sensor_clock(gcmd),
             self.sensor.dccal.get_drive_current())
         if mismatch is not None:
             raise gcmd.error(mismatch)

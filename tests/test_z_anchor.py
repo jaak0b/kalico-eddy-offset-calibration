@@ -101,14 +101,14 @@ def test_the_stored_record_carries_the_anchor_and_the_run_that_measured_it():
     # Arrange: the same descent from 1.0 mm to 4.0 mm and the same 0.4000 mm
     # trigger plane as above, so the anchor pair is 2.1000 mm above the
     # trigger plane at 70 Hz. The run held the nozzle at a 150.0 C setpoint
-    # while the heater read 149.7 C, with the sensor converting counts at
-    # 0.08940696716308594 Hz on drive current 15, over a coil found at
+    # while the heater read 149.7 C, with the sensor running the crab board's
+    # 24000000.0 Hz clock on drive current 15, over a coil found at
     # X 349.8721, Y 5.0413.
     curve = etc.build_z_curve([(1.0, 100.0), (2.0, 80.0), (4.0, 40.0)])
 
     # Act
     record = etc.anchor_record(
-        curve, 0.4000, 150.0, 149.7, 0.08940696716308594, 15, 349.8721,
+        curve, 0.4000, 150.0, 149.7, 24000000.0, 15, 349.8721,
         5.0413)
 
     # Assert
@@ -128,7 +128,7 @@ def test_a_stored_record_survives_the_state_file_as_it_was_built():
     # field the encoder demands and the run never fills fails here.
     curve = etc.build_z_curve([(1.0, 100.0), (2.0, 80.0), (4.0, 40.0)])
     record = etc.anchor_record(
-        curve, 0.4000, 150.0, 149.7, 0.08940696716308594, 15, 349.8721,
+        curve, 0.4000, 150.0, 149.7, 24000000.0, 15, 349.8721,
         5.0413)
 
     # Act
@@ -146,7 +146,7 @@ def test_the_status_readout_withholds_the_sensor_settings_of_an_anchor():
     published = etc.anchor_status(2, record)
 
     # Assert: a macro reads the anchor pair, the temperatures and the trigger
-    # plane. freq_conv, drive_current, the curve bounds and the coil center
+    # plane. sensor_clock, drive_current, the curve bounds and the coil center
     # are diagnostics of the run that measured the anchor.
     assert published == {
         'anchor_height': 4.2130,
@@ -250,14 +250,14 @@ def test_reports_the_seeded_trigger_delta_for_two_different_hotends():
 
 
 def _anchor_record():
-    # freq_conv is the count-to-hertz conversion of a 24 MHz sensor clock and
-    # drive_current the LDC1612 register value, both as the driver reports
-    # them at the moment the anchor is measured.
+    # sensor_clock is the crab board's 24 MHz LDC1612 reference clock in Hz
+    # and drive_current the LDC1612 register value, both as the firmware
+    # reports them at the moment the anchor is measured.
     return {
         'anchor_height': 4.2130,
         'anchor_frequency': 12345678.0,
         'setpoint_temperature': 150.0,
-        'freq_conv': 0.08940696716308594,
+        'sensor_clock': 24000000.0,
         'drive_current': 15.0,
         'observed_temperature': 149.7,
         'trigger_z': 1.2340,
@@ -336,7 +336,7 @@ def test_a_missing_anchor_field_is_rejected():
     # Arrange: a record with no anchor frequency, which the offset math reads.
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"setpoint_temperature": 150.0, '
-            '"freq_conv": 0.08940696716308594, "drive_current": 15, '
+            '"sensor_clock": 24000000.0, "drive_current": 15, '
             '"observed_temperature": 149.7, '
             '"trigger_z": 1.0, "curve_low_z": 0.5, '
             '"curve_high_z": 5.0, "center_x": 1.0, "center_y": 2.0, '
@@ -353,7 +353,7 @@ def test_an_anchor_without_a_setpoint_is_rejected():
     # heats to, and the record is refused instead of reinterpreted.
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"anchor_frequency": 12345678.0, "temperature": 149.7, '
-            '"freq_conv": 0.08940696716308594, "drive_current": 15, '
+            '"sensor_clock": 24000000.0, "drive_current": 15, '
             '"observed_temperature": 149.7, "trigger_z": 1.0, '
             '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
             '"center_y": 2.0, "updated": "x"}}}')
@@ -365,7 +365,7 @@ def test_an_anchor_without_a_setpoint_is_rejected():
 def test_an_anchor_without_the_reading_observed_at_anchor_time_is_rejected():
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"anchor_frequency": 12345678.0, "setpoint_temperature": 150.0, '
-            '"freq_conv": 0.08940696716308594, "drive_current": 15, '
+            '"sensor_clock": 24000000.0, "drive_current": 15, '
             '"trigger_z": 1.0, "curve_low_z": 0.5, "curve_high_z": 5.0, '
             '"center_x": 1.0, "center_y": 2.0, "updated": "x"}}}')
 
@@ -376,7 +376,7 @@ def test_an_anchor_without_the_reading_observed_at_anchor_time_is_rejected():
 def test_an_anchor_setpoint_that_is_not_a_number_is_rejected():
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"anchor_frequency": 12345678.0, "setpoint_temperature": "hot", '
-            '"freq_conv": 0.08940696716308594, "drive_current": 15, '
+            '"sensor_clock": 24000000.0, "drive_current": 15, '
             '"observed_temperature": 149.7, "trigger_z": 1.0, '
             '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
             '"center_y": 2.0, "updated": "x"}}}')
@@ -386,34 +386,54 @@ def test_an_anchor_setpoint_that_is_not_a_number_is_rejected():
 
 
 def test_the_round_trip_keeps_the_sensor_settings_the_anchor_was_taken_with():
-    # Arrange: an anchor measured at the 0.08940696716308594 Hz per count
-    # conversion of a 24 MHz clock, with drive current 15.
+    # Arrange: an anchor measured on the crab board's 24000000.0 Hz clock,
+    # with drive current 15.
     anchors = {1: _anchor_record()}
 
     # Act
     decoded = etc.decode_state(etc.encode_state(anchors))
 
     # Assert
-    assert decoded[1]['freq_conv'] == pytest.approx(
-        0.08940696716308594, abs=1e-17)
+    assert decoded[1]['sensor_clock'] == pytest.approx(24000000.0, abs=1e-9)
     assert decoded[1]['drive_current'] == pytest.approx(15.0, abs=1e-9)
 
 
-def test_an_anchor_without_the_frequency_conversion_is_rejected():
+def test_an_anchor_without_the_sensor_clock_is_rejected():
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"anchor_frequency": 12345678.0, "setpoint_temperature": 150.0, '
             '"drive_current": 15, "observed_temperature": 149.7, '
             '"trigger_z": 1.0, "curve_low_z": 0.5, "curve_high_z": 5.0, '
             '"center_x": 1.0, "center_y": 2.0, "updated": "x"}}}')
 
-    with pytest.raises(ValueError, match="missing the freq_conv"):
+    with pytest.raises(ValueError, match="missing the sensor_clock"):
         etc.decode_state(text)
+
+
+def test_an_anchor_storing_the_old_frequency_conversion_field_is_rejected():
+    # Arrange: a state file written by the plugin version that fingerprinted
+    # anchors with the count-to-hertz conversion rather than the clock.
+    text = ('{"version": 1, "anchors": {"1": {"anchor_height": 4.2, '
+            '"anchor_frequency": 12345678.0, "setpoint_temperature": 150.0, '
+            '"freq_conv": 0.08940696716308594, "drive_current": 15, '
+            '"observed_temperature": 149.7, "trigger_z": 1.0, '
+            '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
+            '"center_y": 2.0, "updated": "x"}}}')
+
+    # Act / Assert: the refusal names the earlier version and the command,
+    # not the hardware, so it reads apart from a sensor that really changed.
+    with pytest.raises(ValueError) as excinfo:
+        etc.decode_state(text)
+    message = str(excinfo.value)
+    assert "earlier plugin version" in message
+    assert "frequency conversion" in message
+    assert "EDDY_CALIBRATE_Z T=1" in message
+    assert "sensor settings" not in message
 
 
 def test_an_anchor_without_the_drive_current_is_rejected():
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"anchor_frequency": 12345678.0, "setpoint_temperature": 150.0, '
-            '"freq_conv": 0.08940696716308594, '
+            '"sensor_clock": 24000000.0, '
             '"observed_temperature": 149.7, "trigger_z": 1.0, '
             '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
             '"center_y": 2.0, "updated": "x"}}}')
@@ -422,10 +442,10 @@ def test_an_anchor_without_the_drive_current_is_rejected():
         etc.decode_state(text)
 
 
-def test_a_frequency_conversion_that_is_not_a_number_is_rejected():
+def test_a_sensor_clock_that_is_not_a_number_is_rejected():
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"anchor_frequency": 12345678.0, "setpoint_temperature": 150.0, '
-            '"freq_conv": "24MHz", "drive_current": 15, '
+            '"sensor_clock": "24MHz", "drive_current": 15, '
             '"observed_temperature": 149.7, "trigger_z": 1.0, '
             '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
             '"center_y": 2.0, "updated": "x"}}}')
@@ -437,7 +457,7 @@ def test_a_frequency_conversion_that_is_not_a_number_is_rejected():
 def test_a_drive_current_that_is_not_a_number_is_rejected():
     text = ('{"version": 1, "anchors": {"0": {"anchor_height": 4.2, '
             '"anchor_frequency": 12345678.0, "setpoint_temperature": 150.0, '
-            '"freq_conv": 0.08940696716308594, "drive_current": "default", '
+            '"sensor_clock": 24000000.0, "drive_current": "default", '
             '"observed_temperature": 149.7, "trigger_z": 1.0, '
             '"curve_low_z": 0.5, "curve_high_z": 5.0, "center_x": 1.0, '
             '"center_y": 2.0, "updated": "x"}}}')
@@ -450,12 +470,12 @@ def test_a_drive_current_that_is_not_a_number_is_rejected():
 
 
 def test_an_anchor_taken_with_the_live_sensor_settings_is_accepted():
-    # Arrange: the record was measured at 0.08940696716308594 Hz per count
-    # with drive current 15, and those are the settings the driver reports now.
+    # Arrange: the record was measured on a 24000000.0 Hz clock with drive
+    # current 15, and those are the settings the firmware reports now.
     anchor = _anchor_record()
 
     # Act
-    mismatch = etc.anchor_sensor_mismatch(0, anchor, 0.08940696716308594, 15)
+    mismatch = etc.anchor_sensor_mismatch(0, anchor, 24000000.0, 15)
 
     # Assert
     assert mismatch is None
@@ -467,7 +487,7 @@ def test_an_anchor_taken_at_another_drive_current_is_refused():
     anchor = _anchor_record()
 
     # Act
-    mismatch = etc.anchor_sensor_mismatch(2, anchor, 0.08940696716308594, 22)
+    mismatch = etc.anchor_sensor_mismatch(2, anchor, 24000000.0, 22)
 
     # Assert: the refusal names the tool, both values and the command that
     # measures the reference again.
@@ -478,22 +498,22 @@ def test_an_anchor_taken_at_another_drive_current_is_refused():
     assert "EDDY_CALIBRATE_Z T=2" in mismatch
 
 
-def test_an_anchor_taken_at_another_frequency_conversion_is_refused():
-    # Arrange: the anchor carries the 0.08940696716308594 Hz per count of a
-    # 24 MHz clock, and the sensor now runs a 16 MHz clock, whose conversion
-    # is 0.059604644775390625 Hz per count.
+def test_an_anchor_taken_on_another_sensor_clock_is_refused():
+    # Arrange: the anchor was measured on the crab board's 24 MHz clock, and
+    # the board in use now is a 12 MHz Eddy Coil unit.
     anchor = _anchor_record()
 
     # Act
-    mismatch = etc.anchor_sensor_mismatch(1, anchor, 0.059604644775390625, 15)
+    mismatch = etc.anchor_sensor_mismatch(1, anchor, 12000000.0, 15)
 
-    # Assert
+    # Assert: the refusal names the stored and the live clock with their
+    # unit, so it reads apart from a state file an earlier version wrote.
     assert mismatch is not None
     assert "T1" in mismatch
-    assert ("frequency conversion when anchored: 0.08940696716308594"
-            in mismatch)
-    assert "frequency conversion now: 0.059604644775390625" in mismatch
+    assert "sensor clock when anchored: 24000000.0 Hz" in mismatch
+    assert "sensor clock now: 12000000.0 Hz" in mismatch
     assert "EDDY_CALIBRATE_Z T=1" in mismatch
+    assert "earlier plugin version" not in mismatch
 
 
 def test_a_drive_current_that_differs_by_one_step_is_refused():
@@ -501,7 +521,7 @@ def test_a_drive_current_that_differs_by_one_step_is_refused():
     anchor = _anchor_record()
 
     # Act
-    mismatch = etc.anchor_sensor_mismatch(0, anchor, 0.08940696716308594, 16)
+    mismatch = etc.anchor_sensor_mismatch(0, anchor, 24000000.0, 16)
 
     # Assert
     assert mismatch is not None
