@@ -197,3 +197,132 @@ def test_an_unmeasured_z_offset_leaves_its_row_out():
     rows = etc.offset_rows({'x': 0.05, 'y': -0.12, 'z': None})
 
     assert rows == ["offset x: +0.0500", "offset y: -0.1200"]
+
+
+# --- offsets against the session baseline ----------------------------------
+#
+# The baseline sits at x 100.0000, y -40.0000 and a trigger plane of 1.0000,
+# and T1 is measured 0.0500 to the right of it, 0.2000 in front of it and
+# 0.0300 above it. Every expected offset below is that seeded difference.
+
+BASELINE = {'tool': 0, 'x': 100.0, 'y': -40.0, 'z_curve': None,
+            'z_trigger': 1.0}
+
+
+def _measured(x, y, z_trigger, session_id=4):
+    return {
+        'x': x,
+        'y': y,
+        'z_curve': None,
+        'z_crossing': 2.5,
+        'z_trigger': z_trigger,
+        'setpoint_temperature': 150.0,
+        'observed_temperature': 149.7,
+        'agg': {'samples_used': 6916},
+        'session_id': session_id,
+        'measured_time': 1234.5,
+    }
+
+
+def test_a_measured_tool_reports_its_difference_from_the_baseline():
+    offsets = etc.measured_offsets(
+        1, 0, _measured(100.05, -40.2, 1.03), BASELINE, True)
+
+    assert offsets['x'] == pytest.approx(0.05, abs=1e-12)
+    assert offsets['y'] == pytest.approx(-0.2, abs=1e-12)
+    assert offsets['z'] == pytest.approx(0.03, abs=1e-12)
+
+
+def test_a_measurement_without_a_descent_reports_no_z_offset():
+    # A zero here would read as a measured offset of zero.
+    offsets = etc.measured_offsets(
+        1, 0, _measured(100.05, -40.2, 1.03), BASELINE, False)
+
+    assert offsets['z'] is None
+
+
+def test_the_baseline_tool_reports_no_offsets_of_its_own():
+    assert etc.measured_offsets(
+        0, 0, _measured(100.0, -40.0, 1.0), BASELINE, True) is None
+
+
+def test_a_tool_measured_without_a_session_baseline_reports_no_offsets():
+    assert etc.measured_offsets(
+        1, 0, _measured(100.05, -40.2, 1.03), None, True) is None
+
+
+# --- the status document a macro reads -------------------------------------
+
+
+def _status(results, baseline=BASELINE, session_id=4, calibrate_z=True):
+    return etc.status_document(
+        {}, results, baseline, 0, session_id, 1, 2, calibrate_z)
+
+
+def test_the_status_document_publishes_a_measured_tool_in_full():
+    document = _status({1: _measured(100.05, -40.2, 1.03)})
+
+    assert set(document['tools']) == {'1'}
+    published = document['tools']['1']
+    assert published['offset_x'] == pytest.approx(0.05, abs=1e-12)
+    assert published['offset_y'] == pytest.approx(-0.2, abs=1e-12)
+    assert published['offset_z'] == pytest.approx(0.03, abs=1e-12)
+    assert published['session_id'] == 4
+    assert published['center_x'] == 100.05
+    assert published['center_y'] == -40.2
+    assert published['z_crossing'] == 2.5
+    assert published['measured_time'] == 1234.5
+
+
+def test_the_status_document_names_the_session_and_the_baseline_tool():
+    document = _status({1: _measured(100.05, -40.2, 1.03)})
+
+    assert document['calibrate_z'] is True
+    assert document['tool_count'] == 2
+    assert document['baseline_tool'] == 0
+    assert document['session_id'] == 4
+    assert document['last_tool'] == 1
+    assert document['anchors'] == {}
+
+
+def test_the_baseline_tools_own_entry_publishes_empty_offsets():
+    document = _status({0: _measured(100.0, -40.0, 1.0)})
+
+    assert document['tools']['0']['offset_x'] is None
+    assert document['tools']['0']['offset_y'] is None
+    assert document['tools']['0']['offset_z'] is None
+    assert document['tools']['0']['center_x'] == 100.0
+
+
+def test_a_measurement_from_an_earlier_session_is_not_published():
+    document = _status({1: _measured(100.05, -40.2, 1.03, session_id=3)})
+
+    assert document['tools'] == {}
+
+
+def test_a_measurement_whose_baseline_was_cleared_is_not_published():
+    # An anchor run of the baseline tool drops the session baseline, and the
+    # results measured against it have to go with it: left published they
+    # would carry empty offsets that read as a measurement of zero.
+    document = _status({1: _measured(100.05, -40.2, 1.03)}, baseline=None)
+
+    assert document['tools'] == {}
+    assert document['baseline_tool'] is None
+
+
+def test_a_status_document_without_z_calibration_publishes_no_z_offset():
+    document = _status(
+        {1: _measured(100.05, -40.2, 1.03)}, calibrate_z=False)
+
+    assert document['calibrate_z'] is False
+    assert document['tools']['1']['offset_z'] is None
+    assert document['tools']['1']['offset_x'] == pytest.approx(
+        0.05, abs=1e-12)
+
+
+def test_a_session_that_measured_nothing_publishes_no_tools():
+    document = _status({}, baseline=None)
+
+    assert document['tools'] == {}
+    assert document['anchors'] == {}
+    assert document['baseline_tool'] is None

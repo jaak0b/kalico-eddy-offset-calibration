@@ -343,6 +343,22 @@ def test_an_unhandled_docking_state_is_not_taken_for_no_docking():
         etc.study_docks('sometimes')
 
 
+def test_a_docking_state_that_docks_carries_no_reason_for_not_docking():
+    assert etc.docking_state('through_tool') == (True, None)
+
+
+def test_every_docking_state_that_cannot_dock_carries_its_own_reason():
+    assert etc.docking_state('no_other_tool') == (
+        False, "tool_count names no second tool to dock through")
+    assert etc.docking_state('no_toolchange_gcode') == (
+        False, "toolchange_gcode is not set")
+
+
+def test_an_unhandled_docking_state_has_no_meaning_to_read():
+    with pytest.raises(ValueError, match="unhandled docking state"):
+        etc.docking_state('sometimes')
+
+
 # --- heating before a study ------------------------------------------------
 
 
@@ -631,6 +647,68 @@ def test_a_second_mismatch_rotates_to_a_name_distinct_from_the_first(
         "cycle,centre_x\n1,99.0577\n")
     assert (tmp_path / "history_T0.2.csv").read_text() == (
         "cycle,center_x\n2,1.0000\n")
+
+
+def test_a_rotation_does_not_reuse_the_index_a_deleted_file_left(tmp_path):
+    # history_T0.1.csv was deleted and history_T0.2.csv is still there.
+    # Filling that gap would put the newest rotation below an older one.
+    path = tmp_path / "history_T0.csv"
+    path.write_text("cycle,centre_x\n1,99.0577\n")
+    (tmp_path / "history_T0.2.csv").write_text("cycle,centre_y\n2,1.0000\n")
+
+    rotated = etc.append_csv(
+        str(path), TWO_COLUMNS, {'cycle': 4, 'center_x': 5.0})
+
+    assert rotated == str(tmp_path / "history_T0.3.csv")
+    assert (tmp_path / "history_T0.2.csv").read_text() == (
+        "cycle,centre_y\n2,1.0000\n")
+    assert not (tmp_path / "history_T0.1.csv").exists()
+
+
+def test_the_next_index_sits_above_the_highest_one_in_use_not_in_a_gap():
+    # Indices 1, 3 and 4 are free and 5 is the highest in use, so the next
+    # index is 6 and none of the free ones below it.
+    assert etc.next_numbered_index(
+        ["history_T0.2.csv", "history_T0.5.csv"], "history_T0.", ".csv") == 6
+
+
+def test_the_first_numbered_file_of_a_directory_takes_index_one():
+    assert etc.next_numbered_index([], "history_T0.", ".csv") == 1
+
+
+def test_a_numbered_index_is_only_read_off_plain_ascii_digits():
+    # str.isdigit accepts a superscript int() cannot parse.
+    assert etc.next_numbered_index(
+        ["history_T0.².csv"], "history_T0.", ".csv") == 1
+
+
+# --- the offset fields of a log row ----------------------------------------
+
+
+def test_a_measurement_that_reported_no_offsets_leaves_every_field_empty():
+    # A zero here would be written into the drift log as a measured offset of
+    # zero and read back as one for as long as the file lives.
+    assert etc.offset_fields(None) == {
+        'offset_x': None,
+        'offset_y': None,
+        'offset_z': None,
+    }
+
+
+def test_measured_offsets_reach_the_log_row_as_they_were_measured():
+    assert etc.offset_fields({'x': 0.0224, 'y': -0.2598, 'z': 0.05}) == {
+        'offset_x': 0.0224,
+        'offset_y': -0.2598,
+        'offset_z': 0.05,
+    }
+
+
+def test_a_measurement_without_a_descent_leaves_only_the_z_field_empty():
+    assert etc.offset_fields({'x': 0.0224, 'y': -0.2598, 'z': None}) == {
+        'offset_x': 0.0224,
+        'offset_y': -0.2598,
+        'offset_z': None,
+    }
 
 
 # --- what a measurement reports --------------------------------------------

@@ -46,7 +46,8 @@ work. An eddy-current coil sidesteps both.
 
 ## Example output
 
-Abridged from a run on the author's machine (Z rows omitted). Values are in mm:
+Abridged from a run on the author's machine, with the Z rows and the stepper
+microstep rows left out. Values are in mm:
 
 ```
 tool: T1
@@ -146,6 +147,70 @@ study.
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`: Kalico's own drive
 current calibration, registered by the LDC1612 driver this plugin loads. Store
 the printed value with `SAVE_CONFIG`.
+
+## Reading the results from a macro
+
+The plugin publishes its stored references and this session's measurements as
+`printer.eddy_tool_calibration`, so a macro can act on a measurement instead of
+reading it off the console. Tool numbers are the keys of the two nested
+objects, written as decimal strings.
+
+```jinja
+{% set eddy = printer.eddy_tool_calibration %}
+{% if eddy.tools['1'] is defined and eddy.tools['1'].offset_x is not none %}
+  SET_GCODE_OFFSET X={eddy.tools['1'].offset_x} Y={eddy.tools['1'].offset_y}
+{% endif %}
+```
+
+Top level:
+
+- `calibrate_z`: whether Z calibration is switched on in the config section.
+- `tool_count`: the configured number of tools, `null` when the option is not
+  set.
+- `baseline_tool`: the tool the published offsets are measured against, `null`
+  until a baseline has been measured in this session.
+- `session_id`: rises by one each time a baseline measurement replaces the
+  previous one. Every published measurement carries the session it belongs to.
+- `last_tool`: the tool the plugin mounted last, `null` before it mounted one.
+- `anchors`: the stored Z references, one entry per tool that has one. These
+  survive a restart.
+- `tools`: this session's measurements, one entry per tool measured against
+  the baseline currently in place. It is empty until a baseline is measured,
+  and a run that replaces or clears the baseline takes the measurements that
+  were compared against the old one out of it, so an offset here is never
+  compared against a reference that has moved.
+
+Each entry of `anchors`:
+
+- `anchor_height`: the reference height above the switch trigger plane, in mm.
+- `anchor_frequency`: the sensor frequency at that height, in Hz.
+- `setpoint_temperature`: the nozzle setpoint the reference was measured at,
+  and the one every later run of that tool is heated to.
+- `observed_temperature`: the nozzle reading at the moment it was measured.
+- `trigger_z`: the machine Z of the switch trigger plane it was pressed
+  against.
+- `updated`: when it was measured, UTC in `YYYY-MM-DDTHH:MM:SSZ`.
+
+An anchor withholds the sensor settings it was taken with, `frequency` and
+`reg_drive_current`. An anchor frequency describes a height only under those
+settings, and the plugin compares them against the live ones itself and refuses
+the reference when they differ, so a macro has no decision to make from them.
+
+Each entry of `tools`:
+
+- `offset_x`, `offset_y`, `offset_z`: the measured offsets against the baseline
+  tool, in mm. All three are `null` for the baseline tool itself, whose offsets
+  are zero by definition, and `offset_z` alone is `null` when no descent ran,
+  which is every run with `calibrate_z: False`. A `null` is never a zero: it
+  says the figure was not measured.
+- `center_x`, `center_y`: the fitted coil center that measurement found, in
+  machine coordinates.
+- `z_crossing`: the machine Z at which the descent crossed the tool's anchor
+  frequency, `null` when no descent ran.
+- `session_id`: the session the measurement belongs to.
+- `measured_time`: the host's monotonic clock when the measurement finished.
+  It compares against other readings of that same clock, not against a wall
+  clock time.
 
 ## Status and limitations
 
@@ -343,16 +408,18 @@ Every option and its default. Options shown commented out may be left out.
 #   drift over time rests on. It is separate from save_csv, which dumps the
 #   raw samples of each scan pass instead.
 #csv_dir: EddyToolCalibration/data
-#   Directory the raw scan dumps of save_csv are written to, relative to the
-#   printer config directory. These are working files, meant to be cleared
-#   once they have been looked at. It must be neither the directory holding
-#   the calibration state file nor log_dir, so that clearing the dumps
-#   cannot take the saved Z references or the logs with them.
+#   Directory the raw scan dumps of save_csv are written to, read against the
+#   printer config directory unless it is an absolute path. These are working
+#   files, meant to be cleared once they have been looked at. It must be
+#   neither the directory holding the calibration state file nor log_dir, so
+#   that clearing the dumps cannot take the saved Z references or the logs
+#   with them, and either spelling of a directory counts as that directory.
 #log_dir: EddyToolCalibration/logs
 #   Directory the drift logs and the repeatability study files are written
-#   to, relative to the printer config directory. These are the durable
-#   record, kept apart from the scan dumps so clearing those cannot delete
-#   them. It must not be the directory holding the calibration state file.
+#   to, read against the printer config directory unless it is an absolute
+#   path. These are the durable record, kept apart from the scan dumps so
+#   clearing those cannot delete them. It must not be the directory holding
+#   the calibration state file.
 #calibrate_z: False
 #   Run the Z descent and report Z offsets. With it False no descent runs,
 #   XY offsets are still measured, and none of the switch options below

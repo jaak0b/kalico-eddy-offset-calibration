@@ -415,6 +415,29 @@ def test_rejects_a_scan_plane_above_the_descent_start():
         etc.validate_vertical_geometry(6.0, 5.0, 0.5)
 
 
+def test_a_height_above_the_coil_face_becomes_a_machine_coordinate():
+    # A coil face bolted at machine Z 1.5000 puts the 1.0000 mm scan plane at
+    # machine Z 2.5000.
+    assert etc.machine_z(1.5, 1.0) == pytest.approx(2.5, abs=1e-12)
+
+
+def test_a_coil_face_at_machine_zero_leaves_a_height_unchanged():
+    assert etc.machine_z(0.0, 2.5) == pytest.approx(2.5, abs=1e-12)
+
+
+def test_a_descent_step_is_approached_from_half_a_millimetre_above_it():
+    # probe_eddy_current approaches every step from 0.500 mm above it, so the
+    # 1.0000 mm step of a coil face at machine Z 1.5000 is approached from
+    # machine Z 3.0000.
+    assert etc.approach_z(1.5, 1.0) == pytest.approx(3.0, abs=1e-12)
+
+
+def test_the_retreat_clears_the_top_of_the_descent_by_the_approach_hop():
+    # A descent starting 2.5000 mm above a face at machine Z 1.5000 retreats
+    # to machine Z 4.5000, half a millimetre above its own start.
+    assert etc.retreat_z(1.5, 2.5) == pytest.approx(4.5, abs=1e-12)
+
+
 # --- pair averaging --------------------------------------------------------
 
 
@@ -835,3 +858,261 @@ def test_the_drive_current_advice_names_the_chip_to_calibrate():
         "Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT "
         "CHIP=eddy_tool_calibration. Every descent sample read below "
         "freq_min.")
+
+
+# --- what a collection counts ----------------------------------------------
+
+
+def test_a_fresh_collection_has_counted_nothing():
+    stats = etc.new_collection()
+
+    assert stats['raw_count'] == 0
+    assert stats['errors'] == 0
+    assert stats['overflows'] == 0
+    assert etc.any_dropped(stats) is False
+
+
+def test_a_collection_that_received_no_batch_reports_no_faults():
+    # The command failed before the sensor delivered anything, and a fault
+    # count invented there would send the owner after the drive current.
+    stats = etc.new_collection()
+
+    assert (stats['errors'], stats['overflows']) == (0, 0)
+
+
+def test_a_collection_that_opened_the_stream_counts_from_zero():
+    stats = etc.new_collection()
+
+    etc.note_batch(stats, {'errors': 0, 'overflows': 0})
+    etc.note_batch(stats, {'errors': 3, 'overflows': 1})
+
+    assert (stats['errors'], stats['overflows']) == (3, 1)
+
+
+def test_a_collection_counts_only_the_faults_its_own_batches_added():
+    # Another client already had the stream running, so the first batch
+    # arrives carrying 7 errors and 2 overflows that predate this collection.
+    # Its own share is what the later batches added: 9 - 7 and 5 - 2.
+    stats = etc.new_collection()
+
+    etc.note_batch(stats, {'errors': 7, 'overflows': 2})
+    etc.note_batch(stats, {'errors': 9, 'overflows': 2})
+    etc.note_batch(stats, {'errors': 9, 'overflows': 5})
+
+    assert (stats['errors'], stats['overflows']) == (2, 3)
+
+
+def test_a_clean_collection_joining_a_faulty_stream_counts_no_faults():
+    stats = etc.new_collection()
+
+    etc.note_batch(stats, {'errors': 12, 'overflows': 4})
+    etc.note_batch(stats, {'errors': 12, 'overflows': 4})
+
+    assert (stats['errors'], stats['overflows']) == (0, 0)
+
+
+def test_the_sample_drop_rows_open_with_the_raw_count():
+    stats = etc.new_collection()
+    stats['raw_count'] = 200
+    stats['dropped_low_freq'] = 12
+
+    assert etc.sample_drop_rows(stats) == [
+        "raw samples: 200",
+        "dropped below freq_min: 12",
+        "dropped without a position: 0",
+        "dropped outside the move: 0",
+    ]
+
+
+# --- what a command aggregates over its collections ------------------------
+
+
+def test_a_fresh_aggregate_has_counted_nothing():
+    assert etc.new_aggregate() == {
+        'samples_used': 0,
+        'dropped_low_freq': 0,
+        'dropped_no_position': 0,
+        'dropped_outside_move': 0,
+    }
+
+
+def test_an_aggregate_takes_the_kept_count_and_the_drops_of_a_collection():
+    agg = etc.new_aggregate()
+    stats = etc.new_collection()
+    stats['dropped_low_freq'] = 4
+    stats['dropped_outside_move'] = 1
+
+    etc.add_to_aggregate(agg, stats, 120)
+
+    assert agg == {
+        'samples_used': 120,
+        'dropped_low_freq': 4,
+        'dropped_no_position': 0,
+        'dropped_outside_move': 1,
+    }
+
+
+def test_a_second_collection_adds_to_the_counts_of_the_first():
+    agg = etc.new_aggregate()
+    first = etc.new_collection()
+    first['dropped_low_freq'] = 4
+    second = etc.new_collection()
+    second['dropped_low_freq'] = 6
+    second['dropped_no_position'] = 2
+
+    etc.add_to_aggregate(agg, first, 120)
+    etc.add_to_aggregate(agg, second, 80)
+
+    assert agg == {
+        'samples_used': 200,
+        'dropped_low_freq': 10,
+        'dropped_no_position': 2,
+        'dropped_outside_move': 0,
+    }
+
+
+def test_merging_two_aggregates_sums_every_counter():
+    # The XY rounds and the descent of one measurement report as one figure.
+    planar = etc.new_aggregate()
+    planar['samples_used'] = 6916
+    planar['dropped_outside_move'] = 3
+    descent = etc.new_aggregate()
+    descent['samples_used'] = 1250
+    descent['dropped_low_freq'] = 5
+
+    etc.merge_aggregate(planar, descent)
+
+    assert planar == {
+        'samples_used': 8166,
+        'dropped_low_freq': 5,
+        'dropped_no_position': 0,
+        'dropped_outside_move': 3,
+    }
+
+
+def test_an_aggregate_that_dropped_nothing_shows_only_the_sample_count():
+    agg = etc.new_aggregate()
+    agg['samples_used'] = 6916
+
+    assert etc.aggregate_rows(agg) == ["samples used: 6916"]
+
+
+def test_an_aggregate_that_dropped_a_sample_lists_every_drop_reason():
+    agg = etc.new_aggregate()
+    agg['samples_used'] = 6916
+    agg['dropped_no_position'] = 3
+
+    assert etc.aggregate_rows(agg) == [
+        "samples used: 6916",
+        "dropped below freq_min: 0",
+        "dropped without a position: 3",
+        "dropped outside the move: 0",
+    ]
+
+
+# --- the cause a failed collection is reported with ------------------------
+
+
+def test_a_collection_that_saw_no_sample_at_all_points_at_the_wiring():
+    stats = etc.new_collection()
+
+    assert etc.no_sample_cause(stats, 'eddy_tool_calibration') == (
+        "Check the sensor wiring and the I2C bus configuration. The sensor "
+        "delivered no samples at all.")
+
+
+def test_samples_mostly_without_a_position_point_at_the_motion_queue():
+    stats = etc.new_collection()
+    stats['raw_count'] = 100
+    stats['dropped_no_position'] = 60
+    stats['dropped_low_freq'] = 40
+
+    assert etc.no_sample_cause(stats, 'eddy_tool_calibration') == (
+        "Re-run the command after homing, and leave the printer idle while "
+        "it runs. The toolhead motion queue did not cover the sample "
+        "timestamps.")
+
+
+def test_samples_below_freq_min_point_at_the_drive_current():
+    stats = etc.new_collection()
+    stats['raw_count'] = 100
+    stats['dropped_low_freq'] = 100
+
+    assert etc.no_sample_cause(stats, 'crab') == (
+        "Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT CHIP=crab. Every "
+        "sample read below freq_min, so the coil may not be resonating.")
+
+
+def test_as_many_positionless_samples_as_low_ones_point_at_the_coil():
+    # The motion queue is only blamed when it accounts for more of the loss
+    # than the coil does, so an even split falls to the drive current.
+    stats = etc.new_collection()
+    stats['raw_count'] = 100
+    stats['dropped_no_position'] = 50
+    stats['dropped_low_freq'] = 50
+
+    assert etc.no_sample_cause(stats, 'crab') == (
+        "Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT CHIP=crab. Every "
+        "sample read below freq_min, so the coil may not be resonating.")
+
+
+def test_samples_that_all_missed_the_move_point_at_the_scan_speed():
+    stats = etc.new_collection()
+    stats['raw_count'] = 100
+    stats['dropped_outside_move'] = 100
+
+    assert etc.no_sample_cause(stats, 'crab') == (
+        "Lower scan_speed or raise scan_length. Samples arrived but none of "
+        "them fell inside the scan move's time window.")
+
+
+def test_a_descent_that_saw_no_sample_at_all_points_at_the_wiring():
+    stats = etc.new_collection()
+
+    assert etc.descent_gap_cause(stats, 'eddy_tool_calibration') == (
+        "Check the sensor wiring and the I2C bus configuration. The sensor "
+        "delivered no samples during the descent.")
+
+
+def test_a_descent_reading_below_freq_min_throughout_points_at_the_coil():
+    stats = etc.new_collection()
+    stats['raw_count'] = 500
+    stats['dropped_low_freq'] = 500
+
+    assert etc.descent_gap_cause(stats, 'crab') == (
+        "Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT CHIP=crab. Every "
+        "descent sample read below freq_min.")
+
+
+def test_a_descent_that_lost_only_some_steps_points_at_the_step_size():
+    stats = etc.new_collection()
+    stats['raw_count'] = 500
+    stats['dropped_low_freq'] = 12
+
+    assert etc.descent_gap_cause(stats, 'crab') == (
+        "Raise z_step above the printer's Z resolution. Steps finer than the "
+        "kinematics can resolve land on the same height and collapse into "
+        "one measurement.")
+
+
+# --- the frequency spread of a steady reading ------------------------------
+
+
+def test_the_spread_reports_the_population_standard_deviation():
+    # The textbook set 2, 4, 4, 4, 5, 5, 7, 9 has mean 5 and squared
+    # deviations 9, 1, 1, 1, 0, 0, 4, 16, which sum to 32. Divided by the 8
+    # readings that is a variance of 4 and a standard deviation of exactly 2.
+    # The sample form would divide by 7 instead and give 2.138.
+    low, high, std = etc.spread([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+
+    assert (low, high) == (2.0, 9.0)
+    assert std == pytest.approx(2.0, abs=1e-12)
+
+
+def test_a_single_reading_spreads_by_nothing():
+    assert etc.spread([12345678.0]) == (12345678.0, 12345678.0, 0.0)
+
+
+def test_a_spread_of_no_readings_is_rejected():
+    with pytest.raises(ValueError, match="at least one value"):
+        etc.spread([])

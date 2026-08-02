@@ -17,13 +17,13 @@ automatic offset application.
 
 ```
 eddy_nozzle_probe/
-  eddy_tool_calibration.py    # the plugin (single module, ~600-800 lines)
+  eddy_tool_calibration.py    # the plugin (single module)
   reference/
     tool_eddy_calibration.py  # upstream file, unmodified, for algorithm reference
   install.sh                  # symlink into ~/klipper/klippy/plugins/
   integration_test.py         # runs the cases below against a Kalico checkout
   integration/                # config and gcode of the Kalico integration test
-  docs/ examples/ tests/
+  docs/ tests/
 ```
 
 Install: symlink `eddy_tool_calibration.py` into `klippy/plugins/`. Moonraker
@@ -47,7 +47,7 @@ coil_z: 0.0                     # machine Z of the coil top face
 coil_inner_diameter: 2.0        # mm, coil bore; sets the default fit window and scan length
 scan_height: 1.0                # mm above the coil top face during XY scans
 scan_safe_z: 2.0                # mm above the scan height for travel moves
-z_start: 5.0                    # descent start, mm above the coil top face
+z_start: 2.5                    # descent start, mm above the coil top face
 z_stop: 0.5                     # descent end, mm above the coil top face
 z_step: 0.05                    # descent step; must divide z_start - z_stop
 # --- scan tuning ---
@@ -351,8 +351,9 @@ reference it; decide during implementation, wrapper preferred.)
 ## Commands
 
 - `EDDY_QUERY`: print current frequency, sanity check wiring.
-- `EDDY_LOCATE [DEBUG=1]`: coarse raster over the configured coil position,
-  finds and stores the refined coil center for the session; prints it.
+- `EDDY_LOCATE [DEBUG=1]`: coarse straight line scan passes over the configured
+  coil position, finds and stores the refined coil center for the session;
+  prints it.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
 - `EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: full XY(+Z) measurement.
   `T=<n>` measures that one tool, `T=0,1,2` measures those three, and a
@@ -436,6 +437,25 @@ reference it; decide during implementation, wrapper preferred.)
   for the same way, which is why the command prints each tool's current
   reading, its setpoint and the band before it starts waiting.
 - All output as labeled raw-value rows, not prose.
+
+## Status object
+
+`get_status` publishes the stored Z references and this session's measurements
+as `printer.eddy_tool_calibration`, so a macro can act on a measurement rather
+than on a console line. The README carries the key list; the two rules the
+document is built on are here.
+
+A tool's measurement is published only while the session baseline it was
+compared against is still in place. A baseline run raises the session number
+and an anchor run of the baseline tool clears the baseline outright, and in
+both cases the results measured against the old one leave the document rather
+than staying in it with empty offsets, which would read as offsets of zero.
+
+The anchors withhold the sensor settings they were measured with. An anchor
+frequency describes a height only under the drive current and the clock it was
+taken at, and the plugin compares those against the live settings itself and
+refuses the reference when they differ, so a macro has no decision to make from
+them.
 
 ## Algorithm notes (ported from upstream, with provenance)
 

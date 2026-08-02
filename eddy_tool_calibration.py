@@ -716,11 +716,11 @@ STATE_FILENAME = 'calibration_state.json'
 STATE_VERSION = 1
 
 # Every field of an anchor record, the type the state file stores it as, and
-# whether get_status publishes it. The five an offset run reads back are the
-# anchor pair its descent is evaluated against, the setpoint it has to bring
-# the nozzle back to before it measures, and freq_conv and drive_current, the
-# sensor settings that pair is only meaningful for. The rest is diagnostic and
-# is never fed back into a measurement.
+# whether get_status publishes it. freq_conv and drive_current are withheld
+# because an anchor frequency describes a height only under the sensor
+# settings it was taken with, a comparison the plugin makes itself rather than
+# leaving to a macro, and the curve bounds and the fitted center are
+# diagnostics of the run that measured the anchor.
 ANCHOR_FIELDS = (
     ('anchor_height', float, True),
     ('anchor_frequency', float, True),
@@ -775,9 +775,25 @@ def require_anchor_field(tool, record, field):
     return record[field]
 
 
-def anchor_status(record):
+def anchor_status(tool, record):
     """The fields of an anchor record a macro reads through get_status."""
-    return dict((name, record[name]) for name in ANCHOR_STATUS_FIELDS)
+    return dict((name, require_anchor_field(tool, record, name))
+                for name in ANCHOR_STATUS_FIELDS)
+
+
+def missing_anchor_message(tools):
+    """Refusal text when the Z reference of one or more tools was never
+    measured.
+    """
+    if not tools:
+        raise ValueError(
+            "a missing anchor message needs at least one tool number")
+    return (
+        "Run %s first, mounting each of those tools in turn. The Z reference "
+        "for %s is missing, and calibrate_z is True, so a Z offset cannot be "
+        "measured without it."
+        % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in tools),
+           ", ".join("T%d" % (t,) for t in tools)))
 
 
 def anchor_sensor_mismatch(tool, anchor, freq_conv, drive_current):
@@ -990,6 +1006,11 @@ def anchor_frequency_row(frequency):
     return "anchor frequency: %.3f Hz" % (frequency,)
 
 
+def anchor_rows(anchor):
+    return [anchor_height_row(anchor['anchor_height']),
+            anchor_frequency_row(anchor['anchor_frequency'])]
+
+
 def setpoint_temperature_row(label, temperature):
     return "%s temperature setpoint: %.1f C" % (label, temperature)
 
@@ -1018,9 +1039,31 @@ def fleet_summary_rows(entries):
     return rows
 
 
-def validate_data_dir(option, directory):
+def resolve_dir(config_dir, directory):
+    """The directory a configured path names.
+
+    A relative option is read against the printer config directory, and an
+    absolute one names itself: os.path.join keeps an absolute second argument
+    whole, which is what lets both spellings of one directory resolve to the
+    same place.
+    """
+    return os.path.normpath(os.path.join(config_dir, directory))
+
+
+def same_directory(config_dir, first, second):
+    """Whether two configured paths name one directory.
+
+    The comparison is case folded by os.path.normcase, so it follows the
+    platform: two spellings that differ only in case are one directory on
+    Windows and two on Linux.
+    """
+    return (os.path.normcase(resolve_dir(config_dir, first))
+            == os.path.normcase(resolve_dir(config_dir, second)))
+
+
+def validate_data_dir(config_dir, option, directory):
     """Reject a data directory that would sit on the state file's own."""
-    if os.path.normpath(directory) == os.path.normpath(STATE_DIR):
+    if same_directory(config_dir, directory, STATE_DIR):
         raise ValueError(
             "%s %r is the directory the calibration state file lives in. "
             "Point %s at a subdirectory such as %s instead, so clearing that "
@@ -1029,9 +1072,9 @@ def validate_data_dir(option, directory):
                os.path.join(STATE_DIR, 'data').replace('\\', '/')))
 
 
-def validate_log_dir(log_dir, csv_dir):
+def validate_log_dir(config_dir, log_dir, csv_dir):
     """Reject a log directory the scan dumps are cleared out of."""
-    if os.path.normpath(log_dir) == os.path.normpath(csv_dir):
+    if same_directory(config_dir, log_dir, csv_dir):
         raise ValueError(
             "log_dir %r is the directory csv_dir names. Point log_dir at a "
             "different directory, so clearing the scan dumps cannot take the "
@@ -1090,6 +1133,74 @@ def any_dropped(counts):
     return any(counts[field] for field, _label in SAMPLE_DROP_FIELDS)
 
 
+# The sensor fault counters a collection reports, each beside the field its
+# starting value is kept in. The driver zeroes both when it starts its sample
+# stream (ldc1612.py:241 and bulk_sensor.py:278), and BatchBulkHelper._start
+# returns without starting one when a stream is already running
+# (bulk_sensor.py:55-57), so a collection that joins a stream another client
+# opened is handed counts that predate it. What its own batches add on top of
+# the first one it sees is the collection's own.
+SENSOR_FAULT_FIELDS = (('errors', 'errors_before'),
+                       ('overflows', 'overflows_before'))
+
+
+def new_collection():
+    """Zeroed sample and fault counters for one collection.
+
+    Every field a collection carries is created here, because the readouts and
+    the aggregate read them without a default.
+    """
+    stats = {'raw_count': 0}
+    stats.update((field, 0) for field, _before in SENSOR_FAULT_FIELDS)
+    stats.update((before, None) for _field, before in SENSOR_FAULT_FIELDS)
+    stats.update((field, 0) for field, _label in SAMPLE_DROP_FIELDS)
+    return stats
+
+
+def note_batch(stats, msg):
+    # ldc1612.py's _process_batch puts the totals since the stream started on
+    # every batch, so the counts rise across a collection and never fall.
+    for field, before in SENSOR_FAULT_FIELDS:
+        if stats[before] is None:
+            stats[before] = msg[field]
+        stats[field] = msg[field] - stats[before]
+
+
+def sample_drop_rows(stats):
+    return (["raw samples: %d" % (stats['raw_count'],)]
+            + drop_count_rows(stats))
+
+
+def new_aggregate():
+    """Zeroed counters for the several collections one command runs.
+
+    Every field an aggregate carries is created here, because
+    add_to_aggregate and merge_aggregate read them without a default.
+    """
+    agg = {'samples_used': 0}
+    agg.update((field, 0) for field, _label in SAMPLE_DROP_FIELDS)
+    return agg
+
+
+def add_to_aggregate(agg, stats, kept_count):
+    agg['samples_used'] += kept_count
+    for field, _label in SAMPLE_DROP_FIELDS:
+        agg[field] += stats[field]
+
+
+def merge_aggregate(agg, other):
+    for key in agg:
+        agg[key] += other[key]
+
+
+def aggregate_rows(agg):
+    """Labeled summary rows: total samples used, and drops if any."""
+    rows = ["samples used: %d" % (agg['samples_used'],)]
+    if any_dropped(agg):
+        rows.extend(drop_count_rows(agg))
+    return rows
+
+
 def wiring_advice(evidence):
     return ("Check the sensor wiring and the I2C bus configuration. %s"
             % (evidence,))
@@ -1098,6 +1209,36 @@ def wiring_advice(evidence):
 def drive_current_advice(chip, evidence):
     return ("Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT CHIP=%s. %s"
             % (chip, evidence))
+
+
+def no_sample_cause(stats, chip):
+    """Name the likely cause when a collection yielded nothing usable."""
+    if stats['raw_count'] == 0:
+        return wiring_advice("The sensor delivered no samples at all.")
+    if stats['dropped_no_position'] > stats['dropped_low_freq']:
+        return ("Re-run the command after homing, and leave the printer idle "
+                "while it runs. The toolhead motion queue did not cover the "
+                "sample timestamps.")
+    if stats['dropped_low_freq'] > 0:
+        return drive_current_advice(
+            chip,
+            "Every sample read below freq_min, so the coil may not be "
+            "resonating.")
+    return ("Lower scan_speed or raise scan_length. Samples arrived but none "
+            "of them fell inside the scan move's time window.")
+
+
+def descent_gap_cause(stats, chip):
+    """Name the likely cause when a descent left some steps without data."""
+    if stats['raw_count'] == 0:
+        return wiring_advice(
+            "The sensor delivered no samples during the descent.")
+    if stats['dropped_low_freq'] == stats['raw_count']:
+        return drive_current_advice(
+            chip, "Every descent sample read below freq_min.")
+    return ("Raise z_step above the printer's Z resolution. Steps finer than "
+            "the kinematics can resolve land on the same height and collapse "
+            "into one measurement.")
 
 
 # --- machine resolution ----------------------------------------------------
@@ -1133,6 +1274,24 @@ DESCENT_SETTLE_DWELL = 1.000
 # batches, so collection runs two batch periods past the end of a move to be
 # sure the batch carrying the last in-move samples has arrived.
 COLLECT_TAIL_TIME = 0.200
+
+
+def machine_z(coil_z, height):
+    """Machine Z of a height above the coil top face.
+
+    This is the only place the configured frame becomes a machine coordinate.
+    Heights read back off the kinematics during a descent are already machine
+    Z and never pass through here.
+    """
+    return coil_z + height
+
+
+def approach_z(coil_z, height):
+    return machine_z(coil_z, height + Z_APPROACH_HOP)
+
+
+def retreat_z(coil_z, z_start):
+    return approach_z(coil_z, z_start)
 
 
 # --- measurement logs ------------------------------------------------------
@@ -1292,16 +1451,21 @@ def next_study_filename(existing, tool):
 
 # --- repeatability studies -------------------------------------------------
 
-# Whether a study docks the measured tool between its cycles, and why it does
-# not when it cannot.
-DOCKING_STATES = ('through_tool', 'no_other_tool', 'no_toolchange_gcode')
+# Every state a study's docking can be in: whether the study docks the
+# measured tool between its cycles, and the reason it does not when it cannot.
+DOCKING_STATES = (
+    ('through_tool', True, None),
+    ('no_other_tool', False, "tool_count names no second tool to dock "
+                             "through"),
+    ('no_toolchange_gcode', False, "toolchange_gcode is not set"),
+)
 
 
 def study_docking(tool, tool_count, has_toolchange_gcode):
     """The tool a study docks through, as (state, tool number).
 
-    The state is one of DOCKING_STATES; the tool number is None whenever no
-    docking can run.
+    The state is one named by DOCKING_STATES; the tool number is None whenever
+    no docking can run.
     """
     if not has_toolchange_gcode:
         return 'no_toolchange_gcode', None
@@ -1312,32 +1476,27 @@ def study_docking(tool, tool_count, has_toolchange_gcode):
     return 'no_other_tool', None
 
 
-def study_docks(state):
-    """Whether a docking state means the study docks between its cycles."""
-    if state == 'through_tool':
-        return True
-    if state == 'no_other_tool':
-        return False
-    if state == 'no_toolchange_gcode':
-        return False
+def docking_state(state):
+    """What one docking state means, as (docks, reason)."""
+    for name, docks, reason in DOCKING_STATES:
+        if name == state:
+            return docks, reason
     raise ValueError(
         "unhandled docking state %r, expected one of %r"
-        % (state, DOCKING_STATES))
+        % (state, tuple(name for name, _docks, _reason in DOCKING_STATES)))
+
+
+def study_docks(state):
+    docks, _reason = docking_state(state)
+    return docks
 
 
 def docking_row(state, docking_tool, cycles):
     """The labeled row saying whether a study exercised the docking."""
-    if study_docks(state):
+    docks, reason = docking_state(state)
+    if docks:
         return ("docking between cycles: each cycle mounts T%d and remounts "
                 "the measured tool" % (int(docking_tool),))
-    if state == 'no_other_tool':
-        reason = "tool_count names no second tool to dock through"
-    elif state == 'no_toolchange_gcode':
-        reason = "toolchange_gcode is not set"
-    else:
-        raise ValueError(
-            "unhandled docking state %r, expected one of %r"
-            % (state, DOCKING_STATES))
     if cycles > 1:
         return ("docking between cycles: not exercised, %s, so the cycles "
                 "measure drift over time instead" % (reason,))
@@ -1359,7 +1518,6 @@ def study_heating(calibrate_z, has_anchor):
 
 
 def study_heats(state):
-    """Whether a heating state means the tool is heated before measuring."""
     if state == 'to_anchor_temperature':
         return True
     if state == 'no_anchor':
@@ -1400,6 +1558,26 @@ def reports_offsets(tool, baseline_tool, has_baseline):
     in the session has nothing to difference against at all.
     """
     return int(tool) != int(baseline_tool) and has_baseline
+
+
+def measured_offsets(tool, baseline_tool, result, baseline, include_z):
+    """Offsets of a measured tool against the session baseline, or None when
+    the measurement reports none.
+
+    The Z entry is None whenever no descent ran. include_z says whether one
+    did: it is calibrate_z for a calibration run, and a repeatability study
+    may turn the descent off on top of that.
+    """
+    if not reports_offsets(tool, baseline_tool, baseline is not None):
+        return None
+    offsets = {
+        'x': result['x'] - baseline['x'],
+        'y': result['y'] - baseline['y'],
+        'z': None,
+    }
+    if include_z:
+        offsets['z'] = result['z_trigger'] - baseline['z_trigger']
+    return offsets
 
 
 def repeatability_statistics(cycles):
@@ -1536,6 +1714,45 @@ def repeatability_summary_rows(tool, runs, cycles, state, docking_tool,
     return rows
 
 
+# --- the status document ---------------------------------------------------
+
+
+def status_document(anchors, results, baseline, baseline_tool, session_id,
+                    last_tool, tool_count, calibrate_z):
+    """Anchors and this session's measurements, for macros to read.
+
+    Tool numbers are decimal strings so the dicts survive JSON transport
+    unchanged. A result is published only while the baseline it was measured
+    against is still the session's, so a run that cleared the baseline takes
+    the results that were compared against it out of the document rather than
+    leaving them there with empty offsets.
+    """
+    tools = {}
+    for tool, result in results.items():
+        if baseline is None or result['session_id'] != session_id:
+            continue
+        tools[str(tool)] = dict(
+            offset_fields(measured_offsets(
+                tool, baseline_tool, result, baseline, calibrate_z)),
+            session_id=result['session_id'],
+            center_x=result['x'],
+            center_y=result['y'],
+            z_crossing=result['z_crossing'],
+            measured_time=result['measured_time'],
+        )
+    return {
+        'calibrate_z': calibrate_z,
+        'tool_count': tool_count,
+        'baseline_tool': None if baseline is None else baseline['tool'],
+        'session_id': session_id,
+        'last_tool': last_tool,
+        'anchors': dict(
+            (str(tool), anchor_status(tool, record))
+            for tool, record in anchors.items()),
+        'tools': tools,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Klippy-facing layer.
 # ---------------------------------------------------------------------------
@@ -1554,6 +1771,15 @@ TOOL_PHASES = ('toolchange', 'switch probing', 'measurement', 'apply')
 # wants XY offsets never needs them.
 SWITCH_REQUIRED_OPTIONS = (
     'switch_pin', 'switch_x', 'switch_y', 'switch_probe_z_start')
+
+# The Kalico surfaces the nozzle preheat reaches: printer.wait_while
+# (printer.py:504), the primitive Kalico's own heater wait polls on, and
+# heaters._get_temp (heaters.py:1442), the M105 line that wait emits on every
+# poll. Neither is part of a stable interface, and the build this plugin runs
+# on can be older than the one it was written against, so both are checked at
+# startup rather than trusted.
+PREHEAT_PRINTER_METHODS = ('wait_while',)
+PREHEAT_HEATERS_METHODS = ('_get_temp',)
 
 # Chosen value, not from probe_eddy_current: half a second at the sensor's
 # 250 Hz sample rate gives about 125 samples, enough for a meaningful spread
@@ -1679,9 +1905,10 @@ class EddyToolCalibration:
         self.log_dir = config.get(
             'log_dir', os.path.join(STATE_DIR, 'logs').replace('\\', '/'))
         try:
-            validate_data_dir('csv_dir', self.csv_dir)
-            validate_data_dir('log_dir', self.log_dir)
-            validate_log_dir(self.log_dir, self.csv_dir)
+            validate_data_dir(self._config_dir(), 'csv_dir', self.csv_dir)
+            validate_data_dir(self._config_dir(), 'log_dir', self.log_dir)
+            validate_log_dir(
+                self._config_dir(), self.log_dir, self.csv_dir)
         except ValueError as e:
             raise config.error("%s: %s" % (self.name, e))
         self.query_time = config.getfloat(
@@ -1854,13 +2081,14 @@ class EddyToolCalibration:
         return os.path.dirname(os.path.abspath(config_file))
 
     def _state_path(self):
-        return os.path.join(self._config_dir(), STATE_DIR, STATE_FILENAME)
+        return os.path.join(
+            resolve_dir(self._config_dir(), STATE_DIR), STATE_FILENAME)
 
     def _data_dir(self):
-        return os.path.join(self._config_dir(), self.csv_dir)
+        return resolve_dir(self._config_dir(), self.csv_dir)
 
     def _log_dir(self):
-        return os.path.join(self._config_dir(), self.log_dir)
+        return resolve_dir(self._config_dir(), self.log_dir)
 
     def _load_state(self, config):
         """Read the persisted anchors. A missing file means none are set."""
@@ -1992,6 +2220,12 @@ class EddyToolCalibration:
         except ValueError as e:
             raise self._internal_error(gcmd, e)
 
+    def _study_docks(self, gcmd, state):
+        try:
+            return study_docks(state)
+        except ValueError as e:
+            raise self._internal_error(gcmd, e)
+
     @contextlib.contextmanager
     def _phase(self, gcmd, tool, phase, sweeping):
         """Name the tool and the stage that a fleet run's failure came from."""
@@ -2059,94 +2293,23 @@ class EddyToolCalibration:
             gcmd.respond_info(
                 "sensor buffer overflows: %d" % (stats['overflows'],))
 
-    def _new_collection(self):
-        """Zeroed sample and fault counters for one collection.
-
-        The error and overflow counts come off the delivered batches:
-        ldc1612.py's _start_measurements zeroes both driver counters whenever
-        a client starts a stream, so neither is a lifetime count.
-        """
-        stats = {'raw_count': 0, 'errors': 0, 'overflows': 0}
-        stats.update((field, 0) for field, _label in SAMPLE_DROP_FIELDS)
-        return stats
-
-    def _note_batch(self, stats, msg):
-        # ldc1612.py's _process_batch puts the totals since the stream started
-        # on every batch, so the highest value delivered is this collection's.
-        stats['errors'] = max(stats['errors'], msg['errors'])
-        stats['overflows'] = max(stats['overflows'], msg['overflows'])
-
-    def _sample_drop_rows(self, stats):
-        return (["raw samples: %d" % (stats['raw_count'],)]
-                + drop_count_rows(stats))
-
     def _debug_flag(self, gcmd):
         return gcmd.get_int('DEBUG', 0, minval=0, maxval=1)
 
-    def _new_aggregate(self):
-        agg = {'samples_used': 0}
-        agg.update((field, 0) for field, _label in SAMPLE_DROP_FIELDS)
-        return agg
-
-    def _add_to_aggregate(self, agg, stats, kept_count):
-        agg['samples_used'] += kept_count
-        for field, _label in SAMPLE_DROP_FIELDS:
-            agg[field] += stats[field]
-
-    def _merge_aggregate(self, agg, other):
-        for key in agg:
-            agg[key] += other[key]
-
-    def _aggregate_rows(self, agg):
-        """Labeled summary rows: total samples used, and drops if any."""
-        rows = ["samples used: %d" % (agg['samples_used'],)]
-        if any_dropped(agg):
-            rows.extend(drop_count_rows(agg))
-        return rows
-
     def _no_sample_cause(self, stats):
-        """Name the likely cause when a collection yielded nothing usable."""
-        if stats['raw_count'] == 0:
-            return wiring_advice("The sensor delivered no samples at all.")
-        if stats['dropped_no_position'] > stats['dropped_low_freq']:
-            return ("Re-run the command after homing, and leave the printer "
-                    "idle while it runs. The toolhead motion queue did not "
-                    "cover the sample timestamps.")
-        if stats['dropped_low_freq'] > 0:
-            return drive_current_advice(
-                self._sensor_chip_name(),
-                "Every sample read below freq_min, so the coil may not be "
-                "resonating.")
-        return ("Lower scan_speed or raise scan_length. Samples arrived but "
-                "none of them fell inside the scan move's time window.")
+        return no_sample_cause(stats, self._sensor_chip_name())
 
     def _descent_gap_cause(self, stats):
-        """Name the likely cause when a descent left some steps without data."""
-        if stats['raw_count'] == 0:
-            return wiring_advice(
-                "The sensor delivered no samples during the descent.")
-        if stats['dropped_low_freq'] == stats['raw_count']:
-            return drive_current_advice(
-                self._sensor_chip_name(),
-                "Every descent sample read below freq_min.")
-        return ("Raise z_step above the printer's Z resolution. Steps finer "
-                "than the kinematics can resolve land on the same height and "
-                "collapse into one measurement.")
+        return descent_gap_cause(stats, self._sensor_chip_name())
 
     def _machine_z(self, height):
-        """Machine Z of a height above the coil top face.
-
-        This is the only place the configured frame becomes a machine
-        coordinate. Heights read back off the kinematics during a descent are
-        already machine Z and never pass through here.
-        """
-        return self.coil_z + height
+        return machine_z(self.coil_z, height)
 
     def _approach_z(self, height):
-        return self._machine_z(height + Z_APPROACH_HOP)
+        return approach_z(self.coil_z, height)
 
     def _retreat_z(self):
-        return self._approach_z(self.z_start)
+        return retreat_z(self.coil_z, self.z_start)
 
     def _move(self, x, y, z, z_speed):
         """Travel to (x, y, z), never crossing the coil below the target Z.
@@ -2202,18 +2365,50 @@ class EddyToolCalibration:
         return self.printer.config_error("%s: %s" % (self.name, message))
 
     def _handle_connect(self):
-        """Resolve every tool's heater once the heaters exist.
+        """Check the preheat's Kalico surfaces and resolve every tool's heater
+        once the heaters exist.
 
         Extruder sections are still being created while this section is
-        parsed, so the names cannot be resolved at config load; connect is the
-        first moment they all exist. Nothing heats with calibrate_z False, and
-        without tool_count the tools are not known here, so each one is
-        resolved when a command names it instead.
+        parsed, so neither the heater names nor the heaters object can be
+        reached at config load; connect is the first moment they all exist.
+        Nothing heats with calibrate_z False, and without tool_count the tools
+        are not known here, so each one is resolved when a command names it
+        instead.
         """
-        if not self.calibrate_z or self.tool_count is None:
+        if not self.calibrate_z:
+            return
+        self._require_preheat_surfaces()
+        if self.tool_count is None:
             return
         for tool in range(self.tool_count):
             self._tool_heater(tool, self._startup_error)
+
+    def _require_preheat_surfaces(self):
+        """Refuse at startup a Kalico build the preheat cannot wait on.
+
+        Both surfaces are first reached after a command has already brought
+        every listed tool to its setpoint, and an AttributeError inside a
+        gcode handler is a printer shutdown rather than a message, so a build
+        without them has to fail here instead.
+        """
+        missing = [
+            "printer.%s" % (name,) for name in PREHEAT_PRINTER_METHODS
+            if not callable(getattr(self.printer, name, None))]
+        pheaters = self.printer.lookup_object('heaters', None)
+        if pheaters is not None:
+            missing.extend(
+                "heaters.%s" % (name,) for name in PREHEAT_HEATERS_METHODS
+                if not callable(getattr(pheaters, name, None)))
+        # A printer with no heater at all carries no heaters object to check,
+        # and it never reaches these surfaces either: the heater lookup every
+        # preheat starts with refuses such a machine first, and it names the
+        # missing hotend rather than a missing Kalico method.
+        if missing:
+            raise self._startup_error(
+                "this Kalico build does not carry %s, which the nozzle "
+                "preheat waits on. Update Kalico to a build that carries it, "
+                "or set calibrate_z to False, which heats nothing and runs no "
+                "descent." % (", ".join(missing),))
 
     def _tool_heater(self, tool, error):
         """The heater holding one tool's nozzle, as (section name, heater).
@@ -2512,7 +2707,7 @@ class EddyToolCalibration:
         the stream ends with the block.
         """
         samples = []
-        stats = self._new_collection()
+        stats = new_collection()
         state = {'running': True}
 
         def handle_batch(msg):
@@ -2520,7 +2715,7 @@ class EddyToolCalibration:
                 return False
             if not msg:
                 return True
-            self._note_batch(stats, msg)
+            note_batch(stats, msg)
             for print_time, freq, dummy_z in msg['data']:
                 stats['raw_count'] += 1
                 if freq < self.freq_min:
@@ -2606,7 +2801,7 @@ class EddyToolCalibration:
             raise gcmd.error(
                 "The %s pass produced no usable samples. %s\n%s"
                 % (label, self._no_sample_cause(stats),
-                   "\n".join(self._sample_drop_rows(stats))))
+                   "\n".join(sample_drop_rows(stats))))
         if len(samples) < self.samples_min:
             raise gcmd.error(
                 "The %s pass returned %d samples, below the configured "
@@ -2708,7 +2903,7 @@ class EddyToolCalibration:
         angles = expand_scan_angles(self.scan_angles, self.pair_scans)
         scan_z = self._machine_z(self.scan_height)
         peaks = []
-        agg = self._new_aggregate()
+        agg = new_aggregate()
         pending_rows = []
 
         def flush_pending_rows():
@@ -2734,12 +2929,12 @@ class EddyToolCalibration:
                 "peak x: %.4f" % (result['peak_x'],),
                 "peak y: %.4f" % (result['peak_y'],),
             ]
-            rows.extend(self._sample_drop_rows(stats))
+            rows.extend(sample_drop_rows(stats))
             if debug:
                 gcmd.respond_info("\n".join(rows))
             else:
                 pending_rows.append("\n".join(rows))
-            self._add_to_aggregate(agg, stats, result['sample_count'])
+            add_to_aggregate(agg, stats, result['sample_count'])
             peaks.append((angle, result['peak_x'], result['peak_y']))
         if self.pair_scans:
             projections = average_paired_projections(peaks)
@@ -2765,11 +2960,11 @@ class EddyToolCalibration:
                 for index, label in enumerate(labels)]
 
     def _measure_rounds(self, gcmd, center_x, center_y, rounds, debug):
-        agg = self._new_aggregate()
+        agg = new_aggregate()
         for label, length in rounds:
             center_x, center_y, round_agg = self._measure_center(
                 gcmd, center_x, center_y, length, label, debug)
-            self._merge_aggregate(agg, round_agg)
+            merge_aggregate(agg, round_agg)
             if debug:
                 gcmd.respond_info("\n".join(center_rows(
                     center_x, center_y, "%s center" % (label,))))
@@ -2827,7 +3022,7 @@ class EddyToolCalibration:
                 "The descent produced sensor data for %d of %d steps. %s\n%s"
                 % (len(buckets), len(step_windows),
                    self._descent_gap_cause(stats),
-                   "\n".join(self._sample_drop_rows(stats))))
+                   "\n".join(sample_drop_rows(stats))))
         points = [(z, sum(freqs) / len(freqs))
                   for z, freqs in buckets.items()]
         try:
@@ -2837,8 +3032,8 @@ class EddyToolCalibration:
                 "The Z descent did not produce a usable curve: %s. Lower "
                 "z_start so the descent stays inside the sensor's range."
                 % (e,))
-        agg = self._new_aggregate()
-        self._add_to_aggregate(
+        agg = new_aggregate()
+        add_to_aggregate(
             agg, stats, sum(len(freqs) for freqs in buckets.values()))
         return curve, agg
 
@@ -2854,7 +3049,7 @@ class EddyToolCalibration:
             raise gcmd.error(
                 "The sensor returned no usable samples. %s\n%s"
                 % (self._no_sample_cause(stats),
-                   "\n".join(self._sample_drop_rows(stats))))
+                   "\n".join(sample_drop_rows(stats))))
         self._report_sensor_health(gcmd, stats)
         low, high, std = spread(freqs)
         rows = [
@@ -2864,29 +3059,31 @@ class EddyToolCalibration:
             "frequency max: %.3f Hz" % (high,),
             "frequency stddev: %.3f Hz" % (std,),
         ]
-        rows.extend(self._sample_drop_rows(stats))
+        rows.extend(sample_drop_rows(stats))
         gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_LOCATE_help = (
-        "Coarse raster scan over the configured coil position to find and "
-        "store the refined coil center for this session. Add DEBUG=1 to "
-        "print each scan pass's diagnostic rows.")
+        "Coarse straight line scan passes over the configured coil position "
+        "to find and store the refined coil center for this session. Add "
+        "DEBUG=1 to print each scan pass's diagnostic rows.")
 
     def cmd_EDDY_LOCATE(self, gcmd):
         self._ensure_homed(gcmd)
         debug = self._debug_flag(gcmd)
-        refined_x, refined_y, agg = self._measure_rounds(
-            gcmd, self.coil_x, self.coil_y,
-            self._scan_rounds(LOCATE_ROUNDS, self.locate_scan_length), debug)
-        self.center = (refined_x, refined_y)
-        rows = center_rows(refined_x, refined_y, 'coil center')
-        rows.extend([
-            "config coil_x: %.4f" % (self.coil_x,),
-            "config coil_y: %.4f" % (self.coil_y,),
-        ])
-        rows.extend(step_distance_rows(self._step_distances()))
-        rows.extend(self._aggregate_rows(agg))
-        gcmd.respond_info("\n".join(rows))
+        with self._retreating():
+            refined_x, refined_y, agg = self._measure_rounds(
+                gcmd, self.coil_x, self.coil_y,
+                self._scan_rounds(LOCATE_ROUNDS, self.locate_scan_length),
+                debug)
+            self.center = (refined_x, refined_y)
+            rows = center_rows(refined_x, refined_y, 'coil center')
+            rows.extend([
+                "config coil_x: %.4f" % (self.coil_x,),
+                "config coil_y: %.4f" % (self.coil_y,),
+            ])
+            rows.extend(step_distance_rows(self._step_distances()))
+            rows.extend(aggregate_rows(agg))
+            gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_CALIBRATE_Z_help = (
         "One-time Z reference setup for the tools named by T=, or for every "
@@ -2931,7 +3128,7 @@ class EddyToolCalibration:
                 observed = self._observed_temperature(gcmd, tool)
                 center_x, center_y, agg = self._measure_xy(gcmd, debug)
                 curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
-        self._merge_aggregate(agg, agg_z)
+        merge_aggregate(agg, agg_z)
         record = anchor_record(
             curve, trigger_z, self.calibration_temp, observed,
             self._sensor_freq_conv(), self.sensor.dccal.get_drive_current(),
@@ -2963,9 +3160,8 @@ class EddyToolCalibration:
         ]
         rows.extend(center_rows(center_x, center_y))
         rows.extend(self._z_curve_rows(curve))
+        rows.extend(anchor_rows(record))
         rows.extend([
-            anchor_height_row(record['anchor_height']),
-            anchor_frequency_row(record['anchor_frequency']),
             "sensor frequency conversion: %s Hz per count"
             % (record['freq_conv'],),
             "sensor drive current: %d" % (record['drive_current'],),
@@ -2976,7 +3172,7 @@ class EddyToolCalibration:
             "state file: %s" % (self._state_path(),),
         ])
         rows.extend(step_distance_rows(self._step_distances()))
-        rows.extend(self._aggregate_rows(agg))
+        rows.extend(aggregate_rows(agg))
         gcmd.respond_info("\n".join(rows))
         # The descent of an anchor run defines the anchor rather than being
         # evaluated against one, so it has no crossing to log; what the run
@@ -3123,7 +3319,11 @@ class EddyToolCalibration:
         return conv
 
     def _anchor(self, gcmd, tool):
-        """One tool's stored anchor, refused when the sensor settings moved."""
+        """One tool's stored anchor, refused when it is missing and when the
+        sensor settings moved.
+        """
+        if tool not in self.anchors:
+            raise gcmd.error(missing_anchor_message([tool]))
         anchor = self.anchors[tool]
         mismatch = anchor_sensor_mismatch(
             tool, anchor, self._sensor_freq_conv(),
@@ -3136,12 +3336,7 @@ class EddyToolCalibration:
         """Refuse to measure Z against an anchor that is missing or stale."""
         missing = sorted(set(t for t in tools if t not in self.anchors))
         if missing:
-            raise gcmd.error(
-                "Run %s first, mounting each of those tools in turn. The Z "
-                "reference for %s is missing, and calibrate_z is True, so a Z "
-                "offset cannot be measured without it."
-                % (", ".join("EDDY_CALIBRATE_Z T=%d" % (t,) for t in missing),
-                   ", ".join("T%d" % (t,) for t in missing)))
+            raise gcmd.error(missing_anchor_message(missing))
         for tool in sorted(set(tools)):
             self._anchor(gcmd, tool)
 
@@ -3171,8 +3366,8 @@ class EddyToolCalibration:
         started, and None when it heated nothing.
         """
         center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
-        agg = self._new_aggregate()
-        self._merge_aggregate(agg, agg_xy)
+        agg = new_aggregate()
+        merge_aggregate(agg, agg_xy)
         curve = None
         z_crossing = None
         z_trigger = None
@@ -3183,7 +3378,7 @@ class EddyToolCalibration:
             gcmd, tool, include_z)
         if include_z:
             curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
-            self._merge_aggregate(agg, agg_z)
+            merge_aggregate(agg, agg_z)
             z_trigger, z_crossing = self._trigger_plane(gcmd, tool, curve)
         return self._measurement_result(
             center_x, center_y, curve, z_crossing, z_trigger, setpoint,
@@ -3238,9 +3433,8 @@ class EddyToolCalibration:
             return []
         anchor = self._anchor(gcmd, tool)
         rows = self._z_curve_rows(result['z_curve'])
+        rows.extend(anchor_rows(anchor))
         rows.extend([
-            anchor_frequency_row(anchor['anchor_frequency']),
-            anchor_height_row(anchor['anchor_height']),
             setpoint_temperature_row(
                 'anchor', anchor['setpoint_temperature']),
             observed_temperature_row(
@@ -3254,24 +3448,8 @@ class EddyToolCalibration:
         return rows
 
     def _offsets(self, tool, result, include_z):
-        """Offsets of a measured tool against the session baseline, or None
-        when the measurement reports none.
-
-        The Z entry is None whenever no descent ran. include_z says whether
-        one did: it is calibrate_z for a calibration run, and a repeatability
-        study may turn the descent off on top of that.
-        """
-        if not reports_offsets(tool, BASELINE_TOOL, self.baseline is not None):
-            return None
-        base = self.baseline
-        offsets = {
-            'x': result['x'] - base['x'],
-            'y': result['y'] - base['y'],
-            'z': None,
-        }
-        if include_z:
-            offsets['z'] = result['z_trigger'] - base['z_trigger']
-        return offsets
+        return measured_offsets(
+            tool, BASELINE_TOOL, result, self.baseline, include_z)
 
     def _report_tool_result(self, gcmd, tool, result, offsets):
         rows = ["tool: T%d" % (tool,)]
@@ -3288,7 +3466,7 @@ class EddyToolCalibration:
             rows.append("baseline tool: T%d" % (self.baseline['tool'],))
             rows.extend(offset_rows(offsets))
         rows.extend(step_distance_rows(self._step_distances()))
-        rows.extend(self._aggregate_rows(result['agg']))
+        rows.extend(aggregate_rows(result['agg']))
         gcmd.respond_info("\n".join(rows))
 
     cmd_EDDY_REPEATABILITY_help = (
@@ -3440,11 +3618,7 @@ class EddyToolCalibration:
 
     def _exercise_docking(self, gcmd, tool, cycle, state, docking_tool, log):
         """Dock the measured tool and mount it again, when a partner exists."""
-        try:
-            docks = study_docks(state)
-        except ValueError as e:
-            raise self._internal_error(gcmd, e)
-        if not docks:
+        if not self._study_docks(gcmd, state):
             return
         with self._study_step(gcmd, 'toolchange', cycle, None, log):
             self._mount_tool(gcmd, docking_tool)
@@ -3502,42 +3676,19 @@ class EddyToolCalibration:
                 raise gcmd.error(
                     "The %s results could not be summarised: %s. The "
                     "measurements themselves are in %s." % (axis, e, path))
-        rows = repeatability_summary_rows(
-            tool, runs, cycles, state, docking_tool, include_z, axes,
-            stats_by_axis, self._step_distances(), path)
+        try:
+            rows = repeatability_summary_rows(
+                tool, runs, cycles, state, docking_tool, include_z, axes,
+                stats_by_axis, self._step_distances(), path)
+        except ValueError as e:
+            raise self._internal_error(gcmd, e)
         gcmd.respond_info("\n".join(rows))
 
     def get_status(self, eventtime):
-        """Anchors and this session's measurements, for macros to read.
-
-        Tool numbers are decimal strings so the dicts survive JSON transport
-        unchanged.
-        """
-        anchors = {}
-        for tool, record in self.anchors.items():
-            anchors[str(tool)] = anchor_status(record)
-        tools = {}
-        for tool, result in self.results.items():
-            if result['session_id'] != self.session_id:
-                continue
-            tools[str(tool)] = dict(
-                offset_fields(self._offsets(tool, result, self.calibrate_z)),
-                session_id=result['session_id'],
-                center_x=result['x'],
-                center_y=result['y'],
-                z_crossing=result['z_crossing'],
-                measured_time=result['measured_time'],
-            )
-        return {
-            'calibrate_z': self.calibrate_z,
-            'tool_count': self.tool_count,
-            'baseline_tool': (
-                None if self.baseline is None else self.baseline['tool']),
-            'session_id': self.session_id,
-            'last_tool': self.last_tool,
-            'anchors': anchors,
-            'tools': tools,
-        }
+        return status_document(
+            self.anchors, self.results, self.baseline, BASELINE_TOOL,
+            self.session_id, self.last_tool, self.tool_count,
+            self.calibrate_z)
 
 
 def load_config(config):

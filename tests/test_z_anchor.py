@@ -5,6 +5,8 @@ either the seed a synthetic descent curve was built from, or a value worked
 out by hand from that seed and cited beside the assertion.
 """
 
+import os
+
 import pytest
 
 import eddy_tool_calibration as etc
@@ -141,7 +143,7 @@ def test_the_status_readout_withholds_the_sensor_settings_of_an_anchor():
     record = _anchor_record()
 
     # Act
-    published = etc.anchor_status(record)
+    published = etc.anchor_status(2, record)
 
     # Assert: a macro reads the anchor pair, the temperatures and the trigger
     # plane. freq_conv, drive_current, the curve bounds and the coil center
@@ -154,6 +156,14 @@ def test_the_status_readout_withholds_the_sensor_settings_of_an_anchor():
         'trigger_z': 1.2340,
         'updated': '2026-08-01T14:03:22',
     }
+
+
+def test_a_status_readout_of_an_incomplete_anchor_names_the_missing_field():
+    record = _anchor_record()
+    del record['trigger_z']
+
+    with pytest.raises(ValueError, match="T2 is missing the trigger_z field"):
+        etc.anchor_status(2, record)
 
 
 def test_the_stored_anchor_reconstructs_the_trigger_plane_it_was_built_from():
@@ -499,30 +509,80 @@ def test_a_drive_current_that_differs_by_one_step_is_refused():
 
 # --- file layout -----------------------------------------------------------
 
+# The printer config directory every configured path is read against.
+CONFIG_DIR = os.path.join(os.sep, 'home', 'pi', 'printer_data', 'config')
+
 
 def test_rejects_a_csv_dir_that_would_hold_the_state_file():
     with pytest.raises(ValueError, match="calibration state file"):
-        etc.validate_data_dir('csv_dir', 'EddyToolCalibration')
+        etc.validate_data_dir(CONFIG_DIR, 'csv_dir', 'EddyToolCalibration')
 
 
 def test_rejects_a_log_dir_that_would_hold_the_state_file():
     with pytest.raises(ValueError, match="calibration state file"):
-        etc.validate_data_dir('log_dir', 'EddyToolCalibration')
+        etc.validate_data_dir(CONFIG_DIR, 'log_dir', 'EddyToolCalibration')
 
 
 def test_accepts_the_default_csv_subdirectory():
-    assert etc.validate_data_dir('csv_dir', 'EddyToolCalibration/data') is None
+    assert etc.validate_data_dir(
+        CONFIG_DIR, 'csv_dir', 'EddyToolCalibration/data') is None
 
 
 def test_rejects_a_log_dir_the_scan_dumps_are_cleared_out_of():
     with pytest.raises(ValueError, match="directory csv_dir names"):
         etc.validate_log_dir(
-            'EddyToolCalibration/data', 'EddyToolCalibration/data')
+            CONFIG_DIR, 'EddyToolCalibration/data',
+            'EddyToolCalibration/data')
 
 
 def test_accepts_the_default_log_and_dump_directories_side_by_side():
     assert etc.validate_log_dir(
-        'EddyToolCalibration/logs', 'EddyToolCalibration/data') is None
+        CONFIG_DIR, 'EddyToolCalibration/logs',
+        'EddyToolCalibration/data') is None
+
+
+def test_a_relative_configured_path_lands_under_the_config_directory():
+    # Oracle: the state file lives in
+    # /home/pi/printer_data/config/EddyToolCalibration, spelled out here
+    # rather than read back off the helper.
+    assert etc.resolve_dir(CONFIG_DIR, 'EddyToolCalibration/data') == (
+        os.path.join(
+            os.sep, 'home', 'pi', 'printer_data', 'config',
+            'EddyToolCalibration', 'data'))
+
+
+def test_an_absolute_configured_path_names_itself():
+    absolute = os.path.join(os.sep, 'var', 'lib', 'eddy')
+
+    assert etc.resolve_dir(CONFIG_DIR, absolute) == absolute
+
+
+def test_rejects_an_absolute_csv_dir_spelling_the_state_directory():
+    # The same directory written out in full rather than relative to the
+    # config directory: the scan dumps would land on the state file.
+    absolute = os.path.join(CONFIG_DIR, 'EddyToolCalibration')
+
+    with pytest.raises(ValueError, match="calibration state file"):
+        etc.validate_data_dir(CONFIG_DIR, 'csv_dir', absolute)
+
+
+def test_rejects_a_log_dir_spelling_an_absolute_csv_dir():
+    with pytest.raises(ValueError, match="directory csv_dir names"):
+        etc.validate_log_dir(
+            CONFIG_DIR, 'EddyToolCalibration/data',
+            os.path.join(CONFIG_DIR, 'EddyToolCalibration', 'data'))
+
+
+def test_rejects_a_csv_dir_reaching_the_state_directory_through_a_parent():
+    with pytest.raises(ValueError, match="calibration state file"):
+        etc.validate_data_dir(
+            CONFIG_DIR, 'csv_dir', 'macros/../EddyToolCalibration')
+
+
+def test_two_directories_that_differ_by_more_than_their_spelling_are_not_one():
+    assert etc.same_directory(
+        CONFIG_DIR, 'EddyToolCalibration/logs',
+        os.path.join(CONFIG_DIR, 'EddyToolCalibration', 'data')) is False
 
 
 # --- the rows every readout shows an anchor as -----------------------------
@@ -544,3 +604,60 @@ def test_an_anchor_frequency_is_shown_to_three_decimals():
 def test_a_record_missing_a_field_names_it():
     with pytest.raises(ValueError, match="T3 is missing the trigger_z field"):
         etc.require_anchor_field(3, {'anchor_height': 4.2}, 'trigger_z')
+
+
+def test_an_anchor_is_shown_height_first_and_frequency_second():
+    # Every readout that shows an anchor shows the pair in this order.
+    assert etc.anchor_rows(_anchor_record()) == [
+        "anchor height above trigger plane: 4.2130 mm",
+        "anchor frequency: 12345678.000 Hz",
+    ]
+
+
+# --- the refusal a missing reference is reported with ----------------------
+
+
+def test_the_missing_reference_message_names_the_command_for_each_tool():
+    assert etc.missing_anchor_message([1, 3]) == (
+        "Run EDDY_CALIBRATE_Z T=1, EDDY_CALIBRATE_Z T=3 first, mounting each "
+        "of those tools in turn. The Z reference for T1, T3 is missing, and "
+        "calibrate_z is True, so a Z offset cannot be measured without it.")
+
+
+def test_the_missing_reference_message_names_a_single_tool_on_its_own():
+    assert etc.missing_anchor_message([2]) == (
+        "Run EDDY_CALIBRATE_Z T=2 first, mounting each of those tools in "
+        "turn. The Z reference for T2 is missing, and calibrate_z is True, "
+        "so a Z offset cannot be measured without it.")
+
+
+def test_a_missing_reference_message_naming_no_tool_is_rejected():
+    with pytest.raises(ValueError, match="at least one tool number"):
+        etc.missing_anchor_message([])
+
+
+# --- the anchors a macro reads through the status document -----------------
+
+
+def test_the_status_document_keys_every_anchor_by_its_tool_number():
+    document = etc.status_document(
+        {2: _anchor_record()}, {}, None, 0, 0, None, 4, True)
+
+    assert document['anchors'] == {
+        '2': {
+            'anchor_height': 4.2130,
+            'anchor_frequency': 12345678.0,
+            'setpoint_temperature': 150.0,
+            'observed_temperature': 149.7,
+            'trigger_z': 1.2340,
+            'updated': '2026-08-01T14:03:22',
+        },
+    }
+
+
+def test_the_status_document_names_an_incomplete_anchor_by_its_tool():
+    record = _anchor_record()
+    del record['updated']
+
+    with pytest.raises(ValueError, match="T2 is missing the updated field"):
+        etc.status_document({2: record}, {}, None, 0, 0, None, 4, True)
