@@ -60,6 +60,11 @@ LSQ_DET_EPSILON = 1e-12
 PEAK_TYPES = ('peak', 'valley')
 
 
+def unhandled_member(kind, value, members):
+    return ValueError(
+        "unhandled %s %r, expected one of %r" % (kind, value, members))
+
+
 def detect_peak_type(freqs, edge_margin):
     """Ported from upstream's auto-detection: the response is a peak when the
     middle band of the pass reads higher than its two edges, a valley when it
@@ -113,9 +118,7 @@ def find_extremum_index(freqs, peak_type, edge_margin):
     elif peak_type == 'valley':
         best = min(window)
     else:
-        raise ValueError(
-            "unhandled peak type %r, expected one of %r"
-            % (peak_type, PEAK_TYPES))
+        raise unhandled_member('peak type', peak_type, PEAK_TYPES)
     best_idx = lo + window.index(best)
     if best_idx == lo or best_idx == hi - 1:
         raise ValueError(
@@ -179,9 +182,7 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
         raise ValueError(
             "fit sigma must be greater than 0, got %r" % (sigma,))
     if peak_type not in PEAK_TYPES:
-        raise ValueError(
-            "unhandled peak type %r, expected one of %r"
-            % (peak_type, PEAK_TYPES))
+        raise unhandled_member('peak type', peak_type, PEAK_TYPES)
     start_idx = max(0, peak_idx - half_window)
     end_idx = min(n, peak_idx + half_window + 1)
     if end_idx - start_idx < 3:
@@ -498,11 +499,15 @@ def build_z_curve(points):
     return curve
 
 
-def z_curve_freq_at(curve, z):
+def require_interpolable_curve(curve):
     if len(curve) < 2:
         raise ValueError(
             "Z curve needs at least 2 steps to interpolate, got %d"
             % (len(curve),))
+
+
+def z_curve_freq_at(curve, z):
+    require_interpolable_curve(curve)
     if z < curve[0][0] or z > curve[-1][0]:
         raise ValueError(
             "height %.4f mm lies outside the measured Z curve %.4f to "
@@ -517,10 +522,7 @@ def z_curve_freq_at(curve, z):
 
 
 def z_curve_z_at_freq(curve, freq):
-    if len(curve) < 2:
-        raise ValueError(
-            "Z curve needs at least 2 steps to interpolate, got %d"
-            % (len(curve),))
+    require_interpolable_curve(curve)
     high_freq = curve[0][1]
     low_freq = curve[-1][1]
     if freq > high_freq or freq < low_freq:
@@ -982,6 +984,10 @@ def offset_template_context(tool, offsets, calibrate_z):
 # --- readout rows ----------------------------------------------------------
 
 
+def tool_row(tool):
+    return "tool: T%d" % (int(tool),)
+
+
 def center_rows(center_x, center_y, label='center'):
     return ["%s x: %.4f" % (label, center_x),
             "%s y: %.4f" % (label, center_y)]
@@ -1017,6 +1023,11 @@ def setpoint_temperature_row(label, temperature):
 
 def observed_temperature_row(label, temperature):
     return "%s temperature observed: %.1f C" % (label, temperature)
+
+
+def anchor_temperature_rows(label, anchor):
+    return [setpoint_temperature_row(label, anchor['setpoint_temperature']),
+            observed_temperature_row(label, anchor['observed_temperature'])]
 
 
 def fleet_summary_rows(entries):
@@ -1481,9 +1492,9 @@ def docking_state(state):
     for name, docks, reason in DOCKING_STATES:
         if name == state:
             return docks, reason
-    raise ValueError(
-        "unhandled docking state %r, expected one of %r"
-        % (state, tuple(name for name, _docks, _reason in DOCKING_STATES)))
+    raise unhandled_member(
+        'docking state', state,
+        tuple(name for name, _docks, _reason in DOCKING_STATES))
 
 
 def study_docks(state):
@@ -1524,20 +1535,19 @@ def study_heats(state):
         return False
     if state == 'z_calibration_off':
         return False
-    raise ValueError(
-        "unhandled heating state %r, expected one of %r"
-        % (state, HEATING_STATES))
+    raise unhandled_member('heating state', state, HEATING_STATES)
 
 
 # What each axis of a study reads off one measurement. The Z figure is the
 # reconstructed switch trigger plane, the height a Z offset is the difference
 # of, so its spread is the spread of the offset the run would have reported.
 STUDY_AXIS_FIELDS = (('x', 'x'), ('y', 'y'), ('z', 'z_trigger'))
+STUDY_AXIS_LABELS = tuple(label for label, _field in STUDY_AXIS_FIELDS)
 
 
 def study_axes(include_z):
     """The axes a study summarises, in the order it reports them."""
-    return [label for label, _field in STUDY_AXIS_FIELDS
+    return [label for label in STUDY_AXIS_LABELS
             if label != 'z' or include_z]
 
 
@@ -1545,9 +1555,7 @@ def study_axis_field(axis):
     for label, field in STUDY_AXIS_FIELDS:
         if label == axis:
             return field
-    raise ValueError(
-        "unhandled study axis %r, expected one of %r"
-        % (axis, tuple(label for label, _field in STUDY_AXIS_FIELDS)))
+    raise unhandled_member('study axis', axis, STUDY_AXIS_LABELS)
 
 
 def reports_offsets(tool, baseline_tool, has_baseline):
@@ -1695,7 +1703,7 @@ def repeatability_summary_rows(tool, runs, cycles, state, docking_tool,
                                step_distances, path):
     rows = [
         "repeatability summary:",
-        "tool: T%d" % (tool,),
+        tool_row(tool),
         "runs per cycle: %d" % (runs,),
         "cycles: %d" % (cycles,),
         "measurements: %d" % (runs * cycles,),
@@ -2208,23 +2216,25 @@ class EddyToolCalibration:
         """
         return gcmd.error("Internal error: %s." % (reason,))
 
+    @contextlib.contextmanager
+    def _internal_errors(self, gcmd):
+        try:
+            yield
+        except ValueError as e:
+            raise self._internal_error(gcmd, e)
+
     def _require_phase(self, gcmd, phase):
-        if phase not in TOOL_PHASES:
-            raise self._internal_error(
-                gcmd, "the calibration stage %r is not one of %r"
-                % (phase, TOOL_PHASES))
+        with self._internal_errors(gcmd):
+            if phase not in TOOL_PHASES:
+                raise unhandled_member('calibration stage', phase, TOOL_PHASES)
 
     def _study_heats(self, gcmd, heating):
-        try:
+        with self._internal_errors(gcmd):
             return study_heats(heating)
-        except ValueError as e:
-            raise self._internal_error(gcmd, e)
 
     def _study_docks(self, gcmd, state):
-        try:
+        with self._internal_errors(gcmd):
             return study_docks(state)
-        except ValueError as e:
-            raise self._internal_error(gcmd, e)
 
     @contextlib.contextmanager
     def _phase(self, gcmd, tool, phase, sweeping):
@@ -2293,14 +2303,17 @@ class EddyToolCalibration:
             gcmd.respond_info(
                 "sensor buffer overflows: %d" % (stats['overflows'],))
 
+    def _respond_measurement(self, gcmd, rows, agg):
+        rows.extend(step_distance_rows(self._step_distances()))
+        rows.extend(aggregate_rows(agg))
+        gcmd.respond_info("\n".join(rows))
+
     def _debug_flag(self, gcmd):
         return gcmd.get_int('DEBUG', 0, minval=0, maxval=1)
 
-    def _no_sample_cause(self, stats):
-        return no_sample_cause(stats, self._sensor_chip_name())
-
-    def _descent_gap_cause(self, stats):
-        return descent_gap_cause(stats, self._sensor_chip_name())
+    def _sample_diagnosis(self, stats, cause):
+        return "\n".join(
+            [cause(stats, self._sensor_chip_name())] + sample_drop_rows(stats))
 
     def _machine_z(self, height):
         return machine_z(self.coil_z, height)
@@ -2799,9 +2812,8 @@ class EddyToolCalibration:
         self._report_sensor_health(gcmd, stats)
         if not samples:
             raise gcmd.error(
-                "The %s pass produced no usable samples. %s\n%s"
-                % (label, self._no_sample_cause(stats),
-                   "\n".join(sample_drop_rows(stats))))
+                "The %s pass produced no usable samples. %s"
+                % (label, self._sample_diagnosis(stats, no_sample_cause)))
         if len(samples) < self.samples_min:
             raise gcmd.error(
                 "The %s pass returned %d samples, below the configured "
@@ -3019,10 +3031,9 @@ class EddyToolCalibration:
         stats['dropped_outside_move'] += outside
         if len(buckets) != len(step_windows):
             raise gcmd.error(
-                "The descent produced sensor data for %d of %d steps. %s\n%s"
+                "The descent produced sensor data for %d of %d steps. %s"
                 % (len(buckets), len(step_windows),
-                   self._descent_gap_cause(stats),
-                   "\n".join(sample_drop_rows(stats))))
+                   self._sample_diagnosis(stats, descent_gap_cause)))
         points = [(z, sum(freqs) / len(freqs))
                   for z, freqs in buckets.items()]
         try:
@@ -3047,9 +3058,8 @@ class EddyToolCalibration:
         freqs, stats = self._collect_stationary(self.query_time)
         if not freqs:
             raise gcmd.error(
-                "The sensor returned no usable samples. %s\n%s"
-                % (self._no_sample_cause(stats),
-                   "\n".join(sample_drop_rows(stats))))
+                "The sensor returned no usable samples. %s"
+                % (self._sample_diagnosis(stats, no_sample_cause),))
         self._report_sensor_health(gcmd, stats)
         low, high, std = spread(freqs)
         rows = [
@@ -3081,9 +3091,7 @@ class EddyToolCalibration:
                 "config coil_x: %.4f" % (self.coil_x,),
                 "config coil_y: %.4f" % (self.coil_y,),
             ])
-            rows.extend(step_distance_rows(self._step_distances()))
-            rows.extend(aggregate_rows(agg))
-            gcmd.respond_info("\n".join(rows))
+            self._respond_measurement(gcmd, rows, agg)
 
     cmd_EDDY_CALIBRATE_Z_help = (
         "One-time Z reference setup for the tools named by T=, or for every "
@@ -3151,7 +3159,7 @@ class EddyToolCalibration:
         if self.baseline is not None and self.baseline['tool'] == tool:
             self.baseline = None
         rows = [
-            "tool: T%d" % (tool,),
+            tool_row(tool),
             "counted press triggers (machine Z): %s mm"
             % (", ".join("%.4f" % (h,) for h in counted),),
             "press spread: %.4f mm" % (press_spread,),
@@ -3165,15 +3173,10 @@ class EddyToolCalibration:
             "sensor frequency conversion: %s Hz per count"
             % (record['freq_conv'],),
             "sensor drive current: %d" % (record['drive_current'],),
-            setpoint_temperature_row(
-                'nozzle', record['setpoint_temperature']),
-            observed_temperature_row(
-                'nozzle', record['observed_temperature']),
-            "state file: %s" % (self._state_path(),),
         ])
-        rows.extend(step_distance_rows(self._step_distances()))
-        rows.extend(aggregate_rows(agg))
-        gcmd.respond_info("\n".join(rows))
+        rows.extend(anchor_temperature_rows('nozzle', record))
+        rows.append("state file: %s" % (self._state_path(),))
+        self._respond_measurement(gcmd, rows, agg)
         # The descent of an anchor run defines the anchor rather than being
         # evaluated against one, so it has no crossing to log; what the run
         # contributes to the drift record is the trigger plane it pressed.
@@ -3287,7 +3290,7 @@ class EddyToolCalibration:
         """
         targets = []
         for tool in tools:
-            setpoint = self._anchor(gcmd, tool)['setpoint_temperature']
+            setpoint = self._anchor_setpoint(gcmd, tool)
             warning = temperature_warning(
                 tool, setpoint, self.calibration_temp)
             if warning is not None:
@@ -3303,7 +3306,7 @@ class EddyToolCalibration:
         """
         if not self.calibrate_z:
             return None
-        return self._anchor(gcmd, tool)['setpoint_temperature']
+        return self._anchor_setpoint(gcmd, tool)
 
     def _sensor_freq_conv(self):
         """The driver's count to hertz conversion.
@@ -3331,6 +3334,9 @@ class EddyToolCalibration:
         if mismatch is not None:
             raise gcmd.error(mismatch)
         return anchor
+
+    def _anchor_setpoint(self, gcmd, tool):
+        return self._anchor(gcmd, tool)['setpoint_temperature']
 
     def _require_anchors(self, gcmd, tools):
         """Refuse to measure Z against an anchor that is missing or stale."""
@@ -3365,9 +3371,7 @@ class EddyToolCalibration:
         setpoint is what the caller heated this tool to before the measurement
         started, and None when it heated nothing.
         """
-        center_x, center_y, agg_xy = self._measure_xy(gcmd, debug)
-        agg = new_aggregate()
-        merge_aggregate(agg, agg_xy)
+        center_x, center_y, agg = self._measure_xy(gcmd, debug)
         curve = None
         z_crossing = None
         z_trigger = None
@@ -3434,11 +3438,8 @@ class EddyToolCalibration:
         anchor = self._anchor(gcmd, tool)
         rows = self._z_curve_rows(result['z_curve'])
         rows.extend(anchor_rows(anchor))
+        rows.extend(anchor_temperature_rows('anchor', anchor))
         rows.extend([
-            setpoint_temperature_row(
-                'anchor', anchor['setpoint_temperature']),
-            observed_temperature_row(
-                'anchor', anchor['observed_temperature']),
             observed_temperature_row(
                 'nozzle', result['observed_temperature']),
             "z crossing (machine Z): %.4f mm" % (result['z_crossing'],),
@@ -3452,7 +3453,7 @@ class EddyToolCalibration:
             tool, BASELINE_TOOL, result, self.baseline, include_z)
 
     def _report_tool_result(self, gcmd, tool, result, offsets):
-        rows = ["tool: T%d" % (tool,)]
+        rows = [tool_row(tool)]
         rows.extend(center_rows(result['x'], result['y']))
         rows.extend(self._z_rows(gcmd, tool, result))
         if offsets is None:
@@ -3465,9 +3466,7 @@ class EddyToolCalibration:
         else:
             rows.append("baseline tool: T%d" % (self.baseline['tool'],))
             rows.extend(offset_rows(offsets))
-        rows.extend(step_distance_rows(self._step_distances()))
-        rows.extend(aggregate_rows(result['agg']))
-        gcmd.respond_info("\n".join(rows))
+        self._respond_measurement(gcmd, rows, result['agg'])
 
     cmd_EDDY_REPEATABILITY_help = (
         "Measure one tool over and over and report how far the results "
@@ -3497,10 +3496,8 @@ class EddyToolCalibration:
             self._require_anchors(gcmd, [tool])
         setpoint = self._heating_setpoint(gcmd, heating, tool)
         axes = study_axes(include_z)
-        try:
+        with self._internal_errors(gcmd):
             fields = [(axis, study_axis_field(axis)) for axis in axes]
-        except ValueError as e:
-            raise self._internal_error(gcmd, e)
         # Resolved before anything is heated, so a directory that cannot be
         # written fails in a second rather than after minutes of heating.
         log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
@@ -3527,7 +3524,7 @@ class EddyToolCalibration:
         """The setpoint a study heats the tool to, or None when it does not."""
         if not self._study_heats(gcmd, heating):
             return None
-        return self._anchor(gcmd, tool)['setpoint_temperature']
+        return self._anchor_setpoint(gcmd, tool)
 
     def _study_preheat(self, gcmd, heating, tool):
         """Heat the measured tool to its anchor setpoint, where it has one."""
@@ -3676,12 +3673,10 @@ class EddyToolCalibration:
                 raise gcmd.error(
                     "The %s results could not be summarised: %s. The "
                     "measurements themselves are in %s." % (axis, e, path))
-        try:
+        with self._internal_errors(gcmd):
             rows = repeatability_summary_rows(
                 tool, runs, cycles, state, docking_tool, include_z, axes,
                 stats_by_axis, self._step_distances(), path)
-        except ValueError as e:
-            raise self._internal_error(gcmd, e)
         gcmd.respond_info("\n".join(rows))
 
     def get_status(self, eventtime):
