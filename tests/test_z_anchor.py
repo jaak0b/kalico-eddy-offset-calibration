@@ -523,3 +523,24 @@ def test_rejects_a_log_dir_the_scan_dumps_are_cleared_out_of():
 def test_accepts_the_default_log_and_dump_directories_side_by_side():
     assert etc.validate_log_dir(
         'EddyToolCalibration/logs', 'EddyToolCalibration/data') is None
+
+
+# --- the rows every readout shows an anchor as -----------------------------
+
+
+def test_an_anchor_height_is_shown_to_four_decimals():
+    assert etc.anchor_height_row(4.2) == (
+        "anchor height above trigger plane: 4.2000 mm")
+
+
+def test_an_anchor_frequency_is_shown_to_three_decimals():
+    # Arrange / Act: 12345678.5678 Hz rounds to 12345678.568 Hz at three
+    # decimals.
+    row = etc.anchor_frequency_row(12345678.5678)
+
+    assert row == "anchor frequency: 12345678.568 Hz"
+
+
+def test_a_record_missing_a_field_names_it():
+    with pytest.raises(ValueError, match="T3 is missing the trigger_z field"):
+        etc.require_anchor_field(3, {'anchor_height': 4.2}, 'trigger_z')

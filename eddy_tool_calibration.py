@@ -264,6 +264,19 @@ def fit_scan_pass(xs, ys, freqs, half_window, sigma, edge_margin,
     }
 
 
+def normalize_angle(angle_deg):
+    return float(angle_deg) % 360.0
+
+
+def opposite_angle(angle_deg):
+    return normalize_angle(float(angle_deg) + 180.0)
+
+
+def project_peak(angle_deg, px, py):
+    rad = math.radians(angle_deg)
+    return px * math.cos(rad) + py * math.sin(rad)
+
+
 def project_peaks(peaks):
     """Project each pass peak onto its own scan axis.
 
@@ -274,8 +287,7 @@ def project_peaks(peaks):
         raise ValueError("center reconstruction needs at least one scan pass")
     out = []
     for angle_deg, px, py in peaks:
-        rad = math.radians(angle_deg)
-        out.append((angle_deg, px * math.cos(rad) + py * math.sin(rad)))
+        out.append((angle_deg, project_peak(angle_deg, px, py)))
     return out
 
 
@@ -291,21 +303,18 @@ def average_paired_projections(peaks):
         raise ValueError("center reconstruction needs at least one scan pass")
     by_angle = {}
     for angle_deg, px, py in peaks:
-        by_angle[angle_deg % 360.0] = (px, py)
+        by_angle[normalize_angle(angle_deg)] = (px, py)
     out = []
     used = set()
     for angle in sorted(by_angle):
         if angle in used:
             continue
         px, py = by_angle[angle]
-        rad = math.radians(angle)
-        cos_a = math.cos(rad)
-        sin_a = math.sin(rad)
-        proj = px * cos_a + py * sin_a
-        opposite = (angle + 180.0) % 360.0
+        proj = project_peak(angle, px, py)
+        opposite = opposite_angle(angle)
         if opposite in by_angle and opposite not in used:
             ox, oy = by_angle[opposite]
-            proj = (proj + ox * cos_a + oy * sin_a) / 2.0
+            proj = (proj + project_peak(angle, ox, oy)) / 2.0
             used.add(opposite)
         used.add(angle)
         out.append((angle, proj))
@@ -364,15 +373,16 @@ def normalize_scan_angles(angles, pair_scans):
         raise ValueError("at least one scan angle is required")
     out = []
     for angle in angles:
-        normalized = float(angle) % 360.0
+        normalized = normalize_angle(angle)
         if normalized in out:
             raise ValueError(
                 "scan angle %.1f degrees is listed twice" % (normalized,))
-        if pair_scans and (normalized + 180.0) % 360.0 in out:
+        opposite = opposite_angle(normalized)
+        if pair_scans and opposite in out:
             raise ValueError(
                 "scan angles %.1f and %.1f degrees are opposites, and "
                 "pair_scans already scans the opposite of every angle"
-                % ((normalized + 180.0) % 360.0, normalized))
+                % (opposite, normalized))
         out.append(normalized)
     return out
 
@@ -381,7 +391,7 @@ def expand_scan_angles(angles, pair_scans):
     out = list(angles)
     if pair_scans:
         for angle in list(angles):
-            out.append((angle + 180.0) % 360.0)
+            out.append(opposite_angle(angle))
     return out
 
 
@@ -758,6 +768,13 @@ def anchor_record(curve, trigger_z, setpoint_temperature,
     }
 
 
+def require_anchor_field(tool, record, field):
+    if field not in record:
+        raise ValueError(
+            "the anchor for T%d is missing the %s field" % (tool, field))
+    return record[field]
+
+
 def anchor_status(record):
     """The fields of an anchor record a macro reads through get_status."""
     return dict((name, record[name]) for name in ANCHOR_STATUS_FIELDS)
@@ -801,11 +818,7 @@ def encode_state(anchors):
         record = anchors[tool]
         entry = {}
         for field, convert, _status in ANCHOR_FIELDS:
-            if field not in record:
-                raise ValueError(
-                    "the anchor for T%d is missing the %s field"
-                    % (tool, field))
-            entry[field] = convert(record[field])
+            entry[field] = convert(require_anchor_field(tool, record, field))
         document['anchors'][str(tool)] = entry
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
@@ -850,22 +863,15 @@ def decode_state(text):
                 "expected" % (tool, type(record).__name__))
         entry = {}
         for field in ANCHOR_NUMBER_FIELDS:
-            if field not in record:
-                raise ValueError(
-                    "the anchor for T%d is missing the %s field"
-                    % (tool, field))
+            value = require_anchor_field(tool, record, field)
             try:
-                entry[field] = float(record[field])
+                entry[field] = float(value)
             except (TypeError, ValueError):
                 raise ValueError(
                     "the anchor for T%d holds %r in its %s field, which is "
-                    "not a number" % (tool, record[field], field))
+                    "not a number" % (tool, value, field))
         for field in ANCHOR_TEXT_FIELDS:
-            if field not in record:
-                raise ValueError(
-                    "the anchor for T%d is missing the %s field"
-                    % (tool, field))
-            entry[field] = str(record[field])
+            entry[field] = str(require_anchor_field(tool, record, field))
         anchors[tool] = entry
     return anchors
 
@@ -957,6 +963,41 @@ def offset_template_context(tool, offsets, calibrate_z):
     return context
 
 
+# --- readout rows ----------------------------------------------------------
+
+
+def center_rows(center_x, center_y, label='center'):
+    return ["%s x: %.4f" % (label, center_x),
+            "%s y: %.4f" % (label, center_y)]
+
+
+def offset_rows(offsets):
+    """A Z offset no descent measured is left out rather than shown as a zero,
+    which would read as a measured value.
+    """
+    rows = ["offset x: %+.4f" % (offsets['x'],),
+            "offset y: %+.4f" % (offsets['y'],)]
+    if offsets['z'] is not None:
+        rows.append("offset z: %+.4f" % (offsets['z'],))
+    return rows
+
+
+def anchor_height_row(height):
+    return "anchor height above trigger plane: %.4f mm" % (height,)
+
+
+def anchor_frequency_row(frequency):
+    return "anchor frequency: %.3f Hz" % (frequency,)
+
+
+def setpoint_temperature_row(label, temperature):
+    return "%s temperature setpoint: %.1f C" % (label, temperature)
+
+
+def observed_temperature_row(label, temperature):
+    return "%s temperature observed: %.1f C" % (label, temperature)
+
+
 def fleet_summary_rows(entries):
     """Labeled per-tool rows closing a fleet run.
 
@@ -973,11 +1014,7 @@ def fleet_summary_rows(entries):
             rows.append(
                 "T%d: baseline tool, offsets zero by definition" % (tool,))
             continue
-        parts = ["offset x: %+.4f" % (offsets['x'],),
-                 "offset y: %+.4f" % (offsets['y'],)]
-        if offsets['z'] is not None:
-            parts.append("offset z: %+.4f" % (offsets['z'],))
-        rows.append("T%d: %s" % (tool, ", ".join(parts)))
+        rows.append("T%d: %s" % (tool, ", ".join(offset_rows(offsets))))
     return rows
 
 
@@ -1030,6 +1067,37 @@ def spread(values):
     avg = sum(values) / n
     var = sum((v - avg) ** 2 for v in values) / n
     return min(values), max(values), math.sqrt(var)
+
+
+# --- sample collection -----------------------------------------------------
+
+# Every reason a collected sample is not used, in the order the readouts list
+# them, with the label each is reported under. A collection's own counters and
+# the aggregate of several both carry these fields.
+SAMPLE_DROP_FIELDS = (
+    ('dropped_low_freq', 'dropped below freq_min'),
+    ('dropped_no_position', 'dropped without a position'),
+    ('dropped_outside_move', 'dropped outside the move'),
+)
+
+
+def drop_count_rows(counts):
+    return ["%s: %d" % (label, counts[field])
+            for field, label in SAMPLE_DROP_FIELDS]
+
+
+def any_dropped(counts):
+    return any(counts[field] for field, _label in SAMPLE_DROP_FIELDS)
+
+
+def wiring_advice(evidence):
+    return ("Check the sensor wiring and the I2C bus configuration. %s"
+            % (evidence,))
+
+
+def drive_current_advice(chip, evidence):
+    return ("Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT CHIP=%s. %s"
+            % (chip, evidence))
 
 
 # --- machine resolution ----------------------------------------------------
@@ -1975,12 +2043,18 @@ class EddyToolCalibration:
                    "True, and it is False, so a line naming offset_z has "
                    "nothing to put there"))
 
+    def _sensor_chip_name(self):
+        # The driver registers LDC_CALIBRATE_DRIVE_CURRENT under the last word
+        # of the config section name it was handed (ldc1612.py:44-49), which is
+        # this section, so the CHIP= argument is derived the same way here.
+        return self.name.split()[-1]
+
     def _report_sensor_health(self, gcmd, stats):
         if stats['errors']:
             raise gcmd.error(
                 "Run LDC_CALIBRATE_DRIVE_CURRENT CHIP=%s and retry. The "
                 "sensor reported %d sample errors during the measurement."
-                % (self.name.split()[-1], stats['errors']))
+                % (self._sensor_chip_name(), stats['errors']))
         if stats['overflows']:
             gcmd.respond_info(
                 "sensor buffer overflows: %d" % (stats['overflows'],))
@@ -1992,14 +2066,9 @@ class EddyToolCalibration:
         ldc1612.py's _start_measurements zeroes both driver counters whenever
         a client starts a stream, so neither is a lifetime count.
         """
-        return {
-            'raw_count': 0,
-            'dropped_low_freq': 0,
-            'dropped_no_position': 0,
-            'dropped_outside_move': 0,
-            'errors': 0,
-            'overflows': 0,
-        }
+        stats = {'raw_count': 0, 'errors': 0, 'overflows': 0}
+        stats.update((field, 0) for field, _label in SAMPLE_DROP_FIELDS)
+        return stats
 
     def _note_batch(self, stats, msg):
         # ldc1612.py's _process_batch puts the totals since the stream started
@@ -2008,31 +2077,21 @@ class EddyToolCalibration:
         stats['overflows'] = max(stats['overflows'], msg['overflows'])
 
     def _sample_drop_rows(self, stats):
-        return [
-            "raw samples: %d" % (stats['raw_count'],),
-            "dropped below freq_min: %d" % (stats['dropped_low_freq'],),
-            "dropped without a position: %d"
-            % (stats['dropped_no_position'],),
-            "dropped outside the move: %d"
-            % (stats['dropped_outside_move'],),
-        ]
+        return (["raw samples: %d" % (stats['raw_count'],)]
+                + drop_count_rows(stats))
 
     def _debug_flag(self, gcmd):
         return gcmd.get_int('DEBUG', 0, minval=0, maxval=1)
 
     def _new_aggregate(self):
-        return {
-            'samples_used': 0,
-            'dropped_low_freq': 0,
-            'dropped_no_position': 0,
-            'dropped_outside_move': 0,
-        }
+        agg = {'samples_used': 0}
+        agg.update((field, 0) for field, _label in SAMPLE_DROP_FIELDS)
+        return agg
 
     def _add_to_aggregate(self, agg, stats, kept_count):
         agg['samples_used'] += kept_count
-        agg['dropped_low_freq'] += stats['dropped_low_freq']
-        agg['dropped_no_position'] += stats['dropped_no_position']
-        agg['dropped_outside_move'] += stats['dropped_outside_move']
+        for field, _label in SAMPLE_DROP_FIELDS:
+            agg[field] += stats[field]
 
     def _merge_aggregate(self, agg, other):
         for key in agg:
@@ -2041,43 +2100,35 @@ class EddyToolCalibration:
     def _aggregate_rows(self, agg):
         """Labeled summary rows: total samples used, and drops if any."""
         rows = ["samples used: %d" % (agg['samples_used'],)]
-        if (agg['dropped_low_freq'] or agg['dropped_no_position']
-                or agg['dropped_outside_move']):
-            rows.append(
-                "dropped below freq_min: %d" % (agg['dropped_low_freq'],))
-            rows.append(
-                "dropped without a position: %d"
-                % (agg['dropped_no_position'],))
-            rows.append(
-                "dropped outside the move: %d"
-                % (agg['dropped_outside_move'],))
+        if any_dropped(agg):
+            rows.extend(drop_count_rows(agg))
         return rows
 
     def _no_sample_cause(self, stats):
         """Name the likely cause when a collection yielded nothing usable."""
         if stats['raw_count'] == 0:
-            return ("Check the sensor wiring and the I2C bus configuration. "
-                    "The sensor delivered no samples at all.")
+            return wiring_advice("The sensor delivered no samples at all.")
         if stats['dropped_no_position'] > stats['dropped_low_freq']:
             return ("Re-run the command after homing, and leave the printer "
                     "idle while it runs. The toolhead motion queue did not "
                     "cover the sample timestamps.")
         if stats['dropped_low_freq'] > 0:
-            return ("Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT "
-                    "CHIP=%s. Every sample read below freq_min, so the coil "
-                    "may not be resonating." % (self.name.split()[-1],))
+            return drive_current_advice(
+                self._sensor_chip_name(),
+                "Every sample read below freq_min, so the coil may not be "
+                "resonating.")
         return ("Lower scan_speed or raise scan_length. Samples arrived but "
                 "none of them fell inside the scan move's time window.")
 
     def _descent_gap_cause(self, stats):
         """Name the likely cause when a descent left some steps without data."""
         if stats['raw_count'] == 0:
-            return ("Check the sensor wiring and the I2C bus configuration. "
-                    "The sensor delivered no samples during the descent.")
+            return wiring_advice(
+                "The sensor delivered no samples during the descent.")
         if stats['dropped_low_freq'] == stats['raw_count']:
-            return ("Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT "
-                    "CHIP=%s. Every descent sample read below freq_min."
-                    % (self.name.split()[-1],))
+            return drive_current_advice(
+                self._sensor_chip_name(),
+                "Every descent sample read below freq_min.")
         return ("Raise z_step above the printer's Z resolution. Steps finer "
                 "than the kinematics can resolve land on the same height and "
                 "collapse into one measurement.")
@@ -2090,6 +2141,12 @@ class EddyToolCalibration:
         already machine Z and never pass through here.
         """
         return self.coil_z + height
+
+    def _approach_z(self, height):
+        return self._machine_z(height + Z_APPROACH_HOP)
+
+    def _retreat_z(self):
+        return self._approach_z(self.z_start)
 
     def _move(self, x, y, z, z_speed):
         """Travel to (x, y, z), never crossing the coil below the target Z.
@@ -2109,8 +2166,7 @@ class EddyToolCalibration:
         """Lift the toolhead clear of the coil and the switch."""
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.manual_move(
-            [None, None, self._machine_z(self.z_start + Z_APPROACH_HOP)],
-            self.z_speed)
+            [None, None, self._retreat_z()], self.z_speed)
         toolhead.wait_moves()
 
     @contextlib.contextmanager
@@ -2296,10 +2352,13 @@ class EddyToolCalibration:
         kin_status = toolhead.get_kinematics().get_status(curtime)
         return kin_status['axis_minimum'][2], kin_status['axis_maximum'][2]
 
+    def _switch_travel_z(self):
+        return self.switch_probe_z_start + self.scan_safe_z
+
     def _require_switch_z_range(self, gcmd):
         """Refuse to travel to the switch when the heights are out of range."""
         minimum_z, maximum_z = self._kin_z_limits()
-        travel_z = self.switch_probe_z_start + self.scan_safe_z
+        travel_z = self._switch_travel_z()
         if self.switch_probe_z_start < minimum_z:
             raise gcmd.error(
                 "switch_probe_z_start is machine Z %.4f mm, below the Z axis "
@@ -2643,15 +2702,20 @@ class EddyToolCalibration:
         peaks = []
         agg = self._new_aggregate()
         pending_rows = []
+
+        def flush_pending_rows():
+            if debug:
+                return
+            for block in pending_rows:
+                gcmd.respond_info(block)
+
         for angle in angles:
             try:
                 result, stats = self._scan_pass(
                     gcmd, center_x, center_y, angle, length, scan_z,
                     "%s %.0f deg" % (label, angle), debug)
             except Exception:
-                if not debug:
-                    for block in pending_rows:
-                        gcmd.respond_info(block)
+                flush_pending_rows()
                 raise
             rows = [
                 "pass angle: %.1f deg" % (angle,),
@@ -2676,9 +2740,7 @@ class EddyToolCalibration:
         try:
             center_x, center_y = solve_center_lsq(projections)
         except ValueError as e:
-            if not debug:
-                for block in pending_rows:
-                    gcmd.respond_info(block)
+            flush_pending_rows()
             raise gcmd.error(
                 "The scan directions did not reconstruct a center: %s. Set "
                 "scan_angles to two directions at least 30 degrees apart."
@@ -2701,9 +2763,8 @@ class EddyToolCalibration:
                 gcmd, center_x, center_y, length, label, debug)
             self._merge_aggregate(agg, round_agg)
             if debug:
-                gcmd.respond_info(
-                    "%s center x: %.4f\n%s center y: %.4f"
-                    % (label, center_x, label, center_y))
+                gcmd.respond_info("\n".join(center_rows(
+                    center_x, center_y, "%s center" % (label,))))
         return center_x, center_y, agg
 
     def _measure_xy(self, gcmd, debug):
@@ -2725,16 +2786,13 @@ class EddyToolCalibration:
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
         kin = toolhead.get_kinematics()
-        self._move(center_x, center_y,
-                   self._machine_z(self.z_start + Z_APPROACH_HOP),
-                   self.z_speed)
+        self._move(center_x, center_y, self._retreat_z(), self.z_speed)
         step_windows = []
         with self._collecting() as (readings, stats):
             toolhead.dwell(DESCENT_SETTLE_DWELL)
             for target in self.z_targets:
                 toolhead.manual_move(
-                    [None, None, self._machine_z(target + Z_APPROACH_HOP)],
-                    self.z_speed)
+                    [None, None, self._approach_z(target)], self.z_speed)
                 toolhead.manual_move(
                     [None, None, self._machine_z(target)], self.z_speed)
                 start_query_time = (
@@ -2752,9 +2810,7 @@ class EddyToolCalibration:
             toolhead.dwell(DESCENT_SETTLE_DWELL)
             toolhead.wait_moves()
             reactor.pause(reactor.monotonic() + COLLECT_TAIL_TIME)
-        self._move(center_x, center_y,
-                   self._machine_z(self.z_start + Z_APPROACH_HOP),
-                   self.z_speed)
+        self._move(center_x, center_y, self._retreat_z(), self.z_speed)
         self._report_sensor_health(gcmd, stats)
         buckets, outside = bucket_samples_by_window(step_windows, readings)
         stats['dropped_outside_move'] += outside
@@ -2815,12 +2871,11 @@ class EddyToolCalibration:
             gcmd, self.coil_x, self.coil_y,
             self._scan_rounds(LOCATE_ROUNDS, self.locate_scan_length), debug)
         self.center = (refined_x, refined_y)
-        rows = [
-            "coil center x: %.4f" % (refined_x,),
-            "coil center y: %.4f" % (refined_y,),
+        rows = center_rows(refined_x, refined_y, 'coil center')
+        rows.extend([
             "config coil_x: %.4f" % (self.coil_x,),
             "config coil_y: %.4f" % (self.coil_y,),
-        ]
+        ])
         rows.extend(step_distance_rows(self._step_distances()))
         rows.extend(self._aggregate_rows(agg))
         gcmd.respond_info("\n".join(rows))
@@ -2851,7 +2906,7 @@ class EddyToolCalibration:
 
     def _anchor_tool(self, gcmd, tool, debug, sweeping):
         """Press the switch for one tool and store its Z reference."""
-        travel_z = self.switch_probe_z_start + self.scan_safe_z
+        travel_z = self._switch_travel_z()
         with self._retreating():
             with self._phase(gcmd, tool, 'toolchange', sweeping):
                 self._mount_tool(gcmd, tool)
@@ -2897,21 +2952,19 @@ class EddyToolCalibration:
             "press spread: %.4f mm" % (press_spread,),
             "press tolerance: %.4f mm" % (self.switch_probe_tolerance,),
             "switch trigger (machine Z): %.4f mm" % (trigger_z,),
-            "center x: %.4f" % (center_x,),
-            "center y: %.4f" % (center_y,),
         ]
+        rows.extend(center_rows(center_x, center_y))
         rows.extend(self._z_curve_rows(curve))
         rows.extend([
-            "anchor height above trigger plane: %.4f mm"
-            % (record['anchor_height'],),
-            "anchor frequency: %.3f Hz" % (record['anchor_frequency'],),
+            anchor_height_row(record['anchor_height']),
+            anchor_frequency_row(record['anchor_frequency']),
             "sensor frequency conversion: %s Hz per count"
             % (record['freq_conv'],),
             "sensor drive current: %d" % (record['drive_current'],),
-            "nozzle temperature setpoint: %.1f C"
-            % (record['setpoint_temperature'],),
-            "nozzle temperature observed: %.1f C"
-            % (record['observed_temperature'],),
+            setpoint_temperature_row(
+                'nozzle', record['setpoint_temperature']),
+            observed_temperature_row(
+                'nozzle', record['observed_temperature']),
             "state file: %s" % (self._state_path(),),
         ])
         rows.extend(step_distance_rows(self._step_distances()))
@@ -3178,15 +3231,14 @@ class EddyToolCalibration:
         anchor = self._anchor(gcmd, tool)
         rows = self._z_curve_rows(result['z_curve'])
         rows.extend([
-            "anchor frequency: %.3f Hz" % (anchor['anchor_frequency'],),
-            "anchor height above trigger plane: %.4f mm"
-            % (anchor['anchor_height'],),
-            "anchor temperature setpoint: %.1f C"
-            % (anchor['setpoint_temperature'],),
-            "anchor temperature observed: %.1f C"
-            % (anchor['observed_temperature'],),
-            "nozzle temperature observed: %.1f C"
-            % (result['observed_temperature'],),
+            anchor_frequency_row(anchor['anchor_frequency']),
+            anchor_height_row(anchor['anchor_height']),
+            setpoint_temperature_row(
+                'anchor', anchor['setpoint_temperature']),
+            observed_temperature_row(
+                'anchor', anchor['observed_temperature']),
+            observed_temperature_row(
+                'nozzle', result['observed_temperature']),
             "z crossing (machine Z): %.4f mm" % (result['z_crossing'],),
             "switch trigger plane (machine Z): %.4f mm"
             % (result['z_trigger'],),
@@ -3214,11 +3266,8 @@ class EddyToolCalibration:
         return offsets
 
     def _report_tool_result(self, gcmd, tool, result, offsets):
-        rows = [
-            "tool: T%d" % (tool,),
-            "center x: %.4f" % (result['x'],),
-            "center y: %.4f" % (result['y'],),
-        ]
+        rows = ["tool: T%d" % (tool,)]
+        rows.extend(center_rows(result['x'], result['y']))
         rows.extend(self._z_rows(gcmd, tool, result))
         if offsets is None:
             if self.baseline is None:
@@ -3229,10 +3278,7 @@ class EddyToolCalibration:
                 rows.append("offsets: baseline tool, zero by definition")
         else:
             rows.append("baseline tool: T%d" % (self.baseline['tool'],))
-            rows.append("offset x: %+.4f" % (offsets['x'],))
-            rows.append("offset y: %+.4f" % (offsets['y'],))
-            if offsets['z'] is not None:
-                rows.append("offset z: %+.4f" % (offsets['z'],))
+            rows.extend(offset_rows(offsets))
         rows.extend(step_distance_rows(self._step_distances()))
         rows.extend(self._aggregate_rows(result['agg']))
         gcmd.respond_info("\n".join(rows))

@@ -789,3 +789,49 @@ def test_default_scan_length_for_the_little_crab_bore():
 
     # Assert: 2.0 mm times the 1.5 bore factor is 3.0 mm.
     assert length == pytest.approx(3.0, abs=1e-9)
+
+
+# --- the rows a collection reports its dropped samples as ------------------
+
+
+def test_every_drop_reason_is_listed_with_its_own_count():
+    counts = {'dropped_low_freq': 3, 'dropped_no_position': 0,
+              'dropped_outside_move': 7}
+
+    assert etc.drop_count_rows(counts) == [
+        "dropped below freq_min: 3",
+        "dropped without a position: 0",
+        "dropped outside the move: 7",
+    ]
+
+
+def test_a_collection_that_used_every_sample_reports_no_drops():
+    counts = {'dropped_low_freq': 0, 'dropped_no_position': 0,
+              'dropped_outside_move': 0}
+
+    assert etc.any_dropped(counts) is False
+
+
+def test_a_single_dropped_sample_counts_as_a_drop():
+    counts = {'dropped_low_freq': 0, 'dropped_no_position': 1,
+              'dropped_outside_move': 0}
+
+    assert etc.any_dropped(counts) is True
+
+
+def test_the_wiring_advice_ends_with_what_the_collection_saw():
+    advice = etc.wiring_advice("The sensor delivered no samples at all.")
+
+    assert advice == (
+        "Check the sensor wiring and the I2C bus configuration. The sensor "
+        "delivered no samples at all.")
+
+
+def test_the_drive_current_advice_names_the_chip_to_calibrate():
+    advice = etc.drive_current_advice(
+        'eddy_tool_calibration', "Every descent sample read below freq_min.")
+
+    assert advice == (
+        "Lower freq_min, or run LDC_CALIBRATE_DRIVE_CURRENT "
+        "CHIP=eddy_tool_calibration. Every descent sample read below "
+        "freq_min.")

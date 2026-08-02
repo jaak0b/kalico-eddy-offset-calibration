@@ -170,3 +170,30 @@ def test_the_summary_leaves_out_z_when_no_descent_ran():
 def test_an_empty_fleet_summary_is_rejected():
     with pytest.raises(ValueError, match="at least one measured tool"):
         etc.fleet_summary_rows([])
+
+
+# --- the rows every readout shows a center and an offset as ----------------
+
+
+def test_a_center_is_shown_to_four_decimals_under_the_label_it_is_given():
+    # Arrange / Act: 12.3456789 rounds to 12.3457 at four decimals, and a
+    # figure with fewer digits is padded out to four.
+    rows = etc.center_rows(12.3456789, -4.2, 'coil center')
+
+    assert rows == ["coil center x: 12.3457", "coil center y: -4.2000"]
+
+
+def test_an_offset_is_shown_signed_to_four_decimals():
+    rows = etc.offset_rows({'x': 0.05, 'y': -0.12, 'z': 0.0157})
+
+    assert rows == [
+        "offset x: +0.0500",
+        "offset y: -0.1200",
+        "offset z: +0.0157",
+    ]
+
+
+def test_an_unmeasured_z_offset_leaves_its_row_out():
+    rows = etc.offset_rows({'x': 0.05, 'y': -0.12, 'z': None})
+
+    assert rows == ["offset x: +0.0500", "offset y: -0.1200"]

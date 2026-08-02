@@ -141,3 +141,18 @@ def test_the_preheat_plan_names_each_tool_its_heater_and_both_temperatures():
 def test_a_preheat_plan_covering_no_tools_is_rejected():
     with pytest.raises(ValueError, match="at least one tool"):
         etc.preheat_plan_rows([], 2.0, 30.0)
+
+
+# --- the rows a measurement shows its temperatures as ----------------------
+
+
+def test_a_setpoint_is_shown_to_one_decimal_under_the_label_it_is_given():
+    assert etc.setpoint_temperature_row('anchor', 150.0) == (
+        "anchor temperature setpoint: 150.0 C")
+
+
+def test_a_reading_is_shown_to_one_decimal_under_the_label_it_is_given():
+    # Arrange / Act: 149.72 C rounds to 149.7 C at one decimal.
+    row = etc.observed_temperature_row('nozzle', 149.72)
+
+    assert row == "nozzle temperature observed: 149.7 C"
