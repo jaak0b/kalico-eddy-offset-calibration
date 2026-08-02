@@ -77,9 +77,8 @@ prints its full diagnostics, with or without `DEBUG=1`.
 
 `EDDY_CALIBRATE_Z` and `EDDY_CALIBRATE_OFFSET` take the same tool selection.
 `T=` takes one tool number or a comma separated list with no spaces: `T=0`,
-`T=0,1,2`. Leaving `T=` out runs every tool of the fleet and needs `tool_count`
-and `toolchange_gcode`; a list of more than one tool needs `toolchange_gcode`
-as well.
+`T=0,1,2`. Leaving `T=` out runs every tool of the fleet and needs
+`tool_count`; any run that covers more than one tool needs `toolchange_gcode`.
 
 #### EDDY_QUERY
 

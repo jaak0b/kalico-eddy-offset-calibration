@@ -9,25 +9,25 @@ import pytest
 import eddy_tool_calibration as etc
 
 
-# --- sweep order -----------------------------------------------------------
+# --- fleet order -----------------------------------------------------------
 
 
-def test_a_four_tool_machine_sweeps_t0_through_t3_in_order():
-    assert etc.sweep_tool_order(4) == [0, 1, 2, 3]
+def test_a_four_tool_machine_covers_t0_through_t3_in_order():
+    assert etc.fleet_tool_order(4) == [0, 1, 2, 3]
 
 
-def test_a_single_tool_machine_sweeps_only_the_baseline_tool():
-    assert etc.sweep_tool_order(1) == [0]
+def test_a_single_tool_machine_covers_only_the_baseline_tool():
+    assert etc.fleet_tool_order(1) == [0]
 
 
-def test_a_sweep_without_a_tool_count_is_rejected():
+def test_a_fleet_run_without_a_tool_count_is_rejected():
     with pytest.raises(ValueError, match="tool count is not set"):
-        etc.sweep_tool_order(None)
+        etc.fleet_tool_order(None)
 
 
-def test_a_sweep_of_no_tools_is_rejected():
+def test_a_fleet_run_of_no_tools_is_rejected():
     with pytest.raises(ValueError, match="at least 1"):
-        etc.sweep_tool_order(0)
+        etc.fleet_tool_order(0)
 
 
 # --- the T= tool list ------------------------------------------------------

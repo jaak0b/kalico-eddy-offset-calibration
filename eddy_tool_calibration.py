@@ -894,7 +894,7 @@ def decode_state(text):
     return anchors
 
 
-def sweep_tool_order(tool_count):
+def fleet_tool_order(tool_count):
     """Tool numbers a fleet run visits, in the order it visits them.
 
     The baseline tool comes first, which is what lets a fleet offset run
@@ -918,7 +918,7 @@ def parse_tool_list(text, tool_count, max_tools):
     them, or None when T= was left out, which names every tool of the fleet.
     """
     if text is None:
-        return sweep_tool_order(tool_count)
+        return fleet_tool_order(tool_count)
     if not str(text).strip():
         raise ValueError("T= carries no tool number")
     limit = max_tools
@@ -2172,39 +2172,25 @@ class EddyToolCalibration:
     def _requested_tools(self, gcmd, command):
         """The tools a command runs over, in the order it measures them."""
         text = gcmd.get('T', None)
-        if text is None:
-            self._require_sweep_config(gcmd, command)
         try:
             tools = parse_tool_list(text, self.tool_count, MAX_TOOLS)
         except ValueError as e:
+            if text is None:
+                raise gcmd.error(
+                    "Add tool_count to the [%s] config section and restart, "
+                    "or name the tools with T=0,1. A run without T= needs "
+                    "the tool count to know how many tools this printer has."
+                    % (self.name,))
             raise gcmd.error(
-                "%s. Give T= one tool number such as T=0, or a comma "
-                "separated list such as T=0,1,2, or leave T= out to run every "
-                "tool of the fleet." % (e,))
+                "Give T= one tool number such as T=0, or a comma separated "
+                "list such as T=0,1,2. %s." % (e,))
         if len(tools) > 1 and not self.has_toolchange_gcode:
             raise gcmd.error(
                 "Add toolchange_gcode to the [%s] config section and restart, "
-                "or run %s T=%d to calibrate one tool at a time. A T= list "
-                "mounts each tool it measures, which needs the lines that "
-                "mount a tool." % (self.name, command, tools[0]))
+                "or run %s T=%d to calibrate one tool at a time. Measuring "
+                "more than one tool mounts each of them, which needs the "
+                "lines that mount a tool." % (self.name, command, tools[0]))
         return tools
-
-    def _require_sweep_config(self, gcmd, command):
-        """Refuse a run without T= until the options a sweep needs are set."""
-        missing = []
-        if self.tool_count is None:
-            missing.append('tool_count')
-        if not self.has_toolchange_gcode:
-            missing.append('toolchange_gcode')
-        if not missing:
-            return
-        raise gcmd.error(
-            "Add %s to the [%s] config section and restart, or run "
-            "%s T=0 to calibrate one tool at a time. Running the command "
-            "without T= calibrates every tool in turn, which needs the "
-            "number of tools in tool_count and the lines that mount a "
-            "tool in toolchange_gcode."
-            % (" and ".join(missing), self.name, command))
 
     def _internal_error(self, gcmd, reason):
         """The error a caller raises for a member of a closed set this build
@@ -2237,10 +2223,10 @@ class EddyToolCalibration:
             return study_docks(state)
 
     @contextlib.contextmanager
-    def _phase(self, gcmd, tool, phase, sweeping):
-        """Name the tool and the stage that a fleet run's failure came from."""
+    def _phase(self, gcmd, tool, phase, multiple_tools):
+        """Name the tool and the stage that a failure came from."""
         self._require_phase(gcmd, phase)
-        if not sweeping:
+        if not multiple_tools:
             yield
             return
         try:
@@ -3109,21 +3095,21 @@ class EddyToolCalibration:
         self._ensure_homed(gcmd)
         debug = self._debug_flag(gcmd)
         tools = self._requested_tools(gcmd, 'EDDY_CALIBRATE_Z')
-        sweeping = len(tools) > 1
+        multiple_tools = len(tools) > 1
         self._require_switch_z_range(gcmd)
         self._preheat(
             gcmd, [(tool, self.calibration_temp) for tool in tools],
             'calibration_temp in the [%s] config section' % (self.name,))
         for tool in tools:
-            self._anchor_tool(gcmd, tool, debug, sweeping)
+            self._anchor_tool(gcmd, tool, debug, multiple_tools)
 
-    def _anchor_tool(self, gcmd, tool, debug, sweeping):
+    def _anchor_tool(self, gcmd, tool, debug, multiple_tools):
         """Press the switch for one tool and store its Z reference."""
         travel_z = self._switch_travel_z()
         with self._retreating():
-            with self._phase(gcmd, tool, 'toolchange', sweeping):
+            with self._phase(gcmd, tool, 'toolchange', multiple_tools):
                 self._mount_tool(gcmd, tool)
-            with self._phase(gcmd, tool, 'switch probing', sweeping):
+            with self._phase(gcmd, tool, 'switch probing', multiple_tools):
                 self._move(
                     self.switch_x, self.switch_y, travel_z, self.z_speed)
                 self._move(self.switch_x, self.switch_y,
@@ -3132,7 +3118,7 @@ class EddyToolCalibration:
                     gcmd, debug)
                 self._move(
                     self.switch_x, self.switch_y, travel_z, self.z_speed)
-            with self._phase(gcmd, tool, 'measurement', sweeping):
+            with self._phase(gcmd, tool, 'measurement', multiple_tools):
                 observed = self._observed_temperature(gcmd, tool)
                 center_x, center_y, agg = self._measure_xy(gcmd, debug)
                 curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
@@ -3207,7 +3193,7 @@ class EddyToolCalibration:
         tools = baseline_first(
             self._requested_tools(gcmd, 'EDDY_CALIBRATE_OFFSET'),
             BASELINE_TOOL)
-        sweeping = len(tools) > 1
+        multiple_tools = len(tools) > 1
         if BASELINE_TOOL not in tools and self.baseline is None:
             raise gcmd.error(
                 "Run EDDY_CALIBRATE_OFFSET T=%d first, with the baseline tool "
@@ -3225,11 +3211,11 @@ class EddyToolCalibration:
         summary = []
         for tool in tools:
             summary.append(
-                self._calibrate_one_offset(gcmd, tool, debug, sweeping))
-        if sweeping:
+                self._calibrate_one_offset(gcmd, tool, debug, multiple_tools))
+        if multiple_tools:
             gcmd.respond_info("\n".join(fleet_summary_rows(summary)))
 
-    def _calibrate_one_offset(self, gcmd, tool, debug, sweeping):
+    def _calibrate_one_offset(self, gcmd, tool, debug, multiple_tools):
         """Measure one tool's offsets, report them, and apply them.
 
         Returns the tool's entry for the fleet summary: its offsets, or None
@@ -3237,9 +3223,9 @@ class EddyToolCalibration:
         """
         is_baseline_run = tool == BASELINE_TOOL
         with self._retreating():
-            with self._phase(gcmd, tool, 'toolchange', sweeping):
+            with self._phase(gcmd, tool, 'toolchange', multiple_tools):
                 self._mount_tool(gcmd, tool)
-            with self._phase(gcmd, tool, 'measurement', sweeping):
+            with self._phase(gcmd, tool, 'measurement', multiple_tools):
                 result = self._run_tool_measurement(
                     gcmd, tool, debug, self.calibrate_z,
                     self._anchored_setpoint(gcmd, tool))
@@ -3249,7 +3235,7 @@ class EddyToolCalibration:
             if offsets is not None:
                 # The baseline tool's offsets are zero by definition, and
                 # applying zeros would overwrite whatever the owner set for it.
-                with self._phase(gcmd, tool, 'apply', sweeping):
+                with self._phase(gcmd, tool, 'apply', multiple_tools):
                     self._apply_offsets(gcmd, tool, offsets)
             # An apply that fails leaves no log row, which is the deliberate
             # cost of this order: a row would claim an offset the machine never

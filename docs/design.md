@@ -422,12 +422,12 @@ reference it; decide during implementation, wrapper preferred.)
 - Both calibration commands share one tool rule. `T=` takes one tool number or
   a comma separated list of them with no spaces (`T=0,1,2`); a duplicate, a
   tool outside the machine's range and a malformed entry are each an error
-  naming the entry. Omitting `T=` runs the whole fleet and needs `tool_count`
-  and `toolchange_gcode`, naming both when either is missing, and produces the
-  same tool list a full `T=` would have. A list of more than one tool needs
-  `toolchange_gcode` as well, because it mounts each tool it measures. With
-  `toolchange_gcode` set, the plugin mounts the tool it is about to work on in
-  every case; without it, a single-tool run works on whatever tool is mounted.
+  naming the entry. Omitting `T=` runs the whole fleet, needs `tool_count`,
+  and produces the same tool list a full `T=` would have. Any run that covers
+  more than one tool needs `toolchange_gcode`, because it mounts each tool it
+  measures. With `toolchange_gcode` set, the plugin mounts the tool it is about
+  to work on in every case; without it, a single-tool run works on whatever
+  tool is mounted.
   A failure inside a run over several tools lifts the toolhead clear and names
   the tool and the stage that failed, keeping the results and references
   already taken.
