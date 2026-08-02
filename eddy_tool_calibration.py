@@ -1819,37 +1819,6 @@ XY_MEASUREMENT_ROUNDS = ('measurement coarse', 'measurement refine')
 LOCATE_ROUNDS = ('locate coarse', 'locate refine')
 
 
-class SwitchPinConfig:
-    """Read-only config view presenting switch_pin under the name pin.
-
-    tools_calibrate's ProbeEndstopWrapper reads a single option named pin. Any
-    other option is refused rather than passed through, so an upstream change
-    that starts reading a second option fails here instead of silently picking
-    up an unrelated option of ours.
-    """
-
-    def __init__(self, config, pin):
-        self._config = config
-        self._pin = pin
-
-    def get_printer(self):
-        return self._config.get_printer()
-
-    def get_name(self):
-        return self._config.get_name()
-
-    def has_section(self, section):
-        return self._config.has_section(section)
-
-    def get(self, option, *args, **kwargs):
-        if option == 'pin':
-            return self._pin
-        raise self._config.error(
-            "%s: the contact switch endstop asked for the option %r, which "
-            "this config view does not carry."
-            % (self._config.get_name(), option))
-
-
 class EddyToolCalibration:
 
     def __init__(self, config):
@@ -2031,14 +2000,21 @@ class EddyToolCalibration:
         from klippy.extras import ldc1612
         self.sensor = ldc1612.LDC1612(config)
 
-        # tools_calibrate's endstop wrapper reads only the pin, marks it
-        # multi-use so an existing [tools_calibrate] section may share it, and
-        # registers no commands and no pin chip of its own.
+        # Ported from tools_calibrate.py:438-476. The pin is marked multi-use
+        # before it is looked up, so an existing [tools_calibrate] section may
+        # share it whichever of the two sections is built first, and
+        # allow_multi_use_pin parses with no prefix allowed, so it is handed
+        # the chip and pin name rather than the raw option.
         self.switch_endstop = None
         if self.switch_pin is not None:
-            from klippy.extras import tools_calibrate
-            self.switch_endstop = tools_calibrate.ProbeEndstopWrapper(
-                SwitchPinConfig(config, self.switch_pin), 'z')
+            ppins = self.printer.lookup_object('pins')
+            shared = ppins.parse_pin(
+                self.switch_pin, can_invert=True, can_pullup=True)
+            ppins.allow_multi_use_pin(
+                '%s:%s' % (shared['chip_name'], shared['pin']))
+            self.switch_endstop = ppins.setup_pin('endstop', self.switch_pin)
+            self.printer.register_event_handler(
+                'klippy:mcu_identify', self._handle_mcu_identify)
 
         # The heater sections are still being created while this one is
         # parsed, so the tool heaters are resolved at connect instead.
@@ -2546,6 +2522,14 @@ class EddyToolCalibration:
         return distances
 
     # -- contact switch probing -------------------------------------------
+
+    def _handle_mcu_identify(self):
+        # The steppers a probing move is allowed to stop exist only once the
+        # kinematics are built, which is what this event announces.
+        kin = self.printer.lookup_object('toolhead').get_kinematics()
+        for stepper in kin.get_steppers():
+            if stepper.is_active_axis('z'):
+                self.switch_endstop.add_stepper(stepper)
 
     def _kin_z_limits(self):
         """The kinematic Z travel limits, as (minimum, maximum)."""

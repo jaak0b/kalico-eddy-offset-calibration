@@ -1,0 +1,12 @@
+# EDDY_CALIBRATE_Z presses the contact switch on a homed machine, which runs
+# probing moves through the plugin's own endstop object. An endstop that drives
+# no stepper makes the homing module take the maximum of an empty set, which is
+# a traceback rather than a message, so this case gates the stepper binding.
+# The run cannot finish: the simulated MCU carries no eddy sensor, so the
+# measurement that follows the presses has no data to fit.
+CONFIG printer.cfg
+DICTIONARY linuxprocess.dict
+SHOULD_FAIL
+
+G28
+EDDY_CALIBRATE_Z T=0 DEBUG=1

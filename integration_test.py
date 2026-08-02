@@ -39,6 +39,11 @@ FORBIDDEN_ALWAYS = (
 
 HOME_FIRST = 'Home the printer first.'
 
+# The plugin reports this for the first press of a debug run, so it appears
+# only once a probing move has run through the plugin's endstop object and
+# returned a trigger position.
+SWITCH_PRESSED = 'switch press 1 trigger (machine Z):'
+
 # klippy logs this once every config section has been built and the connect
 # handlers are running, so it is what says the plugin's section survived
 # config load. The gcode of a case runs only after it.
@@ -62,6 +67,12 @@ CASES = (
         'test': 'eddy_calibrate_z_unhomed.test',
         'require': (HOME_FIRST,),
         'forbid': ('Unknown command:"EDDY_CALIBRATE_Z"',),
+    },
+    {
+        'name': 'EDDY_CALIBRATE_Z homed',
+        'test': 'eddy_calibrate_z_homed.test',
+        'require': (SWITCH_PRESSED,),
+        'forbid': (),
     },
     {
         'name': 'EDDY_CALIBRATE_OFFSET',
