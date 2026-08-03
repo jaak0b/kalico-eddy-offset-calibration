@@ -220,17 +220,13 @@ Read this section before wiring anything.
 - The dirty-nozzle test passed: a dirty nozzle measured the same offsets as
   a clean one on the author's printer. The numeric spread of that run was not
   recorded, so the figures below are all from clean-nozzle runs.
-- Kalico is the validated firmware, on the author's printer, both a December
-  2025 build and current. Stock Klipper master and v0.13.0 load the plugin,
-  resolve its firmware surfaces and pass the same CI integration cases, but no
-  author-owned printer has ever run it on stock Klipper: like every unproven
-  claim here, it stays labeled untested by the author until a user reports
-  numbers. What a stock Klipper user will notice: the driver samples at 400 Hz
-  on master where every other build samples at 250 Hz, master adds a
-  `max_sensor_hz` option, the install lands in `klippy/extras/` and leaves the
-  klipper checkout dirty for git and Moonraker's update manager, and cancelling
-  a preheat mid-wait takes an emergency stop rather than a gcode interrupt,
-  matching stock Klipper's own M109.
+- Kalico is the validated firmware, on the author's printer. Stock Klipper
+  (v0.13.0 or newer) passes the same automated test suite but has never run
+  on the author's hardware, so it is untested until a user reports numbers.
+- On stock Klipper: current builds sample at 400 Hz instead of 250 Hz, the
+  install lands in `klippy/extras/` (git and Moonraker report the checkout as
+  dirty), and cancelling a preheat mid-wait takes an emergency stop, matching
+  stock Klipper's own M109.
 - Per-tool Z needs the contact switch. Without a switch you get X and Y and
   nothing else. Leave `calibrate_z` at its default of `False` and no descent
   runs at all, which makes a run faster.
@@ -271,13 +267,11 @@ mean, and writes every measurement to a CSV file.
 
 ## Requirements
 
-- Kalico with a `klippy/plugins/` directory, or stock Klipper master or
-  v0.13.0. See [Status and limitations](#status-and-limitations) for what is
-  validated on which.
-- Setting `frequency:`, which any CLKIN other than 12 MHz needs, requires
-  Kalico from March 2026 or newer; that is when the option was added to
-  Kalico's `ldc1612` driver, and on an older build it is a startup error. Both
-  supported stock Klipper versions carry the option.
+- Kalico, or stock Klipper v0.13.0 or newer. See
+  [Status and limitations](#status-and-limitations) for what is validated on
+  which.
+- The `frequency:` option (needed for any CLKIN other than 12 MHz) requires
+  Kalico from March 2026, or any supported stock Klipper.
 - An LDC1612 eddy-current board reachable over I2C from an MCU the firmware
   already talks to. See [Supported hardware](#supported-hardware).
 - Python 3, no third-party packages. The plugin uses only the standard library.
@@ -319,15 +313,13 @@ Every option and its default. Options shown commented out may be left out.
 #   broken out. The default is to not use the INTB pin.
 #frequency:
 #   The external clock frequency (in Hz) fed to the LDC1612 CLKIN pin,
-#   accepted from 2000000 to 40000000. The default is 12000000. BTT publishes
-#   no CLKIN figure for the Eddy family anywhere; 12 MHz is the Klipper
-#   driver author's assumption, which the ecosystem has adopted. The author's
-#   Z offsets were validated against the contact method, so it holds in
-#   practice for the Eddy Coil. Setting this option at all requires Kalico
-#   from March 2026 or newer; both supported stock Klipper versions carry
-#   it. A wrong value here scales every reported
-#   frequency. Changing it invalidates every stored Z reference: run
-#   EDDY_CALIBRATE_Z again for each tool afterwards.
+#   accepted from 2000000 to 40000000. The default is 12000000, which is
+#   correct for the BTT Eddy family (BTT publishes no figure; 12 MHz is the
+#   Klipper driver's assumption, and it held up against the contact method
+#   on the author's printer). Requires Kalico from March 2026, or stock
+#   Klipper. A wrong value scales every reported frequency. Changing it
+#   invalidates every stored Z reference: run EDDY_CALIBRATE_Z again for
+#   each tool afterwards.
 #reg_drive_current:
 #   The LDC1612 DRIVE_CURRENT0 register value, 0 to 31. The driver default
 #   of 15 suits the BTT Eddy coil family. For any other coil, including the
