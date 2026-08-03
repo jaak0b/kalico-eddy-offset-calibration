@@ -313,6 +313,11 @@ def case_output(case_dir, harness_output):
     run defied the case's expectation, so it is appended only when it is not
     there yet.
     """
+    # On a timeout subprocess hands back bytes even in text mode
+    # (TimeoutExpired.output is never decoded), so the markers would
+    # otherwise be compared against bytes and raise instead of reporting.
+    if isinstance(harness_output, bytes):
+        harness_output = harness_output.decode('utf-8', errors='replace')
     output = harness_output or ''
     log_path = case_dir / KLIPPY_LOG
     if not log_path.is_file():
