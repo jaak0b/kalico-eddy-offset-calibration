@@ -18,10 +18,11 @@ the checkout layout. No author-owned printer has ever run it on stock Klipper,
 so the README labels that support untested by the author.
 
 - Repository: https://github.com/jaak0b/kalico-eddy-offset-calibration
-- 330 unit tests, green. CI runs them plus an integration suite, now over four
+- 335 unit tests, green. CI runs them plus an integration suite over four
   firmware legs (Kalico main, Kalico 3b98cf51, Klipper master, Klipper
-  v0.13.0); the four-leg matrix has not run yet because the commits are
-  unpushed.
+  v0.13.0); all four legs are green as of 2026-08-03. The first matrix run
+  found one real plugin gap (sensor streaming hung a batch run; it now
+  refuses) and two harness gaps, all fixed the same day.
 - Hardware in use: BTT Eddy Coil wired to a Manta M8P V2.0, Raspberry Pi CM4,
   Voron with StealthChanger, Kalico from December 2025.
 
@@ -144,10 +145,6 @@ and the unit suite has never found a new defect on its own.
 
 ## Next steps
 
-1. Push the pending commits and watch CI. It is the first run of the four-leg
-   matrix, so the two stock Klipper legs are exercising the firmware
-   resolution for the first time outside a local run; a failure there is the
-   real incompatibility surfacing rather than a regression.
-2. Run the owner's pending printer session (open item 1).
+1. Run the owner's pending printer session (open item 1).
 3. Repeat the dirty-nozzle test once with the offsets recorded, so the README
    claim can carry numbers.
