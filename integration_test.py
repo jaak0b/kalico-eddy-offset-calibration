@@ -67,6 +67,31 @@ FORBIDDEN_ALWAYS = (
     'Internal error',
 )
 
+# Klipper master klippy/util.py:54-61 (_try_read_file): the startup probe of
+# /proc/device-tree/model catches IOError/OSError, logs it at debug level with
+# a full traceback under this prefix, and returns None; get_device_info
+# (util.py:127) falls back and klippy continues. On hosts without that file
+# the traceback is routine, so it alone must not trip FORBIDDEN_ALWAYS.
+BENIGN_TRACEBACK_PREFIX = 'Exception on read /proc/device-tree/model:'
+
+
+def strip_benign_traceback(output):
+    lines = output.splitlines(keepends=True)
+    kept = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].startswith(BENIGN_TRACEBACK_PREFIX):
+            kept.append(lines[i])
+            i += 1
+            continue
+        i += 1
+        while i < len(lines) and lines[i][:1] in (' ', '\t'):
+            i += 1
+        if i < len(lines) and lines[i].startswith('FileNotFoundError'):
+            i += 1
+    return ''.join(kept)
+
+
 HOME_FIRST = 'Home the printer first.'
 
 # The plugin reports this for the first press of a debug run, so it appears
@@ -373,6 +398,7 @@ def run_case(case, checkout, staged, dictdir, workdir, env, layout):
     except OSError as e:
         return (["test_klippy.py could not be started: %s" % (e,)], '')
     output = case_output(case_dir, proc.stdout)
+    checked = strip_benign_traceback(output)
     problems = []
     if proc.returncode != 0:
         problems.append(
@@ -382,7 +408,7 @@ def run_case(case, checkout, staged, dictdir, workdir, env, layout):
         if marker not in output:
             problems.append("the expected output %r never appeared" % (marker,))
     for marker in tuple(case['forbid']) + FORBIDDEN_ALWAYS:
-        if marker in output:
+        if marker in checked:
             problems.append("the output %r appeared" % (marker,))
     return problems, output
 
