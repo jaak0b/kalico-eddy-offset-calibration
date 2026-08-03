@@ -1,4 +1,4 @@
-# Session handover (2026-08-02)
+# Session handover (2026-08-03)
 
 Read `CLAUDE.md` (conventions, durable gotchas), `README.md` (user-facing
 reference) and `docs/design.md` (internal design) first. This file carries only
@@ -8,12 +8,20 @@ open.
 ## Where we are
 
 The plugin is written, reviewed, published and working on the owner's printer.
-XY offsets and Z offsets both measure correctly. The motivating use case, dirty
-nozzles, is still unproven.
+XY offsets and Z offsets both measure correctly. The motivating use case is
+proven: the owner ran the dirty-nozzle test and a dirty nozzle measured the
+same as a clean one (qualitative report; the numbers were not recorded).
+Stock Klipper support is implemented: the plugin
+resolves its firmware surfaces at startup per the firmware table in
+`docs/design.md`, owns its contact-switch endstop, and `install.sh` detects
+the checkout layout. No author-owned printer has ever run it on stock Klipper,
+so the README labels that support untested by the author.
 
 - Repository: https://github.com/jaak0b/kalico-eddy-offset-calibration
-- 304 unit tests, green. CI runs them plus an integration suite against two
-  Kalico versions on every push, and has been green since it was added.
+- 330 unit tests, green. CI runs them plus an integration suite, now over four
+  firmware legs (Kalico main, Kalico 3b98cf51, Klipper master, Klipper
+  v0.13.0); the four-leg matrix has not run yet because the commits are
+  unpushed.
 - Hardware in use: BTT Eddy Coil wired to a Manta M8P V2.0, Raspberry Pi CM4,
   Voron with StealthChanger, Kalico from December 2025.
 
@@ -76,21 +84,26 @@ scatter rather than by ours.
 
 ## Open items, in priority order
 
-1. **The dirty-nozzle test.** The entire reason the project exists, still not
-   run. Smear a nozzle, repeat a measurement, compare against the clean run.
-   Until it passes, the README's non-contact claim stays phrased as an
-   expectation.
-2. **`coil_inner_diameter: 8.0` is an estimate.** BTT publishes no bore figure
+1. **The owner's pending printer session.** Three checks queued for the next
+   time the printer is on: verify the contact-switch endstop still triggers
+   correctly after the plugin took ownership of it (commit 969bc56), run
+   `EDDY_CALIBRATE_Z` once per tool because the sensor clock fix changed the
+   anchor fingerprint, and run one calibration with the preheat wait forced to
+   the `reactor_poll` strategy to prove that path on real hardware.
+2. **Dirty-nozzle numbers.** The test was run and passed: a dirty nozzle
+   measured the same as a clean one. The offset values were not recorded, so
+   the README's claim stays qualitative until a run with numbers exists.
+3. **`coil_inner_diameter: 8.0` is an estimate.** BTT publishes no bore figure
    anywhere. The measured response width supports it, but it sizes the fit
    window, so a real measurement would be better.
-3. **Eight further duplications** found by review after three cleanup waves.
+4. **Eight further duplications** found by review after three cleanup waves.
    None are defects today. The pattern that review named is worth carrying
    forward: the waves unified the leaf, the row or the predicate, and left the
    block that assembles the leaves.
-4. **The crab board.** PCBs, stencil and coils are on hand; components were
+5. **The crab board.** PCBs, stencil and coils are on hand; components were
    never ordered, about 100 EUR. The Eddy Coil already meets the accuracy target
    that board was meant to reach, so this is optional now.
-5. **`EDDY_CALIBRATE_USED_TOOLS`**, the macro calling the plugin per used tool
+6. **`EDDY_CALIBRATE_USED_TOOLS`**, the macro calling the plugin per used tool
    from `PRINT_START`, has never run in a real print.
 
 ## Durable gotchas, each one cost time this session
@@ -131,8 +144,10 @@ and the unit suite has never found a new defect on its own.
 
 ## Next steps
 
-1. Push the pending commits and watch CI. The December 2025 leg now exercises a
-   new startup check for `printer.wait_while`; if that leg fails, it is the real
-   incompatibility surfacing rather than a regression.
-2. Run the dirty-nozzle test.
-3. Re-anchor after pulling, since the anchor record gained fields.
+1. Push the pending commits and watch CI. It is the first run of the four-leg
+   matrix, so the two stock Klipper legs are exercising the firmware
+   resolution for the first time outside a local run; a failure there is the
+   real incompatibility surfacing rather than a regression.
+2. Run the owner's pending printer session (open item 1).
+3. Repeat the dirty-nozzle test once with the offsets recorded, so the README
+   claim can carry numbers.

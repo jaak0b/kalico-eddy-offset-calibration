@@ -1,6 +1,7 @@
 # EddyNozzleProbe plugin design
 
-Status: draft for owner review. Target: Kalico plugin (`klippy/plugins/`), GPLv3.
+Status: draft for owner review. Target: Kalico (`klippy/plugins/`) and stock
+Klipper (`klippy/extras/`), GPLv3.
 
 ## Scope
 
@@ -20,13 +21,15 @@ eddy_nozzle_probe/
   eddy_tool_calibration.py    # the plugin (single module)
   reference/
     tool_eddy_calibration.py  # upstream file, unmodified, for algorithm reference
-  install.sh                  # symlink into ~/klipper/klippy/plugins/
+  install.sh                  # symlink into the checkout's module directory
   integration_test.py         # runs the cases below against a Kalico checkout
   integration/                # config and gcode of the Kalico integration test
   docs/ tests/
 ```
 
-Install: symlink `eddy_tool_calibration.py` into `klippy/plugins/`. Moonraker
+Install: symlink `eddy_tool_calibration.py` into the directory the checkout
+loads modules from, `klippy/plugins/` on Kalico and `klippy/extras/` on stock
+Klipper; `install.sh` inspects the checkout to pick one. Moonraker
 update_manager entry documented in README.
 
 ## Firmware compatibility
@@ -451,8 +454,10 @@ right state:
   which a hotend drifting around its setpoint can take minutes to satisfy,
   above all when it has to cool passively into a tight band. A tool already
   within a degree or two is in the thermal state the measurement needs. The
-  wait polls `printer.wait_while`, the primitive Kalico's own heater wait uses,
-  so a shutdown or a gcode interrupt ends it. It carries no deadline of its
+  wait polls the primitive the preheat wait row of the firmware table resolved:
+  `printer.wait_while` on Kalico, where a shutdown or a gcode interrupt ends
+  it, and stock Klipper's own heater poll loop, where only a shutdown does,
+  matching stock M109. It carries no deadline of its
   own: `verify_heater` already supervises every heater and shuts the printer
   down when one stops approaching its target, and that shutdown ends the wait,
   so a second deadline here would only race the machinery that owns the
@@ -639,13 +644,14 @@ LDC1612 status register (drive current miscalibrated).
 
 `tests/` is the unit suite and imports no klippy, so it proves the fit math and
 nothing about the plugin's Kalico-facing lines. `integration_test.py` covers
-those: it builds the `linuxprocess` firmware dictionary from a Kalico checkout,
-installs the plugin into that checkout's `klippy/plugins/`, and runs the cases
-in `integration/` through Kalico's own `scripts/test_klippy.py` against the
-simulated MCU. Both run on every push and pull request from
-`.github/workflows/tests.yaml`, the integration job over two Kalico versions:
-`main`, and commit `3b98cf51` of 2025-12-14, the era of the printer this is used
-on. Neither leg is allowed to fail; a leg later expected to fail for a
+those: it builds the `linuxprocess` firmware dictionary from a firmware
+checkout, installs the plugin into that checkout's module directory, and runs
+the cases in `integration/` through the checkout's own `scripts/test_klippy.py`
+against the simulated MCU. Both run on every push and pull request from
+`.github/workflows/tests.yaml`, the integration job over four firmware legs:
+Kalico `main`, Kalico commit `3b98cf51` of 2025-12-14 (the era of the printer
+this is used on), Klipper master and Klipper `v0.13.0`. No leg is allowed to
+fail; a leg later expected to fail for a
 documented reason gets `continue-on-error: true` with the reason beside it.
 
 To run the same thing on a Linux host with `make` and a C compiler:

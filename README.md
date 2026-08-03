@@ -1,6 +1,7 @@
 # eddy_tool_calibration
 
-A Kalico plugin that measures per-tool XYZ nozzle offsets on a toolchanger by
+A Kalico and Klipper plugin that measures per-tool XYZ nozzle offsets on a
+toolchanger by
 scanning each nozzle over a bed-mounted LDC1612 eddy-current coil, fitting the
 symmetry center of the response for X and Y and a frequency-vs-height curve for
 Z.
@@ -143,7 +144,7 @@ study.
 
 #### LDC_CALIBRATE_DRIVE_CURRENT
 
-`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`: Kalico's own drive
+`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`: the firmware's own drive
 current calibration, registered by the LDC1612 driver this plugin loads. Store
 the printed value with `SAVE_CONFIG`.
 
@@ -216,11 +217,20 @@ Each entry of `tools`:
 Pre-release. It works on the author's printer and validation is still running.
 Read this section before wiring anything.
 
-- The dirty-nozzle test has not been run yet. That test is the motivating
-  use case of the whole project, and it is not proven. Everything below was
-  measured with clean nozzles.
-- Kalico only. The plugin is loaded from Kalico's `klippy/plugins/`
-  directory, which stock Klipper does not have.
+- The dirty-nozzle test passed: a dirty nozzle measured the same offsets as
+  a clean one on the author's printer. The numeric spread of that run was not
+  recorded, so the figures below are all from clean-nozzle runs.
+- Kalico is the validated firmware, on the author's printer, both a December
+  2025 build and current. Stock Klipper master and v0.13.0 load the plugin,
+  resolve its firmware surfaces and pass the same CI integration cases, but no
+  author-owned printer has ever run it on stock Klipper: like every unproven
+  claim here, it stays labeled untested by the author until a user reports
+  numbers. What a stock Klipper user will notice: the driver samples at 400 Hz
+  on master where every other build samples at 250 Hz, master adds a
+  `max_sensor_hz` option, the install lands in `klippy/extras/` and leaves the
+  klipper checkout dirty for git and Moonraker's update manager, and cancelling
+  a preheat mid-wait takes an emergency stop rather than a gcode interrupt,
+  matching stock Klipper's own M109.
 - Per-tool Z needs the contact switch. Without a switch you get X and Y and
   nothing else. Leave `calibrate_z` at its default of `False` and no descent
   runs at all, which makes a run faster.
@@ -261,14 +271,15 @@ mean, and writes every measurement to a CSV file.
 
 ## Requirements
 
-- Kalico with a `klippy/plugins/` directory. When `frequency:` is omitted (the
-  BTT Eddy family, whose CLKIN is the driver's 12 MHz default) any Kalico with
-  that directory works.
-- Setting `frequency:` to another value, which any other CLKIN clock needs,
-  requires Kalico from March 2026 or newer. That is when the option was added to
-  the `ldc1612` driver; on an older build it is a startup error.
-- An LDC1612 eddy-current board reachable over I2C from an MCU Kalico already
-  talks to. See [Supported hardware](#supported-hardware).
+- Kalico with a `klippy/plugins/` directory, or stock Klipper master or
+  v0.13.0. See [Status and limitations](#status-and-limitations) for what is
+  validated on which.
+- Setting `frequency:`, which any CLKIN other than 12 MHz needs, requires
+  Kalico from March 2026 or newer; that is when the option was added to
+  Kalico's `ldc1612` driver, and on an older build it is a startup error. Both
+  supported stock Klipper versions carry the option.
+- An LDC1612 eddy-current board reachable over I2C from an MCU the firmware
+  already talks to. See [Supported hardware](#supported-hardware).
 - Python 3, no third-party packages. The plugin uses only the standard library.
 
 ## Install
@@ -280,6 +291,13 @@ cd kalico-eddy-offset-calibration
 sh install.sh
 sudo service klipper restart
 ```
+
+`install.sh` detects the firmware layout of `~/klipper` (pass another path as
+an argument if yours differs) and symlinks the plugin into `klippy/plugins/`
+on Kalico or `klippy/extras/` on stock Klipper. On stock Klipper the symlink
+is an untracked file inside the klipper checkout, so git and Moonraker's
+update manager report that checkout as dirty until it is removed; the script
+prints this too.
 
 ## Config reference
 
@@ -301,9 +319,13 @@ Every option and its default. Options shown commented out may be left out.
 #   broken out. The default is to not use the INTB pin.
 #frequency:
 #   The external clock frequency (in Hz) fed to the LDC1612 CLKIN pin,
-#   accepted from 2000000 to 40000000. The default is 12000000, which is the
-#   BTT Eddy family's oscillator. Setting this option at all requires Kalico
-#   from March 2026 or newer. A wrong value here scales every reported
+#   accepted from 2000000 to 40000000. The default is 12000000. BTT publishes
+#   no CLKIN figure for the Eddy family anywhere; 12 MHz is the Klipper
+#   driver author's assumption, which the ecosystem has adopted. The author's
+#   Z offsets were validated against the contact method, so it holds in
+#   practice for the Eddy Coil. Setting this option at all requires Kalico
+#   from March 2026 or newer; both supported stock Klipper versions carry
+#   it. A wrong value here scales every reported
 #   frequency. Changing it invalidates every stored Z reference: run
 #   EDDY_CALIBRATE_Z again for each tool afterwards.
 #reg_drive_current:
@@ -314,7 +336,11 @@ Every option and its default. Options shown commented out may be left out.
 #   printed value with SAVE_CONFIG. Changing it invalidates every stored Z
 #   reference: run EDDY_CALIBRATE_Z again for each tool afterwards. A run
 #   that reads a reference taken at another drive current refuses to
-#   measure rather than report an offset the setting has moved.
+#   measure rather than report an offset the setting has moved. If a scan
+#   fails with a sensor amplitude error ("Eddy current sensor error"),
+#   raise this value by one and retry; BTT's own remedy for that error is
+#   the same step, 15 to 16, and it typically means the coil-to-target
+#   distance sat outside roughly 2 to 3 mm.
 #coil_x:
 #coil_y:
 #   Required. Approximate machine X and Y of the coil center. A ruler
@@ -377,8 +403,8 @@ Every option and its default. Options shown commented out may be left out.
 #   Minimum usable samples per scan pass, at least 3. A pass below it is
 #   an error rather than a fit on thin data.
 #query_time: 0.5
-#   Seconds EDDY_QUERY collects samples for. At the sensor's 250 Hz rate,
-#   the default gives about 125 samples.
+#   Seconds EDDY_QUERY collects samples for. At the driver's 250 Hz rate
+#   (400 Hz on Klipper master), the default gives about 125 samples.
 #freq_min: 1000000.0
 #   Samples below this frequency, in Hz, are discarded as startup or noise
 #   readings. The default sits well below any real LDC1612 coil resonance.
@@ -536,7 +562,10 @@ there is no measured Z, and the name is not bound in the template.
 
 Any board carrying an LDC1612 with its coil facing up, reachable over I2C. Four
 wires: 5V, GND, SCL, SDA. Check the supply voltage and the connector pin order
-against your own board's silkscreen before powering it.
+against your own board's silkscreen before powering it. The general rule: any
+sensor the firmware's stock `ldc1612` driver can drive works, and any sensor
+with its own proprietary Klipper module does not, because this plugin drives
+the stock driver.
 
 **BTT Eddy Coil, wired to a mainboard or toolboard I2C. Tested by the author.**
 No MCU on the board, so nothing to flash. Software I2C on the Manta M8P V2.0's
@@ -553,14 +582,16 @@ reg_drive_current: 15
 coil_inner_diameter: 8.0
 ```
 
-Leave `frequency` out: the driver's 12 MHz default is this board's CLKIN. The
+Leave `frequency` out: the driver's 12 MHz default holds in practice for this
+board (the config reference's `frequency` entry says what backs that). The
 `coil_inner_diameter` above is an estimate, because BTT publishes no bore
 specification; measure your coil with calipers. Leave `scan_length` out too;
 its default follows `coil_inner_diameter`.
 
-**BTT Eddy USB.** The board's RP2040 is its own MCU, so it is declared as one
-and the sensor sits on its internal I2C bus, following BTT's own sample config.
-Kalico has to be flashed to the RP2040 first. Not tested by the author:
+**BTT Eddy USB.** The board's RP2040 runs standard Klipper firmware you
+compile and flash, appearing as a second MCU, and the sensor sits on its
+onboard I2C bus, following BTT's own sample config. Not tested by the author,
+expected to work unmodified:
 
 ```ini
 [mcu eddy]
@@ -571,13 +602,17 @@ i2c_mcu: eddy
 i2c_bus: i2c0f
 ```
 
-**BTT Eddy Duo.** Expected to work wherever it presents an MCU with the LDC1612
-on I2C, configured like one of the two above. Not verified by the author.
+**BTT Eddy Duo.** In USB mode, expected to work like the Eddy USB. Its CAN
+mode and its second coil are undocumented by BTT, so they are unverified.
+
+**Cartographer, Scanner and similar probes: not compatible.** They carry an
+LDC1612 too, but behind proprietary firmware with its own protocol, so the
+stock `ldc1612` driver this plugin requires is never involved.
 
 **chengxg "Little Crab" dual-coil board.** The board this plugin's algorithm
 comes from: a small wound pancake coil, which gives a sharper XY response than
 the larger BTT coils. Its CLKIN oscillator is 24 MHz, so it needs an explicit
-`frequency` and therefore Kalico from March 2026 or newer:
+`frequency`, which on Kalico means March 2026 or newer:
 
 ```ini
 [eddy_tool_calibration]
