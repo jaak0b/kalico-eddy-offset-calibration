@@ -3058,9 +3058,10 @@ class EddyToolCalibration:
     def _append_history(self, gcmd, tool, entry, completed):
         """Append one completed measurement to the tool's drift log.
 
-        Called last, after the work of the command is finished and reported,
-        so a log that cannot be written never costs a measurement. completed
-        is the sentence naming what is already in place when that happens.
+        Called last, after the work of the command is finished and reported.
+        A log failure warns and never raises: raising here would abort a
+        print whose measurement already succeeded. completed is the sentence
+        naming what is already in place when that happens.
         """
         if not self.save_history:
             return
@@ -3068,14 +3069,19 @@ class EddyToolCalibration:
         try:
             rotated_to = append_csv(path, HISTORY_COLUMNS, entry)
         except ValueError as e:
-            raise gcmd.error(
-                "%s Only the drift log write failed: %s" % (completed, e))
+            gcmd.respond_raw(
+                "!! %s Only the drift log write failed: %s"
+                % (completed, e))
+            return
         except OSError as e:
-            raise gcmd.error(
-                "%s Only the drift log write failed: %s could not be written: "
-                "%s. Fix the directory permissions, or set save_history to "
-                "False in the [%s] config section."
+            gcmd.respond_raw(
+                "!! %s Only the drift log write failed: %s could not be "
+                "written: %s. Fix the directory permissions, or set "
+                "save_history to False in the [%s] config section. This "
+                "warning repeats every measurement until one of those "
+                "happens."
                 % (completed, path, e, self.name))
+            return
         if rotated_to is not None:
             gcmd.respond_info(
                 "drift log rotated: %s -> %s" % (path, rotated_to))
