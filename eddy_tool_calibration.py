@@ -62,6 +62,16 @@ def unhandled_member(kind, value, members):
         "unhandled %s %r, expected one of %r" % (kind, value, members))
 
 
+def is_batch_run(start_args):
+    """Whether klippy is replaying a gcode file against a simulated MCU.
+
+    The debugoutput start argument marks klippy's batch mode (all four
+    reference builds, printer.py main: the -o option stores it), where no
+    hardware answers and no sensor delivers data.
+    """
+    return start_args.get('debugoutput') is not None
+
+
 def detect_peak_type(freqs, edge_margin):
     """Ported from upstream's auto-detection: the response is a peak when the
     middle band of the pass reads higher than its two edges, a valley when it
@@ -2650,10 +2660,10 @@ class EddyToolCalibration:
         emits, which front ends read to follow a wait that blocks for
         minutes.
         """
-        # A batch run replays a gcode file against no hardware, so its heaters
-        # never move and any wait on a reading would never return. Kalico's own
-        # heater wait skips itself there for the same reason.
-        if self.printer.get_start_args().get('debugoutput') is not None:
+        # A batch run's heaters never move, so any wait on a reading would
+        # never return. Kalico's own heater wait skips itself there for the
+        # same reason (heaters.py:1464).
+        if is_batch_run(self.printer.get_start_args()):
             logging.info(
                 "eddy_tool_calibration: not waiting for T%d to reach %.1f C, "
                 "because this is a batch run with no hardware behind the "
@@ -2875,6 +2885,17 @@ class EddyToolCalibration:
         that returns False unregisters its client (bulk_sensor.py:97-104), so
         the stream ends with the block.
         """
+        # In a batch run the driver's start callback issues an i2c query the
+        # simulated MCU never answers (ldc1612.py:214 read_reg), and the send
+        # blocks on a response stream that batch mode never starts
+        # (serialhdl.py:394 raw_send_wait_ack; connect_file at
+        # serialhdl.py:316 starts no reader thread), so add_client would
+        # block this command until the run is killed.
+        if is_batch_run(self.printer.get_start_args()):
+            raise self.printer.command_error(
+                "Run this command on the printer. This is a batch run with "
+                "no hardware behind the eddy sensor, so the sensor can "
+                "deliver no samples.")
         samples = []
         stats = new_collection()
         state = {'running': True}

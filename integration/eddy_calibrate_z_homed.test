@@ -2,8 +2,9 @@
 # probing moves through the plugin's own endstop object. An endstop that drives
 # no stepper makes the homing module take the maximum of an empty set, which is
 # a traceback rather than a message, so this case gates the stepper binding.
-# The run cannot finish: the simulated MCU carries no eddy sensor, so the
-# measurement that follows the presses has no data to fit.
+# The measurement that follows the presses refuses to start: a batch run has
+# no hardware behind the eddy sensor, and that refusal is the failure this
+# case requires.
 CONFIG printer.cfg
 DICTIONARY linuxprocess.dict
 SHOULD_FAIL
