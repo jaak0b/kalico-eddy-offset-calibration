@@ -33,46 +33,57 @@ jobs:
         run: python -m pytest tests/ -q
 
   integration:
-    name: Integration (Kalico ${{ matrix.kalico.name }})
+    name: Integration (${{ matrix.firmware.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        kalico:
-          - name: main
+        firmware:
+          - name: Kalico main
+            repository: KalicoCrew/kalico
             ref: main
-          - name: "2025-12-14"
+          - name: Kalico 2025-12-14
+            repository: KalicoCrew/kalico
             ref: 3b98cf51ef4260164a6cd457b7e02c34c31767de
+          - name: Klipper master
+            repository: Klipper3d/klipper
+            ref: master
+          - name: Klipper v0.13.0
+            repository: Klipper3d/klipper
+            ref: v0.13.0
     steps:
       - name: Check out the plugin
         uses: actions/checkout@v4
 
-      - name: Check out Kalico
+      - name: Check out the firmware
         uses: actions/checkout@v4
         with:
-          repository: KalicoCrew/kalico
-          ref: ${{ matrix.kalico.ref }}
-          path: kalico
+          repository: ${{ matrix.firmware.repository }}
+          ref: ${{ matrix.firmware.ref }}
+          path: firmware
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # Every leg's scripts/klippy-requirements.txt names what klippy needs;
+      # stock Klipper's cffi pin for this interpreter has no wheel and builds
+      # from source against the runner's preinstalled libffi.
       - name: Install klippy's Python requirements
-        run: pip install -r kalico/scripts/klippy-requirements.txt
+        run: pip install -r firmware/scripts/klippy-requirements.txt
 
       - name: Record what builds the firmware and the C helper
         run: |
           gcc --version
           make --version
-          git -C kalico log -1 --format='Kalico %H %cI %s'
+          git -C firmware log -1 --format='${{ matrix.firmware.name }} %H %cI %s'
 
       - name: Run the integration harness
-        run: python integration_test.py kalico
+        run: python integration_test.py firmware
 
-      - name: Name the Kalico version that failed
+      - name: Name the firmware version that failed
         if: failure()
         run: >
-          echo "::error title=Integration harness failed::Kalico
-          ${{ matrix.kalico.name }} at ${{ matrix.kalico.ref }}"
+          echo "::error title=Integration harness failed::${{
+          matrix.firmware.name }} at ${{ matrix.firmware.ref }}"

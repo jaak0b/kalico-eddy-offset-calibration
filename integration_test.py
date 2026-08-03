@@ -15,18 +15,48 @@ REPO_DIR = Path(__file__).resolve().parent
 PLUGIN_SRC = REPO_DIR / 'eddy_tool_calibration.py'
 CASE_DIR = REPO_DIR / 'integration'
 
-# Kalico's linuxprocess target builds with the host compiler, so no
-# cross-toolchain is needed for the simulated MCU the cases run against.
+# The linuxprocess target builds with the host compiler in every supported
+# firmware, so no cross-toolchain is needed for the simulated MCU the cases
+# run against.
 MCU_TARGET = 'linuxprocess'
 DICT_NAME = '%s.dict' % (MCU_TARGET,)
 
 CASE_TIMEOUT = 600.0
 
-# scripts/test_klippy.py:13. Kalico's harness gives klippy a log file of this
-# name in the directory named by -t, unless it was asked for verbose output:
-# then klippy has no log file and Python's fallback handler puts only warnings
-# and worse on stderr, well above the level the markers below are logged at.
+# Kalico scripts/test_klippy.py:13, Klipper scripts/test_klippy.py:9: both
+# harnesses give klippy a log file of this name relative to their own working
+# directory, unless they were asked for verbose output: then klippy has no
+# log file and Python's fallback handler puts only warnings and worse on
+# stderr, well above the level the markers below are logged at.
 KLIPPY_LOG = '_test_.log'
+
+# What the harness does differently per firmware layout, one row per
+# divergent surface, mirroring the markers install.sh detects with.
+# chelper: Kalico ships klippy/__init__.py, so its C helper imports as
+# klippy.chelper from the checkout root; stock Klipper has no such package
+# and chelper imports from the klippy/ directory itself.
+# link_klippy_tree: stock test_klippy.py launches './klippy/klippy.py'
+# relative to its working directory (scripts/test_klippy.py:94 on master),
+# and the klippy log stays per-case only when that directory is the case's
+# own, so each case directory gets a symlink to the checkout's klippy tree.
+LAYOUTS = {
+    'kalico': {
+        'install_dir': ('klippy', 'plugins'),
+        'create_package_marker': True,
+        'chelper_code': 'import klippy.chelper; klippy.chelper.get_ffi()',
+        'chelper_cwd': (),
+        'config_overlay': 'kalico_overlay.cfg',
+        'link_klippy_tree': False,
+    },
+    'klipper': {
+        'install_dir': ('klippy', 'extras'),
+        'create_package_marker': False,
+        'chelper_code': 'import chelper; chelper.get_ffi()',
+        'chelper_cwd': ('klippy',),
+        'config_overlay': None,
+        'link_klippy_tree': True,
+    },
+}
 
 # Klipper's gcode dispatcher catches CommandError and nothing else, so any
 # other exception is logged with a traceback and shuts the printer down.
@@ -99,23 +129,43 @@ def report(line=''):
 
 
 def check_checkout(raw):
-    kalico = Path(raw).expanduser().resolve()
-    if not kalico.is_dir():
+    checkout = Path(raw).expanduser().resolve()
+    if not checkout.is_dir():
         raise Failure(
-            "Kalico checkout not found: %s. Pass the directory holding "
-            "Kalico's klippy/ and scripts/ directories." % (kalico,))
+            "Firmware checkout not found: %s. Pass the directory holding "
+            "the firmware's klippy/ and scripts/ directories." % (checkout,))
     needed = [
-        kalico / 'klippy',
-        kalico / 'scripts' / 'test_klippy.py',
-        kalico / 'test' / 'configs' / ('%s.config' % (MCU_TARGET,)),
-        kalico / 'Makefile',
+        checkout / 'klippy',
+        checkout / 'scripts' / 'test_klippy.py',
+        checkout / 'test' / 'configs' / ('%s.config' % (MCU_TARGET,)),
+        checkout / 'Makefile',
     ]
     missing = [str(p) for p in needed if not p.exists()]
     if missing:
         raise Failure(
-            "%s does not look like a Kalico checkout. Missing: %s."
-            % (kalico, ", ".join(missing)))
-    return kalico
+            "%s does not look like a Kalico or Klipper checkout. Missing: %s."
+            % (checkout, ", ".join(missing)))
+    return checkout
+
+
+def detect_layout(checkout):
+    """Name the firmware layout of a checkout, from the LAYOUTS closed set."""
+    # Kalico's module loader is klippy/printer.py scanning "klippy.plugins."
+    # (printer.py:194 on development, :282 at 3b98cf51); the plugins
+    # directory itself may not exist yet in a fresh checkout. Stock Klipper
+    # has no printer.py and klippy/klippy.py:90-103 loads only from
+    # klippy/extras/.
+    printer_py = checkout / 'klippy' / 'printer.py'
+    if (printer_py.is_file()
+            and 'klippy.plugins' in printer_py.read_text(errors='replace')):
+        return 'kalico'
+    if ((checkout / 'klippy' / 'klippy.py').is_file()
+            and (checkout / 'klippy' / 'extras').is_dir()):
+        return 'klipper'
+    raise Failure(
+        "%s is neither a Kalico nor a stock Klipper checkout: it has no "
+        "klippy/printer.py loading klippy.plugins, and no klippy/klippy.py "
+        "with a klippy/extras/ directory." % (checkout,))
 
 
 def run_tool(command, cwd, env, what):
@@ -132,28 +182,29 @@ def run_tool(command, cwd, env, what):
     return proc.stdout
 
 
-def build_dictionary(kalico, build_dir, dictdir):
+def build_dictionary(checkout, build_dir, dictdir):
     """Build the MCU dictionary the cases run against from this checkout.
 
     The dictionary carries the command set of the firmware, so it has to come
     from the same checkout as klippy: a dictionary built elsewhere would test
     the plugin against a protocol that checkout does not speak.
     """
-    source = kalico / 'test' / 'configs' / ('%s.config' % (MCU_TARGET,))
+    source = checkout / 'test' / 'configs' / ('%s.config' % (MCU_TARGET,))
     build_dir.mkdir(parents=True, exist_ok=True)
     config = build_dir / '.config'
     shutil.copyfile(str(source), str(config))
     # The Makefile joins OUT with relative paths, so it has to end in a
     # separator, and it keeps the build out of the checkout's own out/.
     make = [
-        'make', '-C', str(kalico),
+        'make', '-C', str(checkout),
         'OUT=%s%s' % (build_dir, os.sep),
         'KCONFIG_CONFIG=%s' % (config,),
     ]
     env = os.environ.copy()
     try:
-        run_tool(make + ['olddefconfig'], kalico, env, 'The firmware configure')
-        run_tool(make, kalico, env, 'The firmware build')
+        run_tool(make + ['olddefconfig'], checkout, env,
+                 'The firmware configure')
+        run_tool(make, checkout, env, 'The firmware build')
     except Failure as e:
         raise Failure(
             "%s\nThe %s firmware is built with make and the host C compiler. "
@@ -162,24 +213,25 @@ def build_dictionary(kalico, build_dir, dictdir):
     built = build_dir / 'klipper.dict'
     if not built.is_file():
         raise Failure(
-            "The firmware build produced no %s. Kalico's build writes the "
+            "The firmware build produced no %s. The build writes the "
             "dictionary next to klipper.elf; check the build output above."
             % (built,))
     dictdir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(str(built), str(dictdir / DICT_NAME))
 
 
-def build_chelper(kalico, env):
+def build_chelper(checkout, env, layout):
     """Compile klippy's C helper before any case runs.
 
     Kalico's own test/conftest.py calls chelper.get_ffi() at session start for
     the same reason: the first import compiles c_helper.so, and a compiler or
     dependency problem there would otherwise be reported as a failing case.
     """
-    code = 'import klippy.chelper; klippy.chelper.get_ffi()'
+    spec = LAYOUTS[layout]
     try:
         run_tool(
-            [sys.executable, '-c', code], kalico, env,
+            [sys.executable, '-c', spec['chelper_code']],
+            checkout.joinpath(*spec['chelper_cwd']), env,
             "Building klippy's C helper")
     except Failure as e:
         raise Failure(
@@ -205,8 +257,9 @@ def link_plugin(target):
 
 
 @contextlib.contextmanager
-def installed_plugin(kalico):
-    plugins_dir = kalico / 'klippy' / 'plugins'
+def installed_plugin(checkout, layout):
+    spec = LAYOUTS[layout]
+    plugins_dir = checkout.joinpath(*spec['install_dir'])
     target = plugins_dir / PLUGIN_SRC.name
     package_marker = plugins_dir / '__init__.py'
     created_dir = created_marker = False
@@ -214,7 +267,7 @@ def installed_plugin(kalico):
     if not plugins_dir.is_dir():
         plugins_dir.mkdir(parents=True)
         created_dir = True
-    if not package_marker.exists():
+    if spec['create_package_marker'] and not package_marker.exists():
         package_marker.touch()
         created_marker = True
     already_installed = False
@@ -255,9 +308,10 @@ def installed_plugin(kalico):
 
 
 def case_output(case_dir, harness_output):
-    """Everything one case produced: what Kalico's harness printed, plus the
-    klippy log it kept. That harness prints the log itself when a run defied
-    the case's expectation, so it is appended only when it is not there yet.
+    """Everything one case produced: what the firmware's harness printed,
+    plus the klippy log it kept. That harness prints the log itself when a
+    run defied the case's expectation, so it is appended only when it is not
+    there yet.
     """
     output = harness_output or ''
     log_path = case_dir / KLIPPY_LOG
@@ -269,15 +323,39 @@ def case_output(case_dir, harness_output):
     return output + log
 
 
-def run_case(case, kalico, dictdir, workdir, env):
-    """Run one case through Kalico's harness. Returns (problems, output)."""
+def stage_cases(scratch, layout):
+    """Copy the cases where they can sit next to the composed printer.cfg."""
+    staged = scratch / 'cases'
+    staged.mkdir()
+    for case in CASES:
+        shutil.copyfile(str(CASE_DIR / case['test']),
+                        str(staged / case['test']))
+    config = (CASE_DIR / 'printer.cfg').read_text()
+    overlay = LAYOUTS[layout]['config_overlay']
+    if overlay is not None:
+        config += (CASE_DIR / overlay).read_text()
+    (staged / 'printer.cfg').write_text(config)
+    return staged
+
+
+def run_case(case, checkout, staged, dictdir, workdir, env, layout):
+    """Run one case through the firmware's harness. Returns (problems,
+    output)."""
     # klippy appends to its log file and the name above is the same for every
     # case, so each case runs in a directory of its own.
     case_dir = workdir / case['test']
     case_dir.mkdir(parents=True, exist_ok=True)
+    if LAYOUTS[layout]['link_klippy_tree']:
+        tree_link = case_dir / 'klippy'
+        if not tree_link.exists():
+            try:
+                os.symlink(str(checkout / 'klippy'), str(tree_link))
+            except OSError as e:
+                return (["the klippy tree could not be linked into %s: %s"
+                         % (case_dir, e)], '')
     command = [
-        sys.executable, str(kalico / 'scripts' / 'test_klippy.py'),
-        '-k', '-d', str(dictdir), '-t', '.', str(CASE_DIR / case['test']),
+        sys.executable, str(checkout / 'scripts' / 'test_klippy.py'),
+        '-k', '-d', str(dictdir), '-t', '.', str(staged / case['test']),
     ]
     try:
         proc = subprocess.run(
@@ -288,12 +366,12 @@ def run_case(case, kalico, dictdir, workdir, env):
         return (["the run did not finish within %.0f seconds"
                  % (CASE_TIMEOUT,)], case_output(case_dir, e.output))
     except OSError as e:
-        return (["Kalico's harness could not be started: %s" % (e,)], '')
+        return (["test_klippy.py could not be started: %s" % (e,)], '')
     output = case_output(case_dir, proc.stdout)
     problems = []
     if proc.returncode != 0:
         problems.append(
-            "Kalico's harness reported failure, exit code %d"
+            "test_klippy.py reported failure, exit code %d"
             % (proc.returncode,))
     for marker in case['require']:
         if marker not in output:
@@ -304,10 +382,11 @@ def run_case(case, kalico, dictdir, workdir, env):
     return problems, output
 
 
-def run_cases(kalico, dictdir, workdir, env, verbose):
+def run_cases(checkout, staged, dictdir, workdir, env, verbose, layout):
     failed = 0
     for case in CASES:
-        problems, output = run_case(case, kalico, dictdir, workdir, env)
+        problems, output = run_case(
+            case, checkout, staged, dictdir, workdir, env, layout)
         if problems:
             failed += 1
             report('case %s: FAILED' % (case['name'],))
@@ -328,12 +407,14 @@ def run_cases(kalico, dictdir, workdir, env, verbose):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Run the plugin's config section and its commands through "
-            "Kalico's own regression harness against a Kalico checkout. This "
-            "is a separate entry point from the unit tests, because it needs "
-            "a checkout, a C compiler and a POSIX host."))
+            "Run the plugin's config section and its commands through the "
+            "firmware's own regression harness against a Kalico or stock "
+            "Klipper checkout. This is a separate entry point from the unit "
+            "tests, because it needs a checkout, a C compiler and a POSIX "
+            "host."))
     parser.add_argument(
-        'kalico', help="path to the Kalico checkout to test the plugin against")
+        'checkout',
+        help="path to the firmware checkout to test the plugin against")
     parser.add_argument(
         '--dictdir', default=None,
         help=("directory holding %s. It is built from the checkout when it is "
@@ -348,20 +429,24 @@ def main():
         raise Failure(
             "klippy runs on POSIX hosts only: it needs fork and the termios "
             "module. Run this script on the printer host, or in a Linux "
-            "virtual machine or container with the Kalico checkout mounted.")
+            "virtual machine or container with the firmware checkout "
+            "mounted.")
     if not PLUGIN_SRC.is_file():
         raise Failure(
             "cannot find %s. Run this script from its own repository."
             % (PLUGIN_SRC,))
 
-    kalico = check_checkout(args.kalico)
-    report('kalico checkout: %s' % (kalico,))
+    checkout = check_checkout(args.checkout)
+    layout = detect_layout(checkout)
+    report('firmware checkout: %s' % (checkout,))
+    report('firmware layout: %s' % (layout,))
     report('python: %s' % (sys.executable,))
 
     env = os.environ.copy()
     existing = env.get('PYTHONPATH')
     env['PYTHONPATH'] = (
-        str(kalico) if not existing else str(kalico) + os.pathsep + existing)
+        str(checkout) if not existing
+        else str(checkout) + os.pathsep + existing)
 
     with tempfile.TemporaryDirectory(prefix='eddy-integration-') as scratch:
         scratch = Path(scratch)
@@ -372,15 +457,17 @@ def main():
         if (dictdir / DICT_NAME).is_file():
             report('dictionary: %s, reused' % (dictdir / DICT_NAME,))
         else:
-            build_dictionary(kalico, scratch / 'build', dictdir)
+            build_dictionary(checkout, scratch / 'build', dictdir)
             report('dictionary: %s, built from this checkout'
                    % (dictdir / DICT_NAME,))
-        build_chelper(kalico, env)
+        build_chelper(checkout, env, layout)
+        staged = stage_cases(scratch, layout)
         workdir = scratch / 'run'
         workdir.mkdir()
         report()
-        with installed_plugin(kalico):
-            failed = run_cases(kalico, dictdir, workdir, env, args.verbose)
+        with installed_plugin(checkout, layout):
+            failed = run_cases(
+                checkout, staged, dictdir, workdir, env, args.verbose, layout)
     return 1 if failed else 0
 
 
