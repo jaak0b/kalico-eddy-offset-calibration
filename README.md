@@ -1,54 +1,29 @@
 # eddy_tool_calibration
 
 A Kalico and Klipper plugin that measures per-tool XYZ nozzle offsets on a
-toolchanger by
-scanning each nozzle over a bed-mounted LDC1612 eddy-current coil, fitting the
-symmetry center of the response for X and Y and a frequency-vs-height curve for
-Z.
+toolchanger with a bed-mounted LDC1612 eddy-current coil.
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 - **Non-contact.** The coil responds to metal, so plastic on the nozzle is
-  expected to be invisible to it. Not yet validated on hardware (see Status and
-  limitations).
-- **Nothing on the toolhead.** One 4-wire board at the edge of the bed.
-- **Plain I2C**, hardware or software bus. The BTT Eddy Coil carries no MCU, so
-  there is nothing to flash.
-- **Labeled offset rows** on the console, applied by your own macro lines if you
-  write them.
+  expected to be invisible to it (see Status and limitations).
+- **Nothing on the toolhead.** One 4-wire I2C board at the edge of the
+  bed; offsets print as labeled console rows for your own macro lines.
 
 [![A calibration run on the author's printer](https://img.youtube.com/vi/lr-eFiMrt0E/hqdefault.jpg)](https://www.youtube.com/watch?v=lr-eFiMrt0E)
 
-A calibration run on the author's printer.
-
-## Why this exists
-
-Contact-pin offset calibration wants a spotless nozzle, so on a toolchanger you
-wipe every hotend before every run, and a run that looks fine may have measured
-a blob of PLA instead of brass. Camera systems want lighting, mounting and focus
-work. An eddy-current coil sidesteps both.
-
 ## How it works
 
-- **XY** comes from the symmetry center of the coil response, not its amplitude,
-  so nozzle material does not shift the result.
-- **Z** comes from a frequency-vs-height descent curve, anchored once per tool by
-  a press on a contact switch next to the coil. The switch's own height never has
-  to be known, because it cancels between tools.
-- **The temperature is held for you.** A nozzle reads differently hot and cold,
-  so each reference records the setpoint it was heated to, and an offset run
-  holds every tool at its own recorded setpoint before measuring. The setpoint
-  is what makes the thermal state reproducible: a hotend under PID control
-  wanders around it, so the reading at any one moment is a sample of that
-  wander. Each reference also records the reading observed while it was taken,
-  as evidence that the tool did reach its setpoint.
-- The fitting math is ported from chengxg's `tool_eddy_calibration` and Kalico's
-  `probe_eddy_current`.
+Contact pins want a spotless nozzle; cameras want lighting and mounting
+work. An eddy-current coil sidesteps both. XY comes from the symmetry
+center of the coil response, not its amplitude, so nozzle material does not
+shift the result. Z comes from a frequency-vs-height descent curve,
+anchored once per tool by a press on a contact switch next to the coil; the
+switch's own height cancels between tools. Each Z reference records its
+nozzle setpoint, and every later run holds the tool at it, because a nozzle
+reads differently hot and cold.
 
-## Example output
-
-Abridged from a run on the author's machine, with the Z rows and the stepper
-microstep rows left out. Values are in mm:
+Abridged example output of a run on the author's machine, in mm:
 
 ```
 tool: T1
@@ -60,100 +35,47 @@ offset y: -0.2598
 samples used: 6916
 ```
 
-For the spread repeated runs produced on the author's machine, see
-[Status and limitations](#status-and-limitations).
-
-Every readout that prints a fitted center also prints what one microstep moves
-each X and Y stepper, read off the kinematics, so a measured spread can be read
-against the machine's own resolution. Each row is that one stepper's microstep
-distance. On kinematics where an axis is driven by a combination of steppers,
-CoreXY among them, the machine's positional quantum is a combination of the
-listed values rather than either one.
-
-`DEBUG=1` adds a block per scan pass: response type, sample counts, extremum
-sample, fitted vertex offset, pass angle and peak position. A failed pass always
-prints its full diagnostics, with or without `DEBUG=1`.
+Every readout with a fitted center also prints each stepper's microstep
+distance. `DEBUG=1` adds per-pass diagnostics; a failed pass always does.
 
 ## Commands
 
-`EDDY_CALIBRATE_Z` and `EDDY_CALIBRATE_OFFSET` take the same tool selection.
-`T=` takes one tool number or a comma separated list with no spaces: `T=0`,
-`T=0,1,2`. Leaving `T=` out runs every tool of the fleet and needs
-`tool_count`; any run that covers more than one tool needs `toolchange_gcode`.
+`T=` takes one tool number or a comma separated list with no spaces
+(`T=0,1,2`). Leaving `T=` out runs every tool and needs `tool_count`; any
+run covering more than one tool needs `toolchange_gcode`.
 
-#### EDDY_QUERY
-
-`EDDY_QUERY`: Print the current eddy sensor frequency reading, for a wiring
-sanity check. Prints the sample count, mean, minimum, maximum and standard
-deviation of the frequency over `query_time` seconds, plus the counts of any
-discarded samples. Performs no motion.
-
-#### EDDY_LOCATE
-
-`EDDY_LOCATE [DEBUG=1]`: Scan over the configured coil position and store the
-refined coil center for the rest of the session. Prints the measured center
-next to the configured `coil_x` and `coil_y`. `DEBUG=1` prints each scan pass's
-diagnostic rows.
-
-#### EDDY_CALIBRATE_Z
+`EDDY_QUERY`: Print statistics of the sensor frequency over `query_time`
+seconds without motion, a wiring sanity check. `EDDY_LOCATE [DEBUG=1]`:
+Scan over the configured coil position and store the refined coil center
+for the rest of the session.
 
 `EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: Measure the one-time Z reference of
-the tools named by `T=`, or of every tool in turn when `T=` is left out. Heats
-each tool to `calibration_temp`, presses the contact switch, measures the
-tool's descent curve and binds the two together. Requires `calibrate_z: True`
-and the switch options. Run it again after changing a nozzle or a hotend, after
-moving the coil or the switch, and after changing `calibration_temp`. A later
-run refuses a reference whose `frequency` or `reg_drive_current` differs from
-the settings in use, so re-run it after either of those as well. References
-are written to `EddyToolCalibration/calibration_state.json` next to the printer
-config as they are measured; there is no `SAVE_CONFIG` step. `DEBUG=1` prints
-each press trigger height and each scan pass's diagnostic rows.
+each listed tool: heat to `calibration_temp`, press the contact switch,
+measure the descent curve. Requires `calibrate_z: True` and the switch
+options. References go to `EddyToolCalibration/calibration_state.json`
+next to the printer config; no `SAVE_CONFIG` step. Run it again after
+changing a nozzle, a hotend, the coil or switch position,
+`calibration_temp`, `frequency` or `reg_drive_current`.
 
-#### EDDY_CALIBRATE_OFFSET
+`EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: Measure the listed tools and
+print their offsets relative to T0, which is always measured first; a run
+leaving T0 out requires a baseline from earlier in the same session. With
+`calibrate_z: True` every tool needs its Z reference and is heated to its
+setpoint; non-baseline results pass to `apply_offsets_gcode` when set.
 
-`EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: Measure the tools named by `T=`
-over the coil and print their offsets relative to T0, or measure every tool in
-turn when `T=` is left out. T0 is the baseline and is measured first whatever
-order a list gives it in; a run that leaves T0 out requires that T0 was
-measured earlier in the same session, because the baseline is not kept across a
-restart. With `calibrate_z: True` every tool involved needs its
-`EDDY_CALIBRATE_Z` reference, checked before the first move, and each tool is
-then heated to the setpoint that reference was taken at. Each non-baseline
-result is passed to `apply_offsets_gcode` when that option is set. A run over
-more than one tool ends with a per-tool summary. `DEBUG=1` prints each scan
-pass's diagnostic rows.
+`EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] [DEBUG=1]`:
+Measure one tool repeatedly: each cycle docks and remounts it (without
+`tool_count` and `toolchange_gcode` the summary says no docking was
+exercised), then takes `RUNS` measurements. Reports per-axis measurement
+spread, docking spread and worst deviation, and writes a CSV per study to
+`log_dir`. `SKIP_Z=0` (default 1) needs the tool's Z reference.
 
-#### EDDY_REPEATABILITY
-
-`EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] [DEBUG=1]`: Measure
-one tool repeatedly and report how far the results spread. `T=`, `RUNS=` and
-`CYCLES=` are all required. Each cycle mounts another tool and remounts the
-measured one, then takes `RUNS` measurements without touching it again. Docking
-needs `tool_count` and `toolchange_gcode`; without them the cycles still run,
-and the summary says no docking was exercised. `SKIP_Z` defaults to 1 and skips
-the Z descent even with `calibrate_z: True`; `SKIP_Z=0` needs `calibrate_z:
-True` and the tool's `EDDY_CALIBRATE_Z` reference. The tool is heated only when
-`calibrate_z: True` and it has that reference, in which case it is held at the
-setpoint the reference was taken at. A progress row announces each measurement
-as it runs; a single summary prints once the study finishes, giving the tool,
-the run and cycle counts, the Z descent and docking state, then per axis the
-measurement spread, the docking spread with its degrees of freedom and the
-worst deviation from the mean. Every measurement is written to
-`repeatability_T<n>_<index>.csv` in `log_dir`, with a fresh index for every
-study.
-
-#### LDC_CALIBRATE_DRIVE_CURRENT
-
-`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`: the firmware's own drive
-current calibration, registered by the LDC1612 driver this plugin loads. Store
-the printed value with `SAVE_CONFIG`.
+`LDC_CALIBRATE_DRIVE_CURRENT` is also registered (see `reg_drive_current`).
 
 ## Reading the results from a macro
 
-The plugin publishes its stored references and this session's measurements as
-`printer.eddy_tool_calibration`, so a macro can act on a measurement instead of
-reading it off the console. Tool numbers are the keys of the two nested
-objects, written as decimal strings.
+The plugin publishes `printer.eddy_tool_calibration` (keys are tool
+numbers as decimal strings):
 
 ```jinja
 {% set eddy = printer.eddy_tool_calibration %}
@@ -162,101 +84,40 @@ objects, written as decimal strings.
 {% endif %}
 ```
 
-Top level:
-
-- `calibrate_z`: whether Z calibration is switched on in the config section.
-- `tool_count`: the configured number of tools, `null` when the option is not
-  set.
-- `baseline_tool`: the tool the published offsets are measured against, `null`
-  until a baseline has been measured in this session.
-- `session_id`: rises by one each time a baseline measurement replaces the
-  previous one. Every published measurement carries the session it belongs to.
-- `last_tool`: the tool the plugin mounted last, `null` before it mounted one.
-- `anchors`: the stored Z references, one entry per tool that has one. These
-  survive a restart.
-- `tools`: this session's measurements, one entry per tool measured against
-  the baseline currently in place. It is empty until a baseline is measured,
-  and a run that replaces or clears the baseline takes the measurements that
-  were compared against the old one out of it, so an offset here is never
-  compared against a reference that has moved.
-
-Each entry of `anchors`:
-
-- `anchor_height`: the reference height above the switch trigger plane, in mm.
-- `anchor_frequency`: the sensor frequency at that height, in Hz.
-- `setpoint_temperature`: the nozzle setpoint the reference was measured at,
-  and the one every later run of that tool is heated to.
-- `observed_temperature`: the nozzle reading at the moment it was measured.
-- `trigger_z`: the machine Z of the switch trigger plane it was pressed
-  against.
-- `updated`: when it was measured, UTC in `YYYY-MM-DDTHH:MM:SSZ`.
-
-An anchor withholds the sensor settings it was taken with, `frequency` and
-`reg_drive_current`. An anchor frequency describes a height only under those
-settings, and the plugin compares them against the live ones itself and refuses
-the reference when they differ, so a macro has no decision to make from them.
-
-Each entry of `tools`:
-
-- `offset_x`, `offset_y`, `offset_z`: the measured offsets against the baseline
-  tool, in mm. All three are `null` for the baseline tool itself, whose offsets
-  are zero by definition, and `offset_z` alone is `null` when no descent ran,
-  which is every run with `calibrate_z: False`. A `null` is never a zero: it
-  says the figure was not measured.
-- `center_x`, `center_y`: the fitted coil center that measurement found, in
-  machine coordinates.
-- `z_crossing`: the machine Z at which the descent crossed the tool's anchor
-  frequency, `null` when no descent ran.
-- `session_id`: the session the measurement belongs to.
-- `measured_time`: the host's monotonic clock when the measurement finished.
-  It compares against other readings of that same clock, not against a wall
-  clock time.
+| Key | Meaning |
+|---|---|
+| `calibrate_z`, `tool_count` | the config section's values; `tool_count` `null` when unset |
+| `baseline_tool` | tool the offsets are measured against, `null` until a baseline exists |
+| `session_id` | rises by one each time a baseline replaces the previous one |
+| `anchors` | stored Z references, per tool; survive a restart. Each carries `anchor_height` (mm above the switch trigger plane), `anchor_frequency` (Hz), `setpoint_temperature` (the setpoint later runs heat to), `observed_temperature`, `trigger_z` (machine Z of the trigger plane) and `updated` (UTC) |
+| `tools` | this session's measurements; a baseline replacement removes the measurements compared against the old one, so an offset here is never compared against a reference that has moved. Each carries `offset_x/y/z` (mm; all `null` for the baseline itself, `offset_z` `null` when no descent ran, and a `null` is never a zero), `center_x/y` (machine coordinates), `z_crossing` (machine Z where the descent crossed the anchor frequency), `session_id` and `measured_time` (host monotonic clock) |
 
 ## Status and limitations
 
-Pre-release. It works on the author's printer and validation is still running.
-Read this section before wiring anything.
-
-- The dirty-nozzle test passed: a dirty nozzle measured the same offsets as
-  a clean one on the author's printer. The numeric spread of that run was not
-  recorded, so the figures below are all from clean-nozzle runs.
-- Kalico is the validated firmware, on the author's printer. Stock Klipper
-  (v0.13.0 or newer) passes the same automated test suite but has never run
-  on the author's hardware, so it is untested until a user reports numbers.
-- On stock Klipper: current builds sample at 400 Hz instead of 250 Hz, the
-  install lands in `klippy/extras/` (git and Moonraker report the checkout as
-  dirty), and cancelling a preheat mid-wait takes an emergency stop, matching
-  stock Klipper's own M109.
-- Per-tool Z needs the contact switch. Without a switch you get X and Y and
-  nothing else. Leave `calibrate_z` at its default of `False` and no descent
-  runs at all, which makes a run faster.
-- Z calibration heats the nozzles and waits. Every listed tool is brought to
-  its calibration setpoint before the first measurement, so a run takes minutes
-  longer, and longer still when a tool has to cool down into the band around
-  it.
-- Offsets are not persisted. Each session measures a fresh T0 baseline and
-  prints the other tools against it. If you want them applied, write the lines
-  in `apply_offsets_gcode`. Only the per-tool Z references are stored on disk.
-- No toolchanger integration. The plugin runs the toolchange and apply lines
-  you wrote and knows nothing else about your changer.
-- Cartesian kinematics for the switch probing. The switch probing reads the
-  kinematic Z limits and refuses to run without them.
-
-- No drift figure yet. With `save_history` at its default of `True`, every
-  completed measurement is appended to `history_T<n>.csv` in `log_dir`, and that
-  log is what a claim about drift over time would be based on. None is claimed
-  here until it covers enough time.
+- Pre-release: works on the author's printer; validation is running.
+- The dirty-nozzle test passed on the author's printer; its numeric spread
+  was not recorded, so the figures below are from clean-nozzle runs.
+- Kalico is the validated firmware. Stock Klipper (v0.13.0 or newer)
+  passes the same automated test suite but has never run on the author's
+  hardware: untested until a user reports numbers. There, sampling is 400 Hz
+  instead of 250 Hz, the install lands in `klippy/extras/` (git and
+  Moonraker report the checkout as dirty), and cancelling a preheat mid-wait
+  takes an emergency stop, matching M109.
+- Per-tool Z needs the contact switch, Cartesian kinematics (the probing
+  reads the kinematic Z limits and refuses to run without them) and heating
+  time. Without a switch you get X and Y only; leave `calibrate_z` at its
+  default of `False` and no descent runs.
+- Offsets are not persisted and there is no toolchanger integration: each
+  session measures a fresh T0 baseline, and the plugin only runs the
+  toolchange and apply lines you wrote.
+- No drift figure yet. `save_history` (default on) appends every completed
+  measurement to `history_T<n>.csv` in `log_dir`; no drift claim is made
+  until that log covers enough time.
 
 ### Measured so far
 
-Measured on one machine, one session each (a Voron with StealthChanger, a Manta
-M8P and a BTT Eddy Coil), recorded in full in the project's decisions log. These
-are one setup's figures, not a specification; a smaller coil, a different
-mainboard or a different toolchanger will read differently.
-
-`EDDY_REPEATABILITY` is the command that produces figures like these: it reports
-the measurement spread, the docking spread and the worst deviation from the
-mean, and writes every measurement to a CSV file.
+Measured with `EDDY_REPEATABILITY` on one machine (Voron, StealthChanger,
+Manta M8P, BTT Eddy Coil): one setup's figures, not a specification.
 
 | What | Measured | How |
 |---|---|---|
@@ -265,18 +126,10 @@ mean, and writes every measurement to a CSV file.
 | Contact switch press spread | 0 to 2.5 um | per anchor run of four presses |
 | Agreement with the contact method | 14 to 66 um | fresh contact calibration, same day, 150 C |
 
-## Requirements
-
-- Kalico, or stock Klipper v0.13.0 or newer. See
-  [Status and limitations](#status-and-limitations) for what is validated on
-  which.
-- The `frequency:` option (needed for any CLKIN other than 12 MHz) requires
-  Kalico from March 2026, or any supported stock Klipper.
-- An LDC1612 eddy-current board reachable over I2C from an MCU the firmware
-  already talks to. See [Supported hardware](#supported-hardware).
-- Python 3, no third-party packages. The plugin uses only the standard library.
-
 ## Install
+
+Requires Kalico or stock Klipper v0.13.0 or newer, an LDC1612 board
+reachable over I2C, and Python 3 with no third-party packages.
 
 ```
 cd ~
@@ -286,12 +139,18 @@ sh install.sh
 sudo service klipper restart
 ```
 
-`install.sh` detects the firmware layout of `~/klipper` (pass another path as
-an argument if yours differs) and symlinks the plugin into `klippy/plugins/`
-on Kalico or `klippy/extras/` on stock Klipper. On stock Klipper the symlink
-is an untracked file inside the klipper checkout, so git and Moonraker's
-update manager report that checkout as dirty until it is removed; the script
-prints this too.
+`install.sh` detects the firmware layout of `~/klipper` (pass another path
+as an argument) and symlinks the plugin into `klippy/plugins/` on Kalico or
+`klippy/extras/` on stock Klipper. Update manager entry for moonraker.conf:
+
+```
+[update_manager eddy_tool_calibration]
+type: git_repo
+path: ~/kalico-eddy-offset-calibration
+origin: https://github.com/jaak0b/kalico-eddy-offset-calibration
+primary_branch: main
+is_system_service: False
+```
 
 ## Config reference
 
@@ -515,20 +374,13 @@ Every option and its default. Options shown commented out may be left out.
 #   the run proceeds. Leave it out and the plugin only reports.
 ```
 
-The plugin refuses at startup to load a config still carrying `z_offset_mode` or
-`z_ref_t0` through `z_ref_t15`, options earlier versions had. Both are named in
-the startup message with the command that replaces them.
-
-Active gcode offsets do not affect any measurement. The plugin commands and
-reads machine coordinates, below the gcode transform, so it can be run in
-whatever state the printer is in.
+A config still carrying the earlier options `z_offset_mode` or `z_ref_t0`
+through `z_ref_t15` is refused at startup. Active gcode offsets never
+affect a measurement: the plugin works in machine coordinates.
 
 ### Toolchange and apply templates
 
-Both templates are your own lines; the plugin renders and runs them and knows
-nothing about your toolchanger.
-
-With Contomo's `klipper-toolchanger-hard` fork, which provides `SET_TOOL_OFFSET`:
+With Contomo's `klipper-toolchanger-hard` fork (provides `SET_TOOL_OFFSET`):
 
 ```ini
 tool_count: 4
@@ -538,7 +390,7 @@ apply_offsets_gcode:
     SET_TOOL_OFFSET T={tool} X={offset_x} Y={offset_y} Z={offset_z}
 ```
 
-On the viesturz original, which has no `SET_TOOL_OFFSET`, use three lines:
+On the viesturz original, which has no `SET_TOOL_OFFSET`:
 
 ```ini
 apply_offsets_gcode:
@@ -547,22 +399,25 @@ apply_offsets_gcode:
     SET_TOOL_PARAMETER T={tool} PARAMETER=gcode_z_offset VALUE={offset_z}
 ```
 
-Use `{offset_z}` only with `calibrate_z: True`. With it `False` no descent runs,
-there is no measured Z, and the name is not bound in the template.
+`{offset_z}` is bound only with `calibrate_z: True`.
 
 ## Supported hardware
 
-Any board carrying an LDC1612 with its coil facing up, reachable over I2C. Four
-wires: 5V, GND, SCL, SDA. Check the supply voltage and the connector pin order
-against your own board's silkscreen before powering it. The general rule: any
-sensor the firmware's stock `ldc1612` driver can drive works, and any sensor
-with its own proprietary Klipper module does not, because this plugin drives
-the stock driver.
+Any board carrying an LDC1612 with its coil facing up that the stock
+`ldc1612` driver can drive, over I2C (5V, GND, SCL, SDA). Check the supply
+voltage and the pin order against your board's silkscreen before powering
+it.
 
-**BTT Eddy Coil, wired to a mainboard or toolboard I2C. Tested by the author.**
-No MCU on the board, so nothing to flash. Software I2C on the Manta M8P V2.0's
-labeled I2C connector pins, because stock STM32H723 firmware does not compile in
-the `i2c3` hardware bus those pins belong to:
+| Board | Verdict |
+|---|---|
+| BTT Eddy Coil on a mainboard or toolboard I2C | Tested by the author. No MCU on the board, nothing to flash |
+| BTT Eddy USB | Expected to work unmodified, untested by the author. Its RP2040 runs standard Klipper firmware as a second MCU |
+| BTT Eddy Duo | In USB mode, expected to work like the Eddy USB. Its CAN mode and second coil are undocumented by BTT, so unverified |
+| chengxg "Little Crab" dual-coil board | The board this plugin's algorithm comes from; sharper XY response than the BTT coils. The author's boards are still being assembled, so unmeasured here |
+| Cartographer, Scanner and similar probes | Not compatible: their LDC1612 sits behind proprietary firmware, so the stock `ldc1612` driver is never involved |
+
+**BTT Eddy Coil**, software I2C on the Manta M8P V2.0's labeled I2C pins
+(stock STM32H723 firmware does not compile in their `i2c3` hardware bus):
 
 ```ini
 [eddy_tool_calibration]
@@ -574,16 +429,10 @@ reg_drive_current: 15
 coil_inner_diameter: 8.0
 ```
 
-Leave `frequency` out: the driver's 12 MHz default holds in practice for this
-board (the config reference's `frequency` entry says what backs that). The
-`coil_inner_diameter` above is an estimate, because BTT publishes no bore
-specification; measure your coil with calipers. Leave `scan_length` out too;
-its default follows `coil_inner_diameter`.
+Leave `frequency` and `scan_length` out; `coil_inner_diameter` is an
+estimate (BTT publishes no bore figure), measure your coil with calipers.
 
-**BTT Eddy USB.** The board's RP2040 runs standard Klipper firmware you
-compile and flash, appearing as a second MCU, and the sensor sits on its
-onboard I2C bus, following BTT's own sample config. Not tested by the author,
-expected to work unmodified:
+**BTT Eddy USB**, following BTT's own sample config:
 
 ```ini
 [mcu eddy]
@@ -594,17 +443,7 @@ i2c_mcu: eddy
 i2c_bus: i2c0f
 ```
 
-**BTT Eddy Duo.** In USB mode, expected to work like the Eddy USB. Its CAN
-mode and its second coil are undocumented by BTT, so they are unverified.
-
-**Cartographer, Scanner and similar probes: not compatible.** They carry an
-LDC1612 too, but behind proprietary firmware with its own protocol, so the
-stock `ldc1612` driver this plugin requires is never involved.
-
-**chengxg "Little Crab" dual-coil board.** The board this plugin's algorithm
-comes from: a small wound pancake coil, which gives a sharper XY response than
-the larger BTT coils. Its CLKIN oscillator is 24 MHz, so it needs an explicit
-`frequency`, which on Kalico means March 2026 or newer:
+**Little Crab.** Its 24 MHz CLKIN oscillator needs an explicit `frequency`:
 
 ```ini
 [eddy_tool_calibration]
@@ -612,30 +451,11 @@ frequency: 24000000
 coil_inner_diameter: 2.0
 ```
 
-`scan_length` is left out here too; its default follows `coil_inner_diameter`.
-The author's crab boards are still being assembled, so this variant is
-unmeasured here. Sources: the
-[upstream repository](https://github.com/chengxg/tool_eddy_calibration) and the
+Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration),
 [EasyEDA project](https://oshwhub.com/cxg01/project_lbabffjk).
-
-## Moonraker
-
-Add to moonraker.conf:
-
-```
-[update_manager eddy_tool_calibration]
-type: git_repo
-path: ~/kalico-eddy-offset-calibration
-origin: https://github.com/jaak0b/kalico-eddy-offset-calibration
-primary_branch: main
-is_system_service: False
-```
-
-For wiring and mounting, follow your sensor board's and mainboard's own manuals.
 
 ## License
 
-GNU GPLv3, see [LICENSE](LICENSE). This plugin is a derivative work of chengxg's
-GPLv3 [`tool_eddy_calibration`](https://github.com/chengxg/tool_eddy_calibration),
-kept unmodified in `reference/` for provenance. Its algorithms are ported, not
-vendored.
+GNU GPLv3, see [LICENSE](LICENSE). A derivative work of chengxg's GPLv3
+[`tool_eddy_calibration`](https://github.com/chengxg/tool_eddy_calibration),
+kept unmodified in `reference/`; its algorithms are ported, not vendored.
