@@ -10,7 +10,7 @@ toolchanger with a bed-mounted LDC1612 eddy-current coil.
 - **Nothing on the toolhead.** One 4-wire I2C board at the edge of the
   bed; offsets print as labeled console rows for your own macro lines.
 
-[![A calibration run on the author's printer](https://img.youtube.com/vi/lr-eFiMrt0E/hqdefault.jpg)](https://www.youtube.com/watch?v=lr-eFiMrt0E)
+[![A calibration run on my printer](https://img.youtube.com/vi/lr-eFiMrt0E/hqdefault.jpg)](https://www.youtube.com/watch?v=lr-eFiMrt0E)
 
 ## How it works
 
@@ -23,7 +23,7 @@ switch's own height cancels between tools. Each Z reference records its
 nozzle setpoint, and every later run holds the tool at it, because a nozzle
 reads differently hot and cold.
 
-Abridged example output of a run on the author's machine, in mm:
+Abridged example output of a run on my machine, in mm:
 
 ```
 tool: T1
@@ -92,10 +92,10 @@ numbers as decimal strings):
 | `anchors` | stored Z references, per tool; survive a restart. Each carries `anchor_height` (mm above the switch trigger plane), `anchor_frequency` (Hz), `setpoint_temperature` (the setpoint later runs heat to), `observed_temperature`, `trigger_z` (machine Z of the trigger plane) and `updated` (UTC) |
 | `tools` | this session's measurements; a baseline replacement removes the measurements compared against the old one, so an offset here is never compared against a reference that has moved. Each carries `offset_x/y/z` (mm; all `null` for the baseline itself, `offset_z` `null` when no descent ran, and a `null` is never a zero), `center_x/y` (machine coordinates), `z_crossing` (machine Z where the descent crossed the anchor frequency), `session_id` and `measured_time` (host monotonic clock) |
 
-## Measured so far
+## How accurate is it?
 
-Measured with `EDDY_REPEATABILITY` on one machine (Voron, StealthChanger,
-Manta M8P, BTT Eddy Coil): one setup's figures, not a specification.
+These numbers come from my printer, a Voron with StealthChanger and a BTT
+Eddy Coil, measured with `EDDY_REPEATABILITY`. Your setup will differ.
 
 | What | Measured | How |
 |---|---|---|
@@ -153,7 +153,7 @@ Every option and its default. Options shown commented out may be left out.
 #   accepted from 2000000 to 40000000. The default is 12000000, which is
 #   correct for the BTT Eddy family (BTT publishes no figure; 12 MHz is the
 #   Klipper driver's assumption, and it held up against the contact method
-#   on the author's printer). Requires Kalico from March 2026, or stock
+#   on my printer). Requires Kalico from March 2026, or stock
 #   Klipper. A wrong value scales every reported frequency. Changing it
 #   invalidates every stored Z reference: run EDDY_CALIBRATE_Z again for
 #   each tool afterwards.
@@ -289,8 +289,8 @@ Every option and its default. Options shown commented out may be left out.
 #   switch_probe_z_start is the machine Z each press starts from: set it
 #   just above the switch. All three are machine coordinates, not heights
 #   above the coil face. The switch itself is a plain normally-open endstop
-#   switch; sexbolt and sexball style Z endstops work well, and the author
-#   uses a sexbolt. switch_pin may share the pin with an existing
+#   switch; sexbolt and sexball style Z endstops work well, and I use a
+#   sexbolt. switch_pin may share the pin with an existing
 #   [tools_calibrate] section, since both sides mark the pin multi-use.
 #   Repeatability of a decent switch is a few microns.
 #switch_probe_speed: 5.0
@@ -388,10 +388,10 @@ it.
 
 | Board | Verdict |
 |---|---|
-| BTT Eddy Coil on a mainboard or toolboard I2C | Tested by the author. No MCU on the board, nothing to flash |
-| BTT Eddy USB | Expected to work unmodified, untested by the author. Its RP2040 runs standard Klipper firmware as a second MCU |
+| BTT Eddy Coil on a mainboard or toolboard I2C | What I run and test with. No MCU on the board, nothing to flash |
+| BTT Eddy USB | Expected to work unmodified; I have not tried one. Its RP2040 runs standard Klipper firmware as a second MCU |
 | BTT Eddy Duo | In USB mode, expected to work like the Eddy USB. Its CAN mode and second coil are undocumented by BTT, so unverified |
-| chengxg "Little Crab" dual-coil board | The board this plugin's algorithm comes from; sharper XY response than the BTT coils. The author's boards are still being assembled, so unmeasured here |
+| chengxg "Little Crab" dual-coil board | The board this plugin's algorithm comes from; sharper XY response than the BTT coils. Mine are still being assembled, so unmeasured here |
 | Cartographer, Scanner and similar probes | Not compatible: their LDC1612 sits behind proprietary firmware, so the stock `ldc1612` driver is never involved |
 
 **BTT Eddy Coil**, software I2C on the Manta M8P V2.0's labeled I2C pins
