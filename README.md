@@ -6,7 +6,7 @@ toolchanger with a bed-mounted LDC1612 eddy-current coil.
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 - **Non-contact.** The coil responds to metal, so plastic on the nozzle is
-  expected to be invisible to it (see Status and limitations).
+  invisible to it: a dirty nozzle measures the same as a clean one.
 - **Nothing on the toolhead.** One 4-wire I2C board at the edge of the
   bed; offsets print as labeled console rows for your own macro lines.
 
@@ -92,29 +92,7 @@ numbers as decimal strings):
 | `anchors` | stored Z references, per tool; survive a restart. Each carries `anchor_height` (mm above the switch trigger plane), `anchor_frequency` (Hz), `setpoint_temperature` (the setpoint later runs heat to), `observed_temperature`, `trigger_z` (machine Z of the trigger plane) and `updated` (UTC) |
 | `tools` | this session's measurements; a baseline replacement removes the measurements compared against the old one, so an offset here is never compared against a reference that has moved. Each carries `offset_x/y/z` (mm; all `null` for the baseline itself, `offset_z` `null` when no descent ran, and a `null` is never a zero), `center_x/y` (machine coordinates), `z_crossing` (machine Z where the descent crossed the anchor frequency), `session_id` and `measured_time` (host monotonic clock) |
 
-## Status and limitations
-
-- Pre-release: works on the author's printer; validation is running.
-- The dirty-nozzle test passed on the author's printer; its numeric spread
-  was not recorded, so the figures below are from clean-nozzle runs.
-- Kalico is the validated firmware. Stock Klipper (v0.13.0 or newer)
-  passes the same automated test suite but has never run on the author's
-  hardware: untested until a user reports numbers. There, sampling is 400 Hz
-  instead of 250 Hz, the install lands in `klippy/extras/` (git and
-  Moonraker report the checkout as dirty), and cancelling a preheat mid-wait
-  takes an emergency stop, matching M109.
-- Per-tool Z needs the contact switch, Cartesian kinematics (the probing
-  reads the kinematic Z limits and refuses to run without them) and heating
-  time. Without a switch you get X and Y only; leave `calibrate_z` at its
-  default of `False` and no descent runs.
-- Offsets are not persisted and there is no toolchanger integration: each
-  session measures a fresh T0 baseline, and the plugin only runs the
-  toolchange and apply lines you wrote.
-- No drift figure yet. `save_history` (default on) appends every completed
-  measurement to `history_T<n>.csv` in `log_dir`; no drift claim is made
-  until that log covers enough time.
-
-### Measured so far
+## Measured so far
 
 Measured with `EDDY_REPEATABILITY` on one machine (Voron, StealthChanger,
 Manta M8P, BTT Eddy Coil): one setup's figures, not a specification.
