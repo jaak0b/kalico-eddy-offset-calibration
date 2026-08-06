@@ -1,39 +1,27 @@
-# eddy_tool_calibration
+# eddy_tool_calibration [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-A Kalico and Klipper plugin that measures per-tool XYZ nozzle offsets on a
-toolchanger with a bed-mounted LDC1612 eddy-current coil (e.g. BTT Eddy Coil/Duo/Usb or Cartographer flashed with klipper firmware).
+A Kalico and Klipper plugin that accurately measures per-tool XYZ nozzle offsets on a toolchanger, even when the nozzle is dirty.
 
-[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
-
-- **Non-contact.** The coil responds to metal, so plastic on the nozzle is
-  invisible to it: a dirty nozzle measures the same as a clean one.
-- **Nothing on the toolhead.** One 4-wire I2C board at the edge of the
-  bed; offsets print as labeled console rows for your own macro lines.
+Uses a bed-mounted LDC1612 eddy-current coil (e.g. BTT Eddy Coil/Duo/USB or a Cartographer flashed with Klipper firmware).
 
 [![A calibration run on my printer](https://img.youtube.com/vi/lr-eFiMrt0E/hqdefault.jpg)](https://www.youtube.com/watch?v=lr-eFiMrt0E)
 
-## How it works
+## What you need
 
-Contact pins want a spotless nozzle; cameras want lighting and mounting
-work. An eddy-current coil sidesteps both. The coil reports a frequency, in
-Hz, that changes as the nozzle comes near it. XY comes from the middle of
-the shape that reading traces as the nozzle crosses the coil, not from how
-big the change is, so nozzle material does not shift the result. Z comes
-from how the reading changes as the nozzle comes down, measured once per
-tool against a press on a contact switch next to the coil, whose own height
-cancels between tools. That measurement also records the nozzle
-temperature, and every later run heats the tool to it, because a nozzle
-reads differently hot and cold.
+- A toolchanger running Kalico or Klipper.
+- An LDC1612 board (e.g. BTT Eddy Coil/Duo/Usb or Cartographer flashed with Klipper firmware) mounted to the bed, coil facing up.
+- For Z offsets: a contact switch (sexbolt, sexball, any fixed Z endstop).
+- Your own toolchange and offset-apply gcode to change tools and apply offsets. This plugin is universal and it is not targeting any specific toolchange plugin.
 
 ## How accurate is it?
 
-These numbers come from my printer, a Voron with StealthChanger and a BTT
-Eddy Coil, measured with `EDDY_REPEATABILITY`. Your setup will differ.
+These numbers come from my printer, a Voron 2.4 with StealthChanger and a BTT
+Eddy Coil, measured with `EDDY_REPEATABILITY`.
 
-| What | Measured | How |
+| What | Measured |  |
 |---|---|---|
 | XY repeatability (standard deviation) | 4.6 um X, 2.5 um Y | six runs on one tool with no toolchange at 150 C |
-| XY repeatability across dock and redock | about 5 um | four runs including a full toolchange |
+| XY repeatability across toolchanges | about 5 um | four runs including a full toolchange |
 
 ## Getting started
 
@@ -43,16 +31,15 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`. Your setup will differ.
 4. Add the config, see [Required](#required).
 5. Run [`EDDY_QUERY`](#commands) to check the wiring before anything moves.
 6. Run [`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`](#sensor-hardware)
-   and store the value with `SAVE_CONFIG`. Only needed on non-BTT boards.
+   and store the value with `SAVE_CONFIG`. Only needed on non-BTT EDDY boards.
 7. Jog the nozzle over the coil until the paper drags on the coil top face,
    then put the X, Y and Z position into `coil_x`, `coil_y` and
    `coil_z`.
-8. Run [`EDDY_LOCATE`](#commands) and put the center it prints into
-   `coil_x` and `coil_y`.
-9. For Z offsets: jog the nozzle over the contact switch, put those values
+8. Run [`EDDY_LOCATE`](#commands) and put the values into `coil_x` and `coil_y`.
+9. For Z offsets (Optional): jog the nozzle over the contact switch (Sexball, Sexbolt or any other fixed mounted z homing switch), put those values
    into `switch_x`, `switch_y` and `switch_probe_z_start`, and set
    `calibrate_z: True`.
-10. Run [`EDDY_CALIBRATE_Z`](#commands) once per tool.
+10. For Z offsets (Optional): Run [`EDDY_CALIBRATE_Z`](#commands) once per tool. Rerun it after a nozzle change.
 11. Run [`EDDY_CALIBRATE_OFFSET`](#commands).
 12. Run [`EDDY_REPEATABILITY T=0 RUNS=5 CYCLES=3`](#commands) to check the
     numbers are stable.
@@ -60,7 +47,7 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`. Your setup will differ.
 ## Install
 
 Requires Kalico or stock Klipper v0.13.0 or newer, an LDC1612 board
-reachable over I2C (e.g. BTT Eddy Coil/Duo/USB or Cartographer flashed with Klipper firmware) and Python 3 with no third-party packages.
+reachable over I2C (e.g. BTT Eddy Coil/Duo/Usb or Cartographer flashed with Klipper firmware) and Python 3 with no third-party packages.
 
 ```
 cd ~
@@ -206,11 +193,6 @@ switch_probe_z_start:
 
 ### Sensor hardware
 
-Changing frequency or reg_drive_current invalidates everything
-EDDY_CALIBRATE_Z stored, so run it again for each tool afterwards. A run
-that finds a stored result taken at another drive current refuses to
-measure rather than report an offset the setting has moved.
-
 ```
 #i2c_address:
 #i2c_mcu:
@@ -347,15 +329,14 @@ apply_offsets_gcode:
 
 ## Supported hardware
 
-Any board carrying an LDC1612 with its coil facing up that the stock
-`ldc1612` driver can drive, over I2C (5V, GND, SCL, SDA).
+Any eddy stlye probe with a LDC1612 works as long as it is flashed with stock Klipper firmware and reachable over I2C.
 
-| Board | Verdict |
+| Board |  |
 |---|---|
-| BTT Eddy Coil | What I run and test with. No MCU on the board, nothing to flash |
+| BTT Eddy Coil | Conected directly to the mainboard or a toolheadboard |
 | BTT Eddy USB | Expected to work unmodified; I have not tried one. Its RP2040 runs standard Klipper firmware as a second MCU |
-| BTT Eddy Duo | In USB mode, expected to work like the Eddy USB. Its CAN mode and second coil are undocumented by BTT, so unverified |
-| chengxg "Little Crab" dual-coil board | The board this plugin's algorithm comes from; a sharper XY signal than the BTT coils. Mine are still being assembled, so unmeasured here |
+| BTT Eddy Duo | Expected to work in USB mode only. |
+| [chengxg "Little Crab" dual-coil board](https://oshwhub.com/cxg01/project_lbabffjk) | The board this plugin's algorithm comes from; a sharper XY signal than the BTT coils. Mine are still being assembled, so unmeasured here |
 | Cartographer | Only works if the board is flashed with Klipper firmware. Cartographer's own firmware will not work |
 
 ### BTT Eddy Coil
@@ -403,39 +384,44 @@ Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration)
 
 ## Commands
 
-`T=` takes one tool number or a comma separated list with no spaces
-(`T=0,1,2`). Leaving `T=` out runs every tool and needs `tool_count`; any
-run covering more than one tool needs `toolchange_gcode`.
+> [!NOTE]
+> `T=` takes one tool number or a comma separated list with no spaces (`T=0,1,2`). Leaving `T=` out runs every tool and needs `tool_count`; any run covering more than one tool needs `toolchange_gcode`.
 
-`EDDY_QUERY`: Print statistics of the sensor frequency over `query_time`
-seconds without motion, a wiring sanity check. `EDDY_LOCATE [DEBUG=1]`:
-Scan over the configured coil position and store the measured coil center
-for the rest of the session.
+### EDDY_QUERY
 
-`EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: Measure what each listed tool needs
-for Z, once: heat to `calibration_temp`, press the contact switch, then read
-the frequency as the nozzle comes down over the coil. Requires
-`calibrate_z: True` and the switch options. The results go to
-`EddyToolCalibration/calibration_state.json` next to the printer config; no
-`SAVE_CONFIG` step. Run it again after changing a nozzle, a hotend, the coil
-or switch position, `calibration_temp`, `frequency` or `reg_drive_current`.
+`EDDY_QUERY`: Print statistics of the sensor frequency over `query_time` seconds without motion. Use it as a wiring check.
 
-`EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: Measure the listed tools and
-print their offsets relative to T0, which is always measured first; a run
-leaving T0 out requires a baseline from earlier in the same session. With
-`calibrate_z: True` every tool needs its EDDY_CALIBRATE_Z result and is
-heated to the temperature stored with it; non-baseline results pass to
-`apply_offsets_gcode` when set.
+### LDC_CALIBRATE_DRIVE_CURRENT
 
-`EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] [DEBUG=1]`:
-Measure one tool repeatedly: each cycle docks and remounts it (without
-`tool_count` and `toolchange_gcode` the summary says no docking was
-exercised), then takes `RUNS` measurements. Reports per-axis measurement
-spread, docking spread and worst deviation, and writes a CSV per study to
-`log_dir`. `SKIP_Z=0` (default 1) needs the tool's EDDY_CALIBRATE_Z result.
+`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration` prints the correct `reg_drive_current` for the connected sensor.
 
-`LDC_CALIBRATE_DRIVE_CURRENT` is also registered (see `reg_drive_current`).
+### EDDY_LOCATE
+`EDDY_LOCATE [DEBUG=1]`: Measures the coil center precisely. Use it to fine tune `coil_x` and `coil_y`.
 
+### EDDY_CALIBRATE_Z
+
+> [!WARNING]
+> Requires `calibrate_z: True`
+
+`EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: Correlates the sensor's readings with the nozzle's actual Z height using a z endstop/microswitch.
+
+Must be run once per tool. Rerun the command when the toolhead (e.g. the nozzle, hotend) changes.
+
+Results are written to calibration_state.json directly. Running `SAVE_CONFIG` is not required.
+
+### EDDY_CALIBRATE_OFFSET
+
+> [!NOTE]
+> T0 is always measured after a Klipper restart. 
+
+`EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: Measure the listed tools offset relative to T0. Prints the offset in the console. Runs `apply_offsets_gcode` when provided. 
+
+### EDDY_REPEATABILITY
+
+`EDDY_REPEATABILITY T=<tool> RUNS=<n> CYCLES=<n> [SKIP_Z=1] [DEBUG=1]`: Measures offset calibration repeatedly.
+`RUNS=<n>` measurements taken back to back without touching the tool. Shows the measurement's own noise.
+`CYCLES=<n>` how many times to swap the tool away and back before taking another set of runs, needs tool_count and toolchange_gcode, without them nothing is docked and the summary says so.
+`SKIP_Z=0` measures Z as well, and needs the tool's EDDY_CALIBRATE_Z result. The default is 1, XY only.
 
 ## Reading the results from a macro
 
@@ -457,6 +443,37 @@ numbers as decimal strings):
 | `anchors` | what EDDY_CALIBRATE_Z stored, per tool; survives a restart. Each carries `anchor_height` (mm above the height where the switch clicks), `anchor_frequency` (Hz), `setpoint_temperature` (the temperature later runs heat to), `observed_temperature`, `trigger_z` (machine Z where the switch clicks) and `updated` (UTC) |
 | `tools` | this session's measurements; a baseline replacement removes the measurements compared against the old one, so an offset here is never compared against a baseline that has moved. Each carries `offset_x/y/z` (mm; all `null` for the baseline itself, `offset_z` `null` when Z was not measured, and a `null` is never a zero), `center_x/y` (machine coordinates), `z_crossing` (machine Z where the downward move reached `anchor_frequency`), `session_id` and `measured_time` (host monotonic clock) |
 
+## Measuring before each print
+
+> [!WARNING]
+> Requires all [Toolchanger](#toolchanger) config options to be set.
+
+> [!CAUTION]
+> The macro assumes that your slicer passes tool temperature as `{if is_extruder_used[0]}T0_TEMP={first_layer_temperature[0]}{endif}` (Example for T0, use 1 for T1, 2 for T2,..) in your Machine start-gcode.
+
+To calibrate each used tool before a print use the below macro and call `EDDY_CALIBRATE_USED_TOOLS {rawparams}` from your print_start macro.
+
+```
+[gcode_macro EDDY_CALIBRATE_USED_TOOLS]
+description: Calibrate offsets for the tools this print actually uses
+gcode:
+    {% set sx = printer.toolhead.position.x %}
+    {% set sy = printer.toolhead.position.y %}
+    {% set sz = printer.toolhead.position.z %}
+    {% set used = [] %}
+    {% for key in params %}
+        {% if key.startswith('T') and key.endswith('_TEMP') and key[1:-5].isdigit() %}
+            {% set _ = used.append(key[1:-5]|int) %}
+        {% endif %}
+    {% endfor %}
+    {% if used|length > 1 %}
+        {% set tools = ([0] + used)|unique|list|sort %}
+        EDDY_CALIBRATE_OFFSET T={tools|join(',')}
+    {% endif %}
+    G90
+    G1 X{sx} Y{sy} F6000
+    G1 Z{sz} F1200
+```
 
 ## License
 
