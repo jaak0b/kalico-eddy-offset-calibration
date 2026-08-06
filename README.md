@@ -34,8 +34,7 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`.
 7. Jog the nozzle over the coil until the paper drags on the coil top face,
    then put the X, Y and Z position into `coil_x`, `coil_y` and
    `coil_z`.
-8. Run [`EDDY_LOCATE`](#commands), then run `SAVE_CONFIG` to keep the measured
-   `coil_x` and `coil_y`.
+8. Run [`EDDY_LOCATE`](#commands), and put the values into `coil_x` and `coil_y`.
 9. For Z offsets (Optional): jog the nozzle over the contact switch (Sexball, Sexbolt or any other fixed mounted z homing switch), put those values
    into `switch_x`, `switch_y` and `switch_probe_z_start`, and set
    `calibrate_z: True`.
