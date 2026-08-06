@@ -69,7 +69,7 @@ is_system_service: False
 
 ## Config reference
 
-The uncommented options are required and have no default, everything commented out may be left out. The blocks below are all parts of the same `[eddy_tool_calibration]` section, whose header line appears in the first block only.
+Uncommented options are required and have no default, everything commented out may be left out. The blocks below are all parts of the same `[eddy_tool_calibration]` section.
 
 ### Required
 
@@ -122,7 +122,7 @@ proceeds.
 ### Z offset via the contact switch
 
 > [!IMPORTANT]
-> The options below `calibrate_z` are required when `calibrate_z` is True.
+> The options below `calibrate_z` are ONLY required when `calibrate_z` is True.
 
 > [!IMPORTANT]
 > When `calibrate_z` is True, `EDDY_CALIBRATE_Z` must be run at least once, otherwise `EDDY_CALIBRATE_OFFSET` will refuse to measure the Z offset.
