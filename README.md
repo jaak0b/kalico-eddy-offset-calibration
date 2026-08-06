@@ -35,7 +35,8 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`.
 7. Jog the nozzle over the coil until the paper drags on the coil top face,
    then put the X, Y and Z position into `coil_x`, `coil_y` and
    `coil_z`.
-8. Run [`EDDY_LOCATE`](#commands) and put the values into `coil_x` and `coil_y`.
+8. Run [`EDDY_LOCATE`](#commands), then run `SAVE_CONFIG` to keep the measured
+   `coil_x` and `coil_y`.
 9. For Z offsets (Optional): jog the nozzle over the contact switch (Sexball, Sexbolt or any other fixed mounted z homing switch), put those values
    into `switch_x`, `switch_y` and `switch_probe_z_start`, and set
    `calibrate_z: True`.
@@ -70,6 +71,8 @@ is_system_service: False
 ## Config reference
 
 Uncommented options are required and have no default, everything commented out may be left out. The blocks below are all parts of the same `[eddy_tool_calibration]` section.
+
+`SAVE_CONFIG` writes the options it is given into the autosave block at the bottom of `printer.cfg`, where they override the values you typed above it.
 
 ### Required
 
@@ -393,7 +396,7 @@ Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration)
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration` prints the correct `reg_drive_current` for the connected sensor.
 
 ### EDDY_LOCATE
-`EDDY_LOCATE [DEBUG=1]`: Measures the coil center precisely. Use it to fine tune `coil_x` and `coil_y`.
+`EDDY_LOCATE [DEBUG=1]`: Measures the coil center precisely and stages it as `coil_x` and `coil_y`. Run `SAVE_CONFIG` to keep the measured values. The rest of the session scans from the measured center either way.
 
 ### EDDY_CALIBRATE_Z
 

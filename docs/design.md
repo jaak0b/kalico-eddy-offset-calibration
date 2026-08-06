@@ -489,7 +489,7 @@ reference it; decide during implementation, wrapper preferred.)
 - `EDDY_QUERY`: print current frequency, sanity check wiring.
 - `EDDY_LOCATE [DEBUG=1]`: coarse straight line scan passes over the configured
   coil position, finds and stores the refined coil center for the session;
-  prints it.
+  prints it and stages it as coil_x and coil_y for SAVE_CONFIG.
   `DEBUG=1` also prints each scan pass's diagnostic rows.
 - `EDDY_CALIBRATE_OFFSET [T=<list>] [DEBUG=1]`: full XY(+Z) measurement.
   `T=<n>` measures that one tool, `T=0,1,2` measures those three, and a

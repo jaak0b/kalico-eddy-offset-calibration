@@ -183,6 +183,22 @@ def test_a_center_is_shown_to_four_decimals_under_the_label_it_is_given():
     assert rows == ["coil center x: 12.3457", "coil center y: -4.2000"]
 
 
+def test_the_locate_readout_names_the_config_options_it_measured():
+    # Arrange / Act: 101.20834 rounds to 101.2083 at four decimals, and a
+    # figure with fewer digits is padded out to four.
+    rows = etc.new_center_rows(101.20834, -18.7)
+
+    assert rows == ["new coil_x: 101.2083", "new coil_y: -18.7000"]
+
+
+def test_the_staged_center_carries_the_decimals_the_readout_prints():
+    # Arrange / Act: the pairs SAVE_CONFIG writes, rounded to the four
+    # decimals every center row shows.
+    settings = etc.coil_center_settings(101.20834, -18.69591)
+
+    assert settings == (('coil_x', "101.2083"), ('coil_y', "-18.6959"))
+
+
 def test_an_offset_is_shown_signed_to_four_decimals():
     rows = etc.offset_rows({'x': 0.05, 'y': -0.12, 'z': 0.0157})
 

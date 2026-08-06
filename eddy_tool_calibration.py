@@ -1155,9 +1155,23 @@ def tool_row(tool):
     return "tool: T%d" % (int(tool),)
 
 
+def center_value(coordinate):
+    return "%.4f" % (coordinate,)
+
+
 def center_rows(center_x, center_y, label='center'):
-    return ["%s x: %.4f" % (label, center_x),
-            "%s y: %.4f" % (label, center_y)]
+    return ["%s x: %s" % (label, center_value(center_x)),
+            "%s y: %s" % (label, center_value(center_y))]
+
+
+def coil_center_settings(center_x, center_y):
+    return (('coil_x', center_value(center_x)),
+            ('coil_y', center_value(center_y)))
+
+
+def new_center_rows(center_x, center_y):
+    return ["new %s: %s" % (option, value)
+            for option, value in coil_center_settings(center_x, center_y)]
 
 
 def offset_rows(offsets):
@@ -3257,8 +3271,9 @@ class EddyToolCalibration:
 
     cmd_EDDY_LOCATE_help = (
         "Coarse straight line scan passes over the configured coil position "
-        "to find and store the refined coil center for this session. Add "
-        "DEBUG=1 to print each scan pass's diagnostic rows.")
+        "to find and store the refined coil center for this session, and to "
+        "stage it as coil_x and coil_y for SAVE_CONFIG. Add DEBUG=1 to print "
+        "each scan pass's diagnostic rows.")
 
     def cmd_EDDY_LOCATE(self, gcmd):
         self._ensure_homed(gcmd)
@@ -3269,12 +3284,33 @@ class EddyToolCalibration:
                 self._scan_rounds(LOCATE_ROUNDS, self.locate_scan_length),
                 debug)
             self.center = (refined_x, refined_y)
-            rows = center_rows(refined_x, refined_y, 'coil center')
-            rows.extend([
-                "config coil_x: %.4f" % (self.coil_x,),
-                "config coil_y: %.4f" % (self.coil_y,),
-            ])
-            self._respond_measurement(gcmd, rows, agg)
+            self._respond_measurement(
+                gcmd, new_center_rows(refined_x, refined_y), agg)
+        self._stage_coil_center(gcmd, refined_x, refined_y)
+
+    def _stage_coil_center(self, gcmd, center_x, center_y):
+        # configfile.set(section, option, value) holds a value for SAVE_CONFIG
+        # to write and raises the pending flag the frontends show
+        # (configfile.py:629-642), which is how ldc1612.py:84-85 hands over its
+        # own calibrated value.
+        settings = coil_center_settings(center_x, center_y)
+        staged = []
+        try:
+            configfile = self.printer.lookup_object('configfile')
+            for option, value in settings:
+                configfile.set(self.name, option, value)
+                staged.append(option)
+        except Exception as e:
+            raise gcmd.error(
+                "The coil center printed above was measured, and it could "
+                "not be staged for SAVE_CONFIG: %s\n"
+                "staged: %s\n"
+                "not staged: %s\n"
+                "Put the printed values into coil_x and coil_y in the [%s] "
+                "config section by hand."
+                % (e, ", ".join(staged) if staged else "none",
+                   ", ".join(o for o, _v in settings if o not in staged),
+                   self.name))
 
     cmd_EDDY_CALIBRATE_Z_help = (
         "One-time Z reference setup for the tools named by T=, or for every "
