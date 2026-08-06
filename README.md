@@ -446,7 +446,7 @@ numbers as decimal strings):
 > Requires all [Toolchanger](#toolchanger) config options to be set.
 
 > [!IMPORTANT]
-> The macro assumes that your slicer passes tool temperature as `{if is_extruder_used[0]}T0_TEMP={first_layer_temperature[0]}{endif}` (Example for T0, use 1 for T1, 2 for T2,..) in your Machine start-gcode.
+> The macro assumes that your slicer passes tool temperature as `{if is_extruder_used[0]}T0_TEMP={first_layer_temperature[0]}{endif}` (Example for T0, use 1 for T1, 2 for T2,..) in your slicers machine start-gcode.
 
 To calibrate each used tool before a print use the below macro and call `EDDY_CALIBRATE_USED_TOOLS {rawparams}` from your print_start macro.
 
