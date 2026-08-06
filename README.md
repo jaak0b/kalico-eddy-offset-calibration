@@ -38,15 +38,14 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`. Your setup will differ.
 ## Getting started
 
 1. Wire up the eddy coil. See your probe's manual.
-2. Mount it to the bed with [BTT Eddy Mount.step](BTT%20Eddy%20Mount.step),
-   coil facing up.
+2. Mount the Eddy Coil Sensor to the bed with the coil facing up. [BTT Eddy Mount.step](BTT%20Eddy%20Mount.step) can be used for BTT Eddy probes.
 3. Install the plugin, see [Install](#install).
 4. Add the config, see [Required](#required).
 5. Run [`EDDY_QUERY`](#commands) to check the wiring before anything moves.
 6. Run [`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`](#sensor-hardware)
    and store the value with `SAVE_CONFIG`. Only needed on non-BTT boards.
 7. Jog the nozzle over the coil until the paper drags on the coil top face,
-   then put the X, Y and Z the display shows into `coil_x`, `coil_y` and
+   then put the X, Y and Z position into `coil_x`, `coil_y` and
    `coil_z`.
 8. Run [`EDDY_LOCATE`](#commands) and put the center it prints into
    `coil_x` and `coil_y`.
