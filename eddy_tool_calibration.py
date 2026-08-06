@@ -3311,6 +3311,9 @@ class EddyToolCalibration:
                 % (e, ", ".join(staged) if staged else "none",
                    ", ".join(o for o, _v in settings if o not in staged),
                    self.name))
+        gcmd.respond_info(
+            "The SAVE_CONFIG command will update the printer config file "
+            "and restart the printer.")
 
     cmd_EDDY_CALIBRATE_Z_help = (
         "One-time Z reference setup for the tools named by T=, or for every "
