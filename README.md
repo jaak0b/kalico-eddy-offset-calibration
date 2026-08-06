@@ -306,18 +306,18 @@ switch_probe_z_start:
 ### Integration with Klipper Toolchanger plugin
 
 
-Append the following config reference to [eddy_tool_calibration] for integration with [viesturz's klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger)
+Append the following config reference to `[eddy_tool_calibration]` for integration with [viesturz's klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger)
 ```ini
+toolchange_gcode:
+    T{tool}
 apply_offsets_gcode:
     SET_TOOL_PARAMETER T={tool} PARAMETER=gcode_x_offset VALUE={offset_x}
     SET_TOOL_PARAMETER T={tool} PARAMETER=gcode_y_offset VALUE={offset_y}
     SET_TOOL_PARAMETER T={tool} PARAMETER=gcode_z_offset VALUE={offset_z}
 ```
 
-Append the following config reference to [eddy_tool_calibration] for integration with [klipper-toolchanger-hard](https://github.com/Contomo/klipper-toolchanger-hard)
-
+Append the following config reference to `[eddy_tool_calibration]` for integration with [klipper-toolchanger-hard](https://github.com/Contomo/klipper-toolchanger-hard)
 ```ini
-tool_count: 4
 toolchange_gcode:
     T{tool}
 apply_offsets_gcode:
