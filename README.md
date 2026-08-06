@@ -42,28 +42,21 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`. Your setup will differ.
    coil facing up.
 3. Install the plugin, see [Install](#install).
 4. Add the config, see [Required](#required).
-5. Run `EDDY_QUERY`. It reads the sensor without moving anything, so it
-   tells you the wiring is right before the nozzle goes anywhere.
-6. Run `LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration` and store
-   the value with `SAVE_CONFIG`.
-   > [!NOTE]
-   > Only needed on non-BTT boards. The default of 15 is right for the BTT
-   > Eddy family.
+5. Run [`EDDY_QUERY`](#commands) to check the wiring before anything moves.
+6. Run [`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`](#sensor-hardware)
+   and store the value with `SAVE_CONFIG`. Only needed on non-BTT boards.
 7. Jog the nozzle over the coil until the paper drags on the coil top face,
    then put the X, Y and Z the display shows into `coil_x`, `coil_y` and
    `coil_z`.
-8. Run `EDDY_LOCATE` and put the center it prints into `coil_x` and
-   `coil_y`.
+8. Run [`EDDY_LOCATE`](#commands) and put the center it prints into
+   `coil_x` and `coil_y`.
 9. For Z offsets: jog the nozzle over the contact switch, put those values
    into `switch_x`, `switch_y` and `switch_probe_z_start`, and set
    `calibrate_z: True`.
-10. Run `EDDY_CALIBRATE_Z`.
-    > [!WARNING]
-    > Run it again after changing a nozzle, a hotend, the coil or switch
-    > position, `calibration_temp`, `frequency` or `reg_drive_current`.
-11. Run `EDDY_CALIBRATE_OFFSET`.
-12. Run `EDDY_REPEATABILITY T=0 RUNS=5 CYCLES=3` to check the numbers are
-    stable.
+10. Run [`EDDY_CALIBRATE_Z`](#commands) once per tool.
+11. Run [`EDDY_CALIBRATE_OFFSET`](#commands).
+12. Run [`EDDY_REPEATABILITY T=0 RUNS=5 CYCLES=3`](#commands) to check the
+    numbers are stable.
 
 ## Install
 
