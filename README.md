@@ -132,15 +132,17 @@ is_system_service: False
 
 ## Config reference
 
-Every option and its default. Options shown commented out may be left out.
+Every option and its default. The uncommented options are required and have
+no default; everything commented out may be left out and keeps the value
+shown.
 
 ```
 [eddy_tool_calibration]
 #i2c_address:
 #i2c_mcu:
 #i2c_bus:
-#i2c_software_scl_pin:
-#i2c_software_sda_pin:
+i2c_software_scl_pin:
+i2c_software_sda_pin:
 #i2c_speed:
 #   The i2c settings for the LDC1612 chip. See the "common I2C settings"
 #   section of Kalico's Config_Reference.md for a description of these
@@ -170,18 +172,18 @@ Every option and its default. Options shown commented out may be left out.
 #   raise this value by one and retry; BTT's own remedy for that error is
 #   the same step, 15 to 16, and it typically means the coil-to-target
 #   distance sat outside roughly 2 to 3 mm.
-#coil_x:
-#coil_y:
+coil_x:
+coil_y:
 #   Required. Approximate machine X and Y of the coil center. A ruler
 #   measurement is good enough: EDDY_LOCATE refines it, and every scan
 #   starts from the refined center once it has been located in this
 #   session.
-#coil_z:
+coil_z:
 #   Required. Machine Z of the coil top face. This is the only vertical
 #   option in this section given in machine coordinates; every other
 #   height below is measured upward from this face. A coil_z set below the
 #   real face drives the nozzle into the coil by that difference.
-#coil_inner_diameter:
+coil_inner_diameter:
 #   Required. Bore of the sensing coil, in mm. Must be greater than 0. It
 #   sets the default fit_window_radius and scan_length, so a value below
 #   the coil's real bore narrows the fit window and the scan pass below
@@ -434,6 +436,8 @@ Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration)
 
 ## License
 
-GNU GPLv3, see [LICENSE](LICENSE). A derivative work of chengxg's GPLv3
-[`tool_eddy_calibration`](https://github.com/chengxg/tool_eddy_calibration),
-kept unmodified in `reference/`; its algorithms are ported, not vendored.
+GNU GPLv3, see [LICENSE](LICENSE). The algorithms are reimplemented from
+chengxg's GPLv3
+[`tool_eddy_calibration`](https://github.com/chengxg/tool_eddy_calibration)
+rather than copied from it, which makes this a derivative work under the
+same license. His original file is kept unmodified in `reference/`.
