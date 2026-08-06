@@ -64,13 +64,15 @@ def test_a_setpoint_the_owner_moved_by_half_a_degree_warns():
     # the run does not follow.
     warning = etc.temperature_warning(1, 150.0, 150.5)
 
-    assert "T1 was anchored with calibration_temp at 150.0 C" in warning
+    assert ("the Z reference for T1 was measured with calibration_temp "
+            "at 150.0 C" in warning)
 
 
 def test_the_warning_names_the_anchored_setpoint_and_the_configured_one():
     warning = etc.temperature_warning(2, 220.0, 150.0)
 
-    assert "T2 was anchored with calibration_temp at 220.0 C" in warning
+    assert ("the Z reference for T2 was measured with calibration_temp "
+            "at 220.0 C" in warning)
     assert "calibration_temp is now 150.0 C" in warning
 
 
@@ -86,7 +88,8 @@ def test_the_warning_says_the_run_heats_to_the_anchored_setpoint():
 def test_a_setpoint_below_the_configured_one_warns_as_well():
     warning = etc.temperature_warning(0, 100.0, 150.0)
 
-    assert "T0 was anchored with calibration_temp at 100.0 C" in warning
+    assert ("the Z reference for T0 was measured with calibration_temp "
+            "at 100.0 C" in warning)
 
 
 # --- the band a preheat waits for ------------------------------------------
@@ -129,9 +132,9 @@ def test_the_preheat_plan_names_each_tool_its_heater_and_both_temperatures():
 
     assert rows == [
         "heating every listed tool before measuring:",
-        "T0 heater extruder: 24.6 C now, 150.0 C setpoint",
-        "T1 heater extruder1: 151.8 C now, 150.0 C setpoint",
-        "temperature band: 2.0 C either side of the setpoint",
+        "T0 heater extruder: 24.6 C now, 150.0 C target",
+        "T1 heater extruder1: 151.8 C now, 150.0 C target",
+        "temperature band: 2.0 C either side of the target temperature",
         "settle time after reaching the band: 30.0 s",
         "The command waits for every listed tool to read inside its band, "
         "including a tool that has to cool into it.",
@@ -149,6 +152,11 @@ def test_a_preheat_plan_covering_no_tools_is_rejected():
 def test_a_setpoint_is_shown_to_one_decimal_under_the_label_it_is_given():
     assert etc.setpoint_temperature_row('anchor', 150.0) == (
         "anchor temperature setpoint: 150.0 C")
+
+
+def test_a_target_is_shown_to_one_decimal_under_the_label_it_is_given():
+    assert etc.target_temperature_row('nozzle', 150.0) == (
+        "nozzle target temperature: 150.0 C")
 
 
 def test_a_reading_is_shown_to_one_decimal_under_the_label_it_is_given():

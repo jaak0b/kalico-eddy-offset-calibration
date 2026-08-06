@@ -102,6 +102,12 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
    grammatical sentences in docs and error messages, neutral register. Terms as the ecosystem
    names them (toolhead, nozzle offset, probe, macro, config section, print_time); one term per
    concept. Gcode command names follow Klipper convention (UPPER_SNAKE, parameters `T=`, `Z=`).
+   A word is allowed in user-facing text (README, console output, error messages, command
+   help) only if the Klipper/Voron/toolchanger community already uses it. Words that require
+   knowing the plugin's internals are banned everywhere user-facing. Banned, named:
+   anchor/anchored/anchoring, setpoint, trigger plane, descent curve, symmetry center,
+   response curve. Decided keepers: frequency, baseline tool, Z reference. Status object key
+   names are API and keep their names; the prose around them uses the allowed vocabulary.
 
 8. **Diagnostic readouts show raw values** as labeled rows, not prose sentences (frequency,
    fitted center, residual, sample count, per-axis offset).
@@ -182,6 +188,13 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     task instructions too: a task's rationale belongs in a section marked as context, not
     instruction; the instruction itself stays imperative; and the task reports how many comment
     lines it added, so an over-explained result is visible without reading the diff.
+
+16. **The README is the owner's text.** The assistant edits `README.md` only to add or
+    update config reference entries and to adjust command arguments when the code changes.
+    Every other edit (new sentences, deletions, corrections, restructuring, callouts,
+    examples) requires the owner's explicit permission first, per edit, no matter how small
+    or how wrong the current text looks. A factual error found in the README is reported in
+    chat with suggested text; the owner decides what, if anything, changes.
 
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil

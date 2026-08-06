@@ -30,8 +30,7 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`.
 3. Install the plugin, see [Install](#install).
 4. Add the config, see [Required](#required).
 5. Run [`EDDY_QUERY`](#commands) to check the wiring before anything moves.
-6. Run [`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`](#sensor-hardware)
-   and store the value with `SAVE_CONFIG`. Only needed on non-BTT EDDY boards.
+6. Run [`LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration`](#sensor-hardware). Only needed on non-BTT EDDY boards.
 7. Jog the nozzle over the coil until the paper drags on the coil top face,
    then put the X, Y and Z position into `coil_x`, `coil_y` and
    `coil_z`.
@@ -71,8 +70,6 @@ is_system_service: False
 ## Config reference
 
 Uncommented options are required and have no default, everything commented out may be left out. The blocks below are all parts of the same `[eddy_tool_calibration]` section.
-
-`SAVE_CONFIG` writes the options it is given into the autosave block at the bottom of `printer.cfg`, where they override the values you typed above it.
 
 ### Required
 
@@ -396,7 +393,7 @@ Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration)
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration` prints the correct `reg_drive_current` for the connected sensor.
 
 ### EDDY_LOCATE
-`EDDY_LOCATE [DEBUG=1]`: Measures the coil center precisely and stages it as `coil_x` and `coil_y`. Run `SAVE_CONFIG` to keep the measured values. The rest of the session scans from the measured center either way.
+`EDDY_LOCATE [DEBUG=1]`: Measures the coil center precisely and stages it as `coil_x` and `coil_y`.
 
 ### EDDY_CALIBRATE_Z
 
@@ -407,7 +404,7 @@ Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration)
 
 Must be run once per tool. Rerun the command when the toolhead (e.g. the nozzle, hotend) changes.
 
-Results are written to calibration_state.json directly. Running `SAVE_CONFIG` is not required.
+Results are written to calibration_state.json directly.
 
 ### EDDY_CALIBRATE_OFFSET
 

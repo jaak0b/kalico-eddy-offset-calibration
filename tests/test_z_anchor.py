@@ -493,7 +493,7 @@ def test_an_anchor_taken_at_another_drive_current_is_refused():
     # measures the reference again.
     assert mismatch is not None
     assert "T2" in mismatch
-    assert "drive current when anchored: 15.0" in mismatch
+    assert "drive current when the Z reference was measured: 15.0" in mismatch
     assert "drive current now: 22.0" in mismatch
     assert "EDDY_CALIBRATE_Z T=2" in mismatch
 
@@ -510,7 +510,8 @@ def test_an_anchor_taken_on_another_sensor_clock_is_refused():
     # unit, so it reads apart from a state file an earlier version wrote.
     assert mismatch is not None
     assert "T1" in mismatch
-    assert "sensor clock when anchored: 24000000.0 Hz" in mismatch
+    assert ("sensor clock when the Z reference was measured: 24000000.0 Hz"
+            in mismatch)
     assert "sensor clock now: 12000000.0 Hz" in mismatch
     assert "EDDY_CALIBRATE_Z T=1" in mismatch
     assert "earlier plugin version" not in mismatch
@@ -525,6 +526,51 @@ def test_a_drive_current_that_differs_by_one_step_is_refused():
 
     # Assert
     assert mismatch is not None
+
+
+# --- anchor validity against the coil center this run found ----------------
+
+
+def test_an_anchor_stored_at_the_measured_center_is_accepted():
+    # Arrange: the run found the coil exactly where the anchor recorded it.
+    anchor = _anchor_record()
+
+    # Act
+    mismatch = etc.anchor_center_mismatch(0, anchor, 349.8721, 5.0413)
+
+    # Assert
+    assert mismatch is None
+
+
+def test_a_center_inside_the_tolerance_is_accepted():
+    # Arrange: the measured center sits 0.49 mm along X from the stored
+    # 349.8721, inside the 0.5 mm tolerance.
+    anchor = _anchor_record()
+
+    # Act
+    mismatch = etc.anchor_center_mismatch(0, anchor, 350.3621, 5.0413)
+
+    # Assert
+    assert mismatch is None
+
+
+def test_a_center_beyond_the_tolerance_is_refused():
+    # Arrange: the measured center sits 0.51 mm along X from the stored
+    # 349.8721, beyond the 0.5 mm tolerance.
+    anchor = _anchor_record()
+
+    # Act
+    mismatch = etc.anchor_center_mismatch(3, anchor, 350.3821, 5.0413)
+
+    # Assert: the refusal names both centers, the distance and the command
+    # that measures the reference again.
+    assert mismatch is not None
+    assert "T3" in mismatch
+    assert ("coil position when the Z reference was measured: "
+            "x 349.8721, y 5.0413" in mismatch)
+    assert "coil position now: x 350.3821, y 5.0413" in mismatch
+    assert "distance: 0.5100 mm, more than the allowed 0.5000 mm" in mismatch
+    assert "EDDY_CALIBRATE_Z T=3" in mismatch
 
 
 # --- file layout -----------------------------------------------------------

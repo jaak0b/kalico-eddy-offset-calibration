@@ -148,7 +148,7 @@ def test_the_summary_names_the_baseline_tool_and_every_measured_offset():
     ]
 
     assert etc.fleet_summary_rows(entries) == [
-        "fleet summary:",
+        "summary of all measured tools:",
         "T0: baseline tool, offsets zero by definition",
         "T1: offset x: -0.0431, offset y: +0.0122, offset z: +0.0157",
     ]
@@ -161,7 +161,7 @@ def test_the_summary_leaves_out_z_when_no_descent_ran():
     ]
 
     assert etc.fleet_summary_rows(entries) == [
-        "fleet summary:",
+        "summary of all measured tools:",
         "T0: baseline tool, offsets zero by definition",
         "T2: offset x: +1.5000, offset y: -2.2500",
     ]

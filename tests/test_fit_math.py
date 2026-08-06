@@ -225,7 +225,7 @@ def test_rejects_a_pass_with_no_response_contrast():
     freqs = [12345.0] * 100
 
     # Act / Assert
-    with pytest.raises(ValueError, match="no response contrast"):
+    with pytest.raises(ValueError, match="no contrast"):
         etc.detect_peak_type(freqs, EDGE_MARGIN)
 
 

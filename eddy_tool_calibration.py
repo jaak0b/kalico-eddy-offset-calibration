@@ -100,15 +100,16 @@ def detect_peak_type(freqs, edge_margin):
     if center_avg < edge_avg:
         return 'valley'
     raise ValueError(
-        "the pass shows no response contrast, its middle band and its edges "
-        "both average %.3f, so the scan may not cross the coil" % (edge_avg,))
+        "the frequency readings show no contrast between the middle of the "
+        "pass and its edges, both average %.3f Hz, so the scan may not cross "
+        "the coil" % (edge_avg,))
 
 
 def find_extremum_index(freqs, peak_type, edge_margin):
     n = len(freqs)
     if n < 3:
         raise ValueError(
-            "extremum search needs at least 3 samples, got %d" % (n,))
+            "the peak search needs at least 3 samples, got %d" % (n,))
     if not 0.0 < edge_margin < 0.5:
         raise ValueError(
             "edge margin must be between 0 and 0.5, got %r" % (edge_margin,))
@@ -117,7 +118,7 @@ def find_extremum_index(freqs, peak_type, edge_margin):
     hi = n - margin
     if hi - lo < 3:
         raise ValueError(
-            "extremum search window holds %d samples after trimming %d edge "
+            "the peak search window holds %d samples after trimming %d edge "
             "samples from a %d sample pass" % (max(0, hi - lo), margin, n))
     window = list(freqs[lo:hi])
     if peak_type == 'peak':
@@ -129,7 +130,7 @@ def find_extremum_index(freqs, peak_type, edge_margin):
     best_idx = lo + window.index(best)
     if best_idx == lo or best_idx == hi - 1:
         raise ValueError(
-            "response extremum lies on the edge of the search window at "
+            "the strongest reading lies on the edge of the search window at "
             "sample %d of %d" % (best_idx, n))
     return best_idx
 
@@ -162,8 +163,8 @@ def solve_weighted_quadratic(w, wx, wx2, wx3, wx4, wy, wxy, wx2y):
     det = determinant_3x3(matrix)
     if abs(det) < FIT_DET_EPSILON:
         raise ValueError(
-            "quadratic fit normal equations are singular, the response in "
-            "the fit window carries no curvature")
+            "quadratic fit normal equations are singular, the readings "
+            "around the peak carry no curvature")
     return tuple(
         determinant_3x3(replace_column(matrix, column, moments)) / det
         for column in range(3))
@@ -187,15 +188,15 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
             % (half_window,))
     if sigma <= 0.0:
         raise ValueError(
-            "fit sigma must be greater than 0, got %r" % (sigma,))
+            "fit_sigma_fraction must be greater than 0, got %r" % (sigma,))
     if peak_type not in PEAK_TYPES:
         raise unhandled_member('peak type', peak_type, PEAK_TYPES)
     start_idx = max(0, peak_idx - half_window)
     end_idx = min(n, peak_idx + half_window + 1)
     if end_idx - start_idx < 3:
         raise ValueError(
-            "fit window holds %d samples, the quadratic fit needs at least 3"
-            % (end_idx - start_idx,))
+            "only %d samples surround the peak, and the quadratic fit needs "
+            "at least 3" % (end_idx - start_idx,))
     xs = [float(i - peak_idx) for i in range(start_idx, end_idx)]
     ys = [float(freqs[i]) for i in range(start_idx, end_idx)]
     ws = [math.exp(-(x * x) / (2.0 * sigma * sigma)) for x in xs]
@@ -210,22 +211,22 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
     a, b, _c = solve_weighted_quadratic(w, wx, wx2, wx3, wx4, wy, wxy, wx2y)
     if abs(a) < FIT_CURVATURE_EPSILON:
         raise ValueError(
-            "quadratic fit is flat, the response in the fit window carries "
-            "no curvature")
+            "quadratic fit is flat, the readings around the peak carry no "
+            "curvature")
     if peak_type == 'peak' and a > 0.0:
         raise ValueError(
-            "quadratic fit opens upward around a detected peak, the fit "
-            "window does not hold the response extremum")
+            "quadratic fit opens upward around a detected peak, so the "
+            "samples around it do not hold the peak")
     if peak_type == 'valley' and a < 0.0:
         raise ValueError(
-            "quadratic fit opens downward around a detected valley, the fit "
-            "window does not hold the response extremum")
+            "quadratic fit opens downward around a detected valley, so the "
+            "samples around it do not hold the valley")
     x_peak = -b / (2.0 * a)
     max_offset = half_window * vertex_limit
     if abs(x_peak) > max_offset:
         raise ValueError(
-            "fitted vertex sits %.2f samples away from the extremum sample, "
-            "past the %.2f sample limit" % (abs(x_peak), max_offset))
+            "the fitted peak sits %.2f samples away from the strongest "
+            "sample, past the %.2f sample limit" % (abs(x_peak), max_offset))
     return x_peak
 
 
@@ -674,10 +675,11 @@ def temperature_warning(tool, anchored_setpoint, configured_setpoint):
     if float(anchored_setpoint) == float(configured_setpoint):
         return None
     return (
-        "warning: T%d was anchored with calibration_temp at %.1f C, and "
-        "calibration_temp is now %.1f C. This run heats T%d to %.1f C, the "
-        "setpoint its anchor was measured at. Run EDDY_CALIBRATE_Z T=%d to "
-        "anchor the tool at the configured setpoint instead."
+        "warning: the Z reference for T%d was measured with calibration_temp "
+        "at %.1f C, and calibration_temp is now %.1f C. This run heats T%d "
+        "to %.1f C, the temperature its Z reference was measured at. Run "
+        "EDDY_CALIBRATE_Z T=%d to measure the reference at the configured "
+        "calibration_temp instead."
         % (int(tool), float(anchored_setpoint), float(configured_setpoint),
            int(tool), float(anchored_setpoint), int(tool)))
 
@@ -704,10 +706,10 @@ def preheat_plan_rows(entries, band, settle_time):
     rows = ["heating every listed tool before measuring:"]
     for tool, name, current, setpoint in entries:
         rows.append(
-            "T%d heater %s: %.1f C now, %.1f C setpoint"
+            "T%d heater %s: %.1f C now, %.1f C target"
             % (int(tool), name, float(current), float(setpoint)))
     rows.append(
-        "temperature band: %.1f C either side of the setpoint"
+        "temperature band: %.1f C either side of the target temperature"
         % (float(band),))
     rows.append(
         "settle time after reaching the band: %.1f s" % (float(settle_time),))
@@ -975,14 +977,44 @@ def anchor_sensor_mismatch(tool, anchor, sensor_clock, drive_current):
         "The Z reference for T%d was measured with sensor settings that are "
         "not the ones in use now, so the frequency it stores no longer "
         "describes the same height.\n"
-        "sensor clock when anchored: %s Hz\n"
+        "sensor clock when the Z reference was measured: %s Hz\n"
         "sensor clock now: %s Hz\n"
-        "drive current when anchored: %s\n"
+        "drive current when the Z reference was measured: %s\n"
         "drive current now: %s\n"
         "Run EDDY_CALIBRATE_Z T=%d to measure the reference again with the "
         "settings in use now."
         % (int(tool), stored_clock, float(sensor_clock), stored_current,
            float(drive_current), int(tool)))
+
+
+# A coil that moved on the bed invalidates every stored Z reference: the
+# anchor frequency was measured over the old position. 0.5 mm sits far above
+# the locate repeatability of the XY scan and far below the shift a remount
+# of the board produces.
+ANCHOR_CENTER_TOLERANCE = 0.5
+
+
+def anchor_center_mismatch(tool, anchor, center_x, center_y):
+    """Refusal text when an anchor's stored coil center is not where this run
+    found the coil. The anchor frequency describes a height only over the
+    coil position it was measured at. Returns None within tolerance.
+    """
+    stored_x = float(anchor['center_x'])
+    stored_y = float(anchor['center_y'])
+    distance = math.hypot(stored_x - float(center_x),
+                          stored_y - float(center_y))
+    if distance <= ANCHOR_CENTER_TOLERANCE:
+        return None
+    return (
+        "The Z reference for T%d was measured with the coil at a different "
+        "position, so the frequency it stores no longer describes the same "
+        "height.\n"
+        "coil position when the Z reference was measured: x %.4f, y %.4f\n"
+        "coil position now: x %.4f, y %.4f\n"
+        "distance: %.4f mm, more than the allowed %.4f mm\n"
+        "Run EDDY_CALIBRATE_Z T=%d to measure the reference again."
+        % (int(tool), stored_x, stored_y, float(center_x), float(center_y),
+           distance, ANCHOR_CENTER_TOLERANCE, int(tool)))
 
 
 def encode_state(anchors):
@@ -1185,6 +1217,10 @@ def offset_rows(offsets):
     return rows
 
 
+def switch_trigger_row(trigger_z):
+    return "switch trigger (machine Z): %.4f mm" % (trigger_z,)
+
+
 def anchor_height_row(height):
     return "anchor height above trigger plane: %.4f mm" % (height,)
 
@@ -1202,12 +1238,16 @@ def setpoint_temperature_row(label, temperature):
     return "%s temperature setpoint: %.1f C" % (label, temperature)
 
 
+def target_temperature_row(label, temperature):
+    return "%s target temperature: %.1f C" % (label, temperature)
+
+
 def observed_temperature_row(label, temperature):
     return "%s temperature observed: %.1f C" % (label, temperature)
 
 
-def anchor_temperature_rows(label, anchor):
-    return [setpoint_temperature_row(label, anchor['setpoint_temperature']),
+def anchor_temperature_rows(label, anchor, setpoint_row):
+    return [setpoint_row(label, anchor['setpoint_temperature']),
             observed_temperature_row(label, anchor['observed_temperature'])]
 
 
@@ -1219,7 +1259,7 @@ def fleet_summary_rows(entries):
     """
     if not entries:
         raise ValueError("a fleet summary needs at least one measured tool")
-    rows = ["fleet summary:"]
+    rows = ["summary of all measured tools:"]
     for entry in entries:
         tool = int(entry['tool'])
         offsets = entry['offsets']
@@ -1284,7 +1324,7 @@ def fit_half_window_samples(sample_rate, scan_speed, window_radius):
             "scan speed must be greater than 0, got %r" % (scan_speed,))
     if window_radius <= 0.0:
         raise ValueError(
-            "fit window radius must be greater than 0, got %r"
+            "fit_window_radius must be greater than 0, got %r"
             % (window_radius,))
     return max(1, int(sample_rate / scan_speed * window_radius))
 
@@ -2240,7 +2280,8 @@ class EddyToolCalibration:
                 "tool. References are stored in %s now. The old value cannot "
                 "be converted: it is a machine Z tied to a coil position and "
                 "a hand measurement, and the new reference is a height above "
-                "the switch trigger plane, which only the switch measurement "
+                "the point where the switch triggers, which only the switch "
+                "measurement "
                 "defines."
                 % (self.name, tool, tool, self._state_path()))
 
@@ -2529,6 +2570,17 @@ class EddyToolCalibration:
     def _startup_error(self, message):
         return self.printer.config_error("%s: %s" % (self.name, message))
 
+    def _resolve_at_connect(self, row_label, resolver, *args, detail=""):
+        try:
+            result = resolver(*args)
+        except ValueError as e:
+            raise self._startup_error(str(e))
+        values = result if isinstance(result, tuple) else (result,)
+        logging.info(
+            "%s: " + row_label + " resolved by %s" + detail,
+            self.name, *values)
+        return result
+
     def _handle_connect(self):
         """Resolve the motion queue, the preheat wait and the sensor clock,
         then resolve every tool's heater once the heaters exist.
@@ -2545,14 +2597,8 @@ class EddyToolCalibration:
             self.name, self.sensor_import_strategy)
         motion_report = self.printer.lookup_object('motion_report', None)
         if motion_report is not None:
-            try:
-                self.motion_queue_strategy = resolve_motion_queue(
-                    motion_report)
-            except ValueError as e:
-                raise self._startup_error(str(e))
-            logging.info(
-                "%s: motion queue resolved by %s",
-                self.name, self.motion_queue_strategy)
+            self.motion_queue_strategy = self._resolve_at_connect(
+                "motion queue", resolve_motion_queue, motion_report)
         if not self.calibrate_z:
             return
         # A printer with no heater at all carries no heaters object to
@@ -2561,22 +2607,11 @@ class EddyToolCalibration:
         # it names the missing hotend rather than a missing firmware method.
         pheaters = self.printer.lookup_object('heaters', None)
         if pheaters is not None:
-            try:
-                self.preheat_wait_strategy = resolve_preheat_wait(
-                    self.printer, pheaters)
-            except ValueError as e:
-                raise self._startup_error(str(e))
-            logging.info(
-                "%s: preheat wait resolved by %s",
-                self.name, self.preheat_wait_strategy)
-        try:
-            strategy, self.sensor_clock = resolve_sensor_clock(
-                self.sensor, self.sensor_module)
-        except ValueError as e:
-            raise self._startup_error(str(e))
-        logging.info(
-            "%s: sensor clock resolved by %s: %s Hz",
-            self.name, strategy, self.sensor_clock)
+            self.preheat_wait_strategy = self._resolve_at_connect(
+                "preheat wait", resolve_preheat_wait, self.printer, pheaters)
+        _, self.sensor_clock = self._resolve_at_connect(
+            "sensor clock", resolve_sensor_clock,
+            self.sensor, self.sensor_module, detail=": %s Hz")
         if self.tool_count is None:
             return
         for tool in range(self.tool_count):
@@ -2653,7 +2688,7 @@ class EddyToolCalibration:
             except self.printer.command_error as e:
                 raise gcmd.error(
                     "T%d could not be held at %.1f C by the heater %s: %s. "
-                    "That setpoint comes from %s."
+                    "That target temperature comes from %s."
                     % (tool, setpoint, name, e, source))
         for tool, name, heater, setpoint in resolved:
             self._wait_for_band(gcmd, tool, name, heater, setpoint)
@@ -3024,7 +3059,7 @@ class EddyToolCalibration:
                 self.fit_vertex_limit)
         except ValueError as e:
             raise gcmd.error(
-                "The %s pass did not yield a usable response fit: %s. Run "
+                "The %s pass did not yield a usable fit: %s. Run "
                 "EDDY_LOCATE to refine the coil center, and check that no "
                 "metal sits near the coil." % (label, e))
         return result, stats
@@ -3131,10 +3166,10 @@ class EddyToolCalibration:
                 raise
             rows = [
                 "pass angle: %.1f deg" % (angle,),
-                "response type: %s" % (result['peak_type'],),
+                "frequency peak type: %s" % (result['peak_type'],),
                 "samples: %d" % (result['sample_count'],),
-                "extremum sample: %d" % (result['extremum_index'],),
-                "vertex offset: %+.3f samples" % (result['vertex_offset'],),
+                "peak sample: %d" % (result['extremum_index'],),
+                "peak offset: %+.3f samples" % (result['vertex_offset'],),
                 "peak x: %.4f" % (result['peak_x'],),
                 "peak y: %.4f" % (result['peak_y'],),
             ]
@@ -3319,7 +3354,8 @@ class EddyToolCalibration:
         "One-time Z reference setup for the tools named by T=, or for every "
         "tool when T= is left out. Presses the contact switch and binds the "
         "result to the eddy sensor's reading, at calibration_temp, which is "
-        "recorded as the setpoint every later run of that tool is heated to. "
+        "recorded as the target temperature every later run of that tool is "
+        "heated to. "
         "Run it after changing a nozzle or a hotend, after moving the coil or "
         "the switch, or after changing calibration_temp. This is the setup "
         "step, not the routine offset measurement; that is "
@@ -3387,7 +3423,7 @@ class EddyToolCalibration:
             % (", ".join("%.4f" % (h,) for h in counted),),
             "press spread: %.4f mm" % (press_spread,),
             "press tolerance: %.4f mm" % (self.switch_probe_tolerance,),
-            "switch trigger (machine Z): %.4f mm" % (trigger_z,),
+            switch_trigger_row(trigger_z),
         ]
         rows.extend(center_rows(center_x, center_y))
         rows.extend(self._z_curve_rows(curve))
@@ -3396,7 +3432,8 @@ class EddyToolCalibration:
             "sensor clock: %s Hz" % (record['sensor_clock'],),
             "sensor drive current: %d" % (record['drive_current'],),
         ])
-        rows.extend(anchor_temperature_rows('nozzle', record))
+        rows.extend(anchor_temperature_rows(
+            'nozzle', record, target_temperature_row))
         rows.append("state file: %s" % (self._state_path(),))
         self._respond_measurement(gcmd, rows, agg)
         # The descent of an anchor run defines the anchor rather than being
@@ -3419,7 +3456,7 @@ class EddyToolCalibration:
         "relative to T0, or measure every tool in turn when T= is left out. "
         "T=0 measures the baseline every other tool is compared against, and "
         "it is measured first whatever order T= lists it in. With "
-        "calibrate_z True each tool is heated to the setpoint its "
+        "calibrate_z True each tool is heated to the temperature its "
         "EDDY_CALIBRATE_Z reference was measured at. Add DEBUG=1 to print "
         "each scan pass's diagnostic rows.")
 
@@ -3449,7 +3486,8 @@ class EddyToolCalibration:
             summary.append(
                 self._calibrate_one_offset(gcmd, tool, debug, multiple_tools))
         if multiple_tools:
-            gcmd.respond_info("\n".join(fleet_summary_rows(summary)))
+            with self._internal_errors(gcmd):
+                gcmd.respond_info("\n".join(fleet_summary_rows(summary)))
 
     def _calibrate_one_offset(self, gcmd, tool, debug, multiple_tools):
         """Measure one tool's offsets, report them, and apply them.
@@ -3603,6 +3641,10 @@ class EddyToolCalibration:
         observed = self._measurement_observed_temperature(
             gcmd, tool, include_z)
         if include_z:
+            mismatch = anchor_center_mismatch(
+                tool, self._anchor(gcmd, tool), center_x, center_y)
+            if mismatch is not None:
+                raise gcmd.error(mismatch)
             curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
             merge_aggregate(agg, agg_z)
             z_trigger, z_crossing = self._trigger_plane(gcmd, tool, curve)
@@ -3660,13 +3702,13 @@ class EddyToolCalibration:
         anchor = self._anchor(gcmd, tool)
         rows = self._z_curve_rows(result['z_curve'])
         rows.extend(anchor_rows(anchor))
-        rows.extend(anchor_temperature_rows('anchor', anchor))
+        rows.extend(anchor_temperature_rows(
+            'anchor', anchor, setpoint_temperature_row))
         rows.extend([
             observed_temperature_row(
                 'nozzle', result['observed_temperature']),
             "z crossing (machine Z): %.4f mm" % (result['z_crossing'],),
-            "switch trigger plane (machine Z): %.4f mm"
-            % (result['z_trigger'],),
+            switch_trigger_row(result['z_trigger']),
         ])
         return rows
 
