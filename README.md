@@ -124,10 +124,10 @@ proceeds.
 
 ### Z offset via the contact switch
 
-> [!WARNING]
+> [!IMPORTANT]
 > The options below `calibrate_z` are required when `calibrate_z` is True.
 
-> [!WARNING]
+> [!IMPORTANT]
 > When `calibrate_z` is True, `EDDY_CALIBRATE_Z` must be run at least once, otherwise `EDDY_CALIBRATE_OFFSET` will refuse to measure the Z offset.
 
 ```
@@ -400,7 +400,7 @@ Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration)
 
 ### EDDY_CALIBRATE_Z
 
-> [!WARNING]
+> [!NOTE]
 > Requires `calibrate_z: True`
 
 `EDDY_CALIBRATE_Z [T=<list>] [DEBUG=1]`: Correlates the sensor's readings with the nozzle's actual Z height using a z endstop/microswitch.
@@ -445,10 +445,10 @@ numbers as decimal strings):
 
 ## Measuring before each print
 
-> [!WARNING]
+> [!IMPORTANT]
 > Requires all [Toolchanger](#toolchanger) config options to be set.
 
-> [!CAUTION]
+> [!IMPORTANT]
 > The macro assumes that your slicer passes tool temperature as `{if is_extruder_used[0]}T0_TEMP={first_layer_temperature[0]}{endif}` (Example for T0, use 1 for T1, 2 for T2,..) in your Machine start-gcode.
 
 To calibrate each used tool before a print use the below macro and call `EDDY_CALIBRATE_USED_TOOLS {rawparams}` from your print_start macro.
