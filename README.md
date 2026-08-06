@@ -18,10 +18,7 @@ Uses a bed-mounted LDC1612 eddy-current coil (e.g. BTT Eddy Coil/Duo/USB or a Ca
 These numbers come from my printer, a Voron 2.4 with StealthChanger and a BTT
 Eddy Coil, measured with `EDDY_REPEATABILITY`.
 
-| What | Measured |  |
-|---|---|---|
-| XY repeatability (standard deviation) | 4.6 um X, 2.5 um Y | six runs on one tool with no toolchange at 150 C |
-| XY repeatability across toolchanges | about 5 um | four runs including a full toolchange |
+![Screenshot of EDDY_REPEATABILITY output](/assets/images/repeatability.png)
 
 ## Getting started
 
