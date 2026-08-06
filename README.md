@@ -26,7 +26,7 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`.
 ## Getting started
 
 1. Wire up the eddy coil. See your probe's manual.
-2. Mount the Eddy Coil Sensor to the bed with the coil facing up. [BTT Eddy Mount.step](BTT%20Eddy%20Mount.step) can be used for BTT Eddy probes.
+2. Mount the Eddy Coil Sensor to the bed with the coil facing up. [BTT Eddy Mount.stl](BTT%20Eddy%20Mount.stl) can be used for BTT Eddy probes.
 3. Install the plugin, see [Install](#install).
 4. Add the config, see [Required](#required).
 5. Run [`EDDY_QUERY`](#commands) to check the wiring before anything moves.
