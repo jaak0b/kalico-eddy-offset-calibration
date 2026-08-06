@@ -134,44 +134,15 @@ is_system_service: False
 
 Every option and its default. The uncommented options are required and have
 no default; everything commented out may be left out and keeps the value
-shown.
+shown. The blocks below are all parts of the same `[eddy_tool_calibration]`
+section, whose header line appears in the first block only.
+
+### Required
 
 ```
 [eddy_tool_calibration]
-#i2c_address:
-#i2c_mcu:
-#i2c_bus:
 i2c_software_scl_pin:
 i2c_software_sda_pin:
-#i2c_speed:
-#   The i2c settings for the LDC1612 chip. See the "common I2C settings"
-#   section of Kalico's Config_Reference.md for a description of these
-#   parameters. The chip's factory address is 42 decimal (0x2A).
-#intb_pin:
-#   MCU gpio pin connected to the LDC1612 sensor's INTB pin, if it is
-#   broken out. The default is to not use the INTB pin.
-#frequency:
-#   The external clock frequency (in Hz) fed to the LDC1612 CLKIN pin,
-#   accepted from 2000000 to 40000000. The default is 12000000, which is
-#   correct for the BTT Eddy family (BTT publishes no figure; 12 MHz is the
-#   Klipper driver's assumption, and it held up against the contact method
-#   on my printer). Requires Kalico from March 2026, or stock
-#   Klipper. A wrong value scales every reported frequency. Changing it
-#   invalidates every stored Z reference: run EDDY_CALIBRATE_Z again for
-#   each tool afterwards.
-#reg_drive_current:
-#   The LDC1612 DRIVE_CURRENT0 register value, 0 to 31. The driver default
-#   of 15 suits the BTT Eddy coil family. For any other coil, including the
-#   crab board, determine the right value with
-#   LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration and store the
-#   printed value with SAVE_CONFIG. Changing it invalidates every stored Z
-#   reference: run EDDY_CALIBRATE_Z again for each tool afterwards. A run
-#   that reads a reference taken at another drive current refuses to
-#   measure rather than report an offset the setting has moved. If a scan
-#   fails with a sensor amplitude error ("Eddy current sensor error"),
-#   raise this value by one and retry; BTT's own remedy for that error is
-#   the same step, 15 to 16, and it typically means the coil-to-target
-#   distance sat outside roughly 2 to 3 mm.
 coil_x:
 coil_y:
 #   Required. Approximate machine X and Y of the coil center. A ruler
@@ -188,94 +159,36 @@ coil_inner_diameter:
 #   sets the default fit_window_radius and scan_length, so a value below
 #   the coil's real bore narrows the fit window and the scan pass below
 #   the response they should cover.
-#scan_height: 1.0
-#   Height above the coil top face the XY scan passes run at. Must be
-#   above the face and below z_start.
-#scan_safe_z: 2.0
-#   Extra clearance, in mm, added above the scan height for travel moves.
-#   Must be greater than 0.
-#z_start: 2.5
-#   Height above the coil top face the Z descent starts from. The default
-#   is where the sensor's usable range typically ends; raising it risks a
-#   non-monotonic descent curve.
-#z_stop: 0.5
-#   Height above the coil top face the Z descent ends at. Must be above
-#   the face, and below z_start.
-#z_step: 0.05
-#   Descent step size, in mm. Must be greater than 0, and must divide the
-#   span from z_start to z_stop into a whole number of steps.
-#scan_speed: 4.0
-#   Speed, in mm/s, of an XY scan pass. Lower it if a pass returns fewer
-#   than samples_min samples.
-#scan_length:
-#   Length, in mm, of an XY scan pass. The default is 1.5 times
-#   coil_inner_diameter, so a pass crosses the whole response with margin
-#   on both sides for the fit window: 12.0 mm for the 8 mm BTT Eddy Coil
-#   bore, 3.0 mm for the 2 mm Little Crab bore.
-#locate_scan_length:
-#   Length, in mm, of the coarse EDDY_LOCATE pass. The default is three
-#   times scan_length, because the coarse pass has to cover the error in
-#   the configured coil position rather than the coil itself.
-#travel_speed: 100.0
-#   Speed, in mm/s, of XY travel moves between passes.
-#z_speed: 10.0
-#   Speed, in mm/s, of every Z leg except the switch presses (those use
-#   switch_probe_speed and switch_probe_lift_speed).
-#scan_angles: 45, 135
-#   Comma separated scan directions in degrees, where 0 runs along X+ and
-#   90 along Y+. Two directions at least 30 degrees apart are needed to
-#   reconstruct both axes. A repeated angle is a config error, and so is a
-#   pair of opposite angles when pair_scans is enabled.
-#pair_scans: True
-#   Scan the opposite of every configured angle as well and average each
-#   pair, which cancels the position bias transport latency adds along the
-#   direction of travel. Doubles the number of passes.
-#samples_min: 100
-#   Minimum usable samples per scan pass, at least 3. A pass below it is
-#   an error rather than a fit on thin data.
-#query_time: 0.5
-#   Seconds EDDY_QUERY collects samples for. At the driver's 250 Hz rate
-#   (400 Hz on Klipper master), the default gives about 125 samples.
-#freq_min: 1000000.0
-#   Samples below this frequency, in Hz, are discarded as startup or noise
-#   readings. The default sits well below any real LDC1612 coil resonance.
-#edge_margin: 0.15
-#   Fraction of each pass treated as its edge, above 0 and below 0.5. The
-#   edges are excluded from the extremum search and used for peak-type
-#   detection.
-#fit_window_radius:
-#   Half width, in mm, of the quadratic fit window either side of the
-#   response extremum. The default is half of coil_inner_diameter.
-#fit_sigma_fraction: 0.5
-#   Standard deviation of the fit's Gaussian weighting, as a fraction of
-#   the fit window.
-#fit_vertex_limit: 0.5
-#   A fitted vertex further from the extremum sample than this fraction of
-#   the fit window is reported as a failed fit rather than clamped.
-#save_csv: False
-#   Write every scan pass's raw samples to a CSV file for offline review.
-#save_history: True
-#   Append every completed measurement of a tool to history_T<n>.csv in
-#   log_dir: the UTC timestamp, the command, the fitted center, the offsets,
-#   the session of the baseline they were measured against, the Z crossing
-#   and trigger plane, the nozzle setpoint the run was held at, the nozzle
-#   reading observed while it ran, and the sample count. This is
-#   the drift log, one line per measurement, and it is what a claim about
-#   drift over time rests on. It is separate from save_csv, which dumps the
-#   raw samples of each scan pass instead.
-#csv_dir: EddyToolCalibration/data
-#   Directory the raw scan dumps of save_csv are written to, read against the
-#   printer config directory unless it is an absolute path. These are working
-#   files, meant to be cleared once they have been looked at. It must be
-#   neither the directory holding the calibration state file nor log_dir, so
-#   that clearing the dumps cannot take the saved Z references or the logs
-#   with them, and either spelling of a directory counts as that directory.
-#log_dir: EddyToolCalibration/logs
-#   Directory the drift logs and the repeatability study files are written
-#   to, read against the printer config directory unless it is an absolute
-#   path. These are the durable record, kept apart from the scan dumps so
-#   clearing those cannot delete them. It must not be the directory holding
-#   the calibration state file.
+```
+
+### Toolchanger
+
+```
+#tool_count:
+#   How many tools the machine has, 1 to 16. Tools are T0 through
+#   T(tool_count-1) with no gaps. Needed only to run a command without T=.
+#toolchange_gcode:
+#   The lines that mount a tool, as a template with {tool} bound to the
+#   tool number. Needed only to run a command without T=. When it is set,
+#   both calibration commands mount the tool they are about to work on,
+#   with T= as well as without it. When it is not, they work on whatever
+#   tool is already mounted.
+#apply_offsets_gcode:
+#   The lines that apply a measured offset, as a template with {tool},
+#   {offset_x} and {offset_y} bound, and {offset_z} bound as well when
+#   calibrate_z is True. Every non-baseline result is passed through it as
+#   the run proceeds. Leave it out and the plugin only reports.
+#tool_extruders:
+#   Comma separated heater section names, one per tool, in tool number order.
+#   Set it whenever a tool does not use the equally numbered extruder: the
+#   default assumes T0 uses extruder, T1 uses extruder1 and so on, and a fleet
+#   that maps differently would heat the wrong hotend. Names are resolved at
+#   startup, so a name that does not exist is a startup error.
+```
+
+### Z offset via the contact switch
+
+```
 #calibrate_z: False
 #   Run the Z descent and report Z offsets. With it False no descent runs,
 #   XY offsets are still measured, and none of the switch options below
@@ -332,26 +245,141 @@ coil_inner_diameter:
 #   Seconds to dwell after a tool reaches the band, before measuring. The
 #   heater block reaches temperature well before the nozzle tip does, and both
 #   commands dwell the same time so both measure the same thermal state.
-#tool_extruders:
-#   Comma separated heater section names, one per tool, in tool number order.
-#   Set it whenever a tool does not use the equally numbered extruder: the
-#   default assumes T0 uses extruder, T1 uses extruder1 and so on, and a fleet
-#   that maps differently would heat the wrong hotend. Names are resolved at
-#   startup, so a name that does not exist is a startup error.
-#tool_count:
-#   How many tools the machine has, 1 to 16. Tools are T0 through
-#   T(tool_count-1) with no gaps. Needed only to run a command without T=.
-#toolchange_gcode:
-#   The lines that mount a tool, as a template with {tool} bound to the
-#   tool number. Needed only to run a command without T=. When it is set,
-#   both calibration commands mount the tool they are about to work on,
-#   with T= as well as without it. When it is not, they work on whatever
-#   tool is already mounted.
-#apply_offsets_gcode:
-#   The lines that apply a measured offset, as a template with {tool},
-#   {offset_x} and {offset_y} bound, and {offset_z} bound as well when
-#   calibrate_z is True. Every non-baseline result is passed through it as
-#   the run proceeds. Leave it out and the plugin only reports.
+#z_start: 2.5
+#   Height above the coil top face the Z descent starts from. The default
+#   is where the sensor's usable range typically ends; raising it risks a
+#   non-monotonic descent curve.
+#z_stop: 0.5
+#   Height above the coil top face the Z descent ends at. Must be above
+#   the face, and below z_start.
+#z_step: 0.05
+#   Descent step size, in mm. Must be greater than 0, and must divide the
+#   span from z_start to z_stop into a whole number of steps.
+```
+
+### Sensor hardware
+
+```
+#i2c_address:
+#i2c_mcu:
+#i2c_bus:
+#i2c_speed:
+#   The i2c settings for the LDC1612 chip. See the "common I2C settings"
+#   section of Kalico's Config_Reference.md for a description of these
+#   parameters. The chip's factory address is 42 decimal (0x2A).
+#intb_pin:
+#   MCU gpio pin connected to the LDC1612 sensor's INTB pin, if it is
+#   broken out. The default is to not use the INTB pin.
+#frequency:
+#   The external clock frequency (in Hz) fed to the LDC1612 CLKIN pin,
+#   accepted from 2000000 to 40000000. The default is 12000000, which is
+#   correct for the BTT Eddy family (BTT publishes no figure; 12 MHz is the
+#   Klipper driver's assumption, and it held up against the contact method
+#   on my printer). Requires Kalico from March 2026, or stock
+#   Klipper. A wrong value scales every reported frequency. Changing it
+#   invalidates every stored Z reference: run EDDY_CALIBRATE_Z again for
+#   each tool afterwards.
+#reg_drive_current:
+#   The LDC1612 DRIVE_CURRENT0 register value, 0 to 31. The driver default
+#   of 15 suits the BTT Eddy coil family. For any other coil, including the
+#   crab board, determine the right value with
+#   LDC_CALIBRATE_DRIVE_CURRENT CHIP=eddy_tool_calibration and store the
+#   printed value with SAVE_CONFIG. Changing it invalidates every stored Z
+#   reference: run EDDY_CALIBRATE_Z again for each tool afterwards. A run
+#   that reads a reference taken at another drive current refuses to
+#   measure rather than report an offset the setting has moved. If a scan
+#   fails with a sensor amplitude error ("Eddy current sensor error"),
+#   raise this value by one and retry; BTT's own remedy for that error is
+#   the same step, 15 to 16, and it typically means the coil-to-target
+#   distance sat outside roughly 2 to 3 mm.
+```
+
+### Scan and fit tuning
+
+```
+#scan_height: 1.0
+#   Height above the coil top face the XY scan passes run at. Must be
+#   above the face and below z_start.
+#scan_safe_z: 2.0
+#   Extra clearance, in mm, added above the scan height for travel moves.
+#   Must be greater than 0.
+#scan_speed: 4.0
+#   Speed, in mm/s, of an XY scan pass. Lower it if a pass returns fewer
+#   than samples_min samples.
+#scan_length:
+#   Length, in mm, of an XY scan pass. The default is 1.5 times
+#   coil_inner_diameter, so a pass crosses the whole response with margin
+#   on both sides for the fit window: 12.0 mm for the 8 mm BTT Eddy Coil
+#   bore, 3.0 mm for the 2 mm Little Crab bore.
+#locate_scan_length:
+#   Length, in mm, of the coarse EDDY_LOCATE pass. The default is three
+#   times scan_length, because the coarse pass has to cover the error in
+#   the configured coil position rather than the coil itself.
+#travel_speed: 100.0
+#   Speed, in mm/s, of XY travel moves between passes.
+#z_speed: 10.0
+#   Speed, in mm/s, of every Z leg except the switch presses (those use
+#   switch_probe_speed and switch_probe_lift_speed).
+#scan_angles: 45, 135
+#   Comma separated scan directions in degrees, where 0 runs along X+ and
+#   90 along Y+. Two directions at least 30 degrees apart are needed to
+#   reconstruct both axes. A repeated angle is a config error, and so is a
+#   pair of opposite angles when pair_scans is enabled.
+#pair_scans: True
+#   Scan the opposite of every configured angle as well and average each
+#   pair, which cancels the position bias transport latency adds along the
+#   direction of travel. Doubles the number of passes.
+#samples_min: 100
+#   Minimum usable samples per scan pass, at least 3. A pass below it is
+#   an error rather than a fit on thin data.
+#query_time: 0.5
+#   Seconds EDDY_QUERY collects samples for. At the driver's 250 Hz rate
+#   (400 Hz on Klipper master), the default gives about 125 samples.
+#freq_min: 1000000.0
+#   Samples below this frequency, in Hz, are discarded as startup or noise
+#   readings. The default sits well below any real LDC1612 coil resonance.
+#edge_margin: 0.15
+#   Fraction of each pass treated as its edge, above 0 and below 0.5. The
+#   edges are excluded from the extremum search and used for peak-type
+#   detection.
+#fit_window_radius:
+#   Half width, in mm, of the quadratic fit window either side of the
+#   response extremum. The default is half of coil_inner_diameter.
+#fit_sigma_fraction: 0.5
+#   Standard deviation of the fit's Gaussian weighting, as a fraction of
+#   the fit window.
+#fit_vertex_limit: 0.5
+#   A fitted vertex further from the extremum sample than this fraction of
+#   the fit window is reported as a failed fit rather than clamped.
+```
+
+### Logging
+
+```
+#save_history: True
+#   Append every completed measurement of a tool to history_T<n>.csv in
+#   log_dir: the UTC timestamp, the command, the fitted center, the offsets,
+#   the session of the baseline they were measured against, the Z crossing
+#   and trigger plane, the nozzle setpoint the run was held at, the nozzle
+#   reading observed while it ran, and the sample count. This is
+#   the drift log, one line per measurement, and it is what a claim about
+#   drift over time rests on. It is separate from save_csv, which dumps the
+#   raw samples of each scan pass instead.
+#save_csv: False
+#   Write every scan pass's raw samples to a CSV file for offline review.
+#log_dir: EddyToolCalibration/logs
+#   Directory the drift logs and the repeatability study files are written
+#   to, read against the printer config directory unless it is an absolute
+#   path. These are the durable record, kept apart from the scan dumps so
+#   clearing those cannot delete them. It must not be the directory holding
+#   the calibration state file.
+#csv_dir: EddyToolCalibration/data
+#   Directory the raw scan dumps of save_csv are written to, read against the
+#   printer config directory unless it is an absolute path. These are working
+#   files, meant to be cleared once they have been looked at. It must be
+#   neither the directory holding the calibration state file nor log_dir, so
+#   that clearing the dumps cannot take the saved Z references or the logs
+#   with them, and either spelling of a directory counts as that directory.
 ```
 
 A config still carrying the earlier options `z_offset_mode` or `z_ref_t0`
