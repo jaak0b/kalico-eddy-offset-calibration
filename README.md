@@ -69,10 +69,7 @@ is_system_service: False
 
 ## Config reference
 
-Every option and its default. The uncommented options are required and have
-no default; everything commented out may be left out and keeps the value
-shown. The blocks below are all parts of the same `[eddy_tool_calibration]`
-section, whose header line appears in the first block only.
+The uncommented options are required and have no default, everything commented out may be left out. The blocks below are all parts of the same `[eddy_tool_calibration]` section, whose header line appears in the first block only.
 
 ### Required
 
