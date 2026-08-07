@@ -325,7 +325,7 @@ apply_offsets_gcode:
 
 ## Supported hardware
 
-Any eddy stlye probe with a LDC1612 works as long as it is flashed with stock Klipper firmware and reachable over I2C.
+Any eddy style probe with an LDC1612 works as long as it is flashed with stock Klipper firmware and reachable over I2C.
 
 | Board |  |
 |---|---|
