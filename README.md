@@ -117,6 +117,9 @@ proceeds.
 
 ### Z offset via the contact switch
 
+> [!NOTE]
+> Z offset means a tool's nozzle offset in Z relative to T0.
+
 > [!IMPORTANT]
 > The options below `calibrate_z` are ONLY required when `calibrate_z` is True.
 
@@ -322,7 +325,7 @@ apply_offsets_gcode:
 
 ## Supported hardware
 
-Any eddy stlye probe with a LDC1612 works as long as it is flashed with stock Klipper firmware and reachable over I2C.
+Any eddy style probe with an LDC1612 works as long as it is flashed with stock Klipper firmware and reachable over I2C.
 
 | Board |  |
 |---|---|
