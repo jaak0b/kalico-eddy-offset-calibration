@@ -117,6 +117,9 @@ proceeds.
 
 ### Z offset via the contact switch
 
+> [!NOTE]
+> Z offset means a tool's nozzle offset in Z relative to T0.
+
 > [!IMPORTANT]
 > The options below `calibrate_z` are ONLY required when `calibrate_z` is True.
 
