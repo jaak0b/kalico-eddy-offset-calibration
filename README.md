@@ -370,9 +370,14 @@ coil_inner_diameter: 8.0
 i2c_mcu: mcu
 i2c_software_scl_pin: 
 i2c_software_sda_pin: 
-frequency: 24000000
+frequency: 40000000
 coil_inner_diameter: 2.0
-reg_drive_current:
+reg_drive_current: 22
+i2c_speed: 400000
+i2c_address: 42
+scan_speed: 4.0
+scan_length: 4.0
+
 ```
 
 Sources: [upstream repository](https://github.com/chengxg/tool_eddy_calibration),
