@@ -470,6 +470,7 @@ gcode:
     {% if used|length > 1 %}
         {% set tools = ([0] + used)|unique|list|sort %}
         EDDY_CALIBRATE_OFFSET T={tools|join(',')}
+        G28 Z 
     {% endif %}
     G90
     G1 X{sx} Y{sy} F6000
