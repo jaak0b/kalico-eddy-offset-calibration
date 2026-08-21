@@ -1670,6 +1670,15 @@ def history_filename(tool):
     return "history_T%d.csv" % (int(tool),)
 
 
+def scan_dump_filename(label, tool, timestamp):
+    parts = ['eddy_scan']
+    if tool is not None:
+        parts.append('T%d' % (int(tool),))
+    parts.append(label.replace(' ', '_'))
+    parts.append(timestamp.replace(':', '-'))
+    return '_'.join(parts) + '.csv'
+
+
 def next_study_filename(existing, tool):
     """File name for a repeatability study that cannot overwrite an earlier one.
 
@@ -3030,7 +3039,7 @@ class EddyToolCalibration:
         return samples, stats
 
     def _scan_pass(self, gcmd, center_x, center_y, angle_deg, length, scan_z,
-                   label, debug):
+                   label, tool, runstamp, debug):
         start_x, start_y, end_x, end_y = scan_endpoints(
             center_x, center_y, angle_deg, length)
         samples, stats = self._collect_scan(
@@ -3046,7 +3055,7 @@ class EddyToolCalibration:
                 "samples_min of %d. Lower scan_speed or raise scan_length."
                 % (label, len(samples), self.samples_min))
         if self.save_csv:
-            self._save_csv(gcmd, label, samples, debug)
+            self._save_csv(gcmd, label, tool, runstamp, samples, debug)
         xs = [s[2] for s in samples]
         ys = [s[3] for s in samples]
         freqs = [s[1] for s in samples]
@@ -3064,17 +3073,17 @@ class EddyToolCalibration:
                 "metal sits near the coil." % (label, e))
         return result, stats
 
-    def _save_csv(self, gcmd, label, samples, debug):
+    def _save_csv(self, gcmd, label, tool, runstamp, samples, debug):
         directory = self._data_dir()
         path = os.path.join(
-            directory, "eddy_scan_%s.csv" % (label.replace(' ', '_'),))
+            directory, scan_dump_filename(label, tool, runstamp))
         try:
             os.makedirs(directory, exist_ok=True)
             with open(path, 'w') as f:
                 f.write("print_time,frequency,x,y\n")
                 for print_time, freq, x, y in samples:
                     f.write("%.6f,%.3f,%.4f,%.4f\n" % (print_time, freq, x, y))
-        except OSError as e:
+        except (OSError, TypeError, ValueError) as e:
             raise gcmd.error(
                 "Could not write the scan data to %s (directory %s): %s. "
                 "Set save_csv to False or fix the directory permissions."
@@ -3137,7 +3146,8 @@ class EddyToolCalibration:
 
     # -- measurement ------------------------------------------------------
 
-    def _measure_center(self, gcmd, center_x, center_y, length, label, debug):
+    def _measure_center(self, gcmd, center_x, center_y, length, label, tool,
+                        runstamp, debug):
         """One full multi-direction XY measurement around a center estimate.
 
         With DEBUG=0 the per-pass diagnostic rows are held back and flushed
@@ -3160,7 +3170,7 @@ class EddyToolCalibration:
             try:
                 result, stats = self._scan_pass(
                     gcmd, center_x, center_y, angle, length, scan_z,
-                    "%s %.0f deg" % (label, angle), debug)
+                    "%s %.0f deg" % (label, angle), tool, runstamp, debug)
             except Exception:
                 flush_pending_rows()
                 raise
@@ -3203,23 +3213,25 @@ class EddyToolCalibration:
         return [(label, first_length if index == 0 else self.scan_length)
                 for index, label in enumerate(labels)]
 
-    def _measure_rounds(self, gcmd, center_x, center_y, rounds, debug):
+    def _measure_rounds(self, gcmd, center_x, center_y, rounds, tool,
+                        runstamp, debug):
         agg = new_aggregate()
         for label, length in rounds:
             center_x, center_y, round_agg = self._measure_center(
-                gcmd, center_x, center_y, length, label, debug)
+                gcmd, center_x, center_y, length, label, tool, runstamp, debug)
             merge_aggregate(agg, round_agg)
             if debug:
                 gcmd.respond_info("\n".join(center_rows(
                     center_x, center_y, "%s center" % (label,))))
         return center_x, center_y, agg
 
-    def _measure_xy(self, gcmd, debug):
+    def _measure_xy(self, gcmd, tool, runstamp, debug):
         center_x, center_y = self.center if self.center else (
             self.coil_x, self.coil_y)
         return self._measure_rounds(
             gcmd, center_x, center_y,
-            self._scan_rounds(XY_MEASUREMENT_ROUNDS, self.scan_length), debug)
+            self._scan_rounds(XY_MEASUREMENT_ROUNDS, self.scan_length),
+            tool, runstamp, debug)
 
     def _measure_z_curve(self, gcmd, center_x, center_y):
         """Stepwise descent over the coil center, returning the Z curve.
@@ -3313,11 +3325,12 @@ class EddyToolCalibration:
     def cmd_EDDY_LOCATE(self, gcmd):
         self._ensure_homed(gcmd)
         debug = self._debug_flag(gcmd)
+        runstamp = log_timestamp()
         with self._retreating():
             refined_x, refined_y, agg = self._measure_rounds(
                 gcmd, self.coil_x, self.coil_y,
                 self._scan_rounds(LOCATE_ROUNDS, self.locate_scan_length),
-                debug)
+                None, runstamp, debug)
             self.center = (refined_x, refined_y)
             self._respond_measurement(
                 gcmd, new_center_rows(refined_x, refined_y), agg)
@@ -3372,10 +3385,11 @@ class EddyToolCalibration:
         self._preheat(
             gcmd, [(tool, self.calibration_temp) for tool in tools],
             'calibration_temp in the [%s] config section' % (self.name,))
+        runstamp = log_timestamp()
         for tool in tools:
-            self._anchor_tool(gcmd, tool, debug, multiple_tools)
+            self._anchor_tool(gcmd, tool, runstamp, debug, multiple_tools)
 
-    def _anchor_tool(self, gcmd, tool, debug, multiple_tools):
+    def _anchor_tool(self, gcmd, tool, runstamp, debug, multiple_tools):
         """Press the switch for one tool and store its Z reference."""
         travel_z = self._switch_travel_z()
         with self._retreating():
@@ -3392,7 +3406,8 @@ class EddyToolCalibration:
                     self.switch_x, self.switch_y, travel_z, self.z_speed)
             with self._phase(gcmd, tool, 'measurement', multiple_tools):
                 observed = self._observed_temperature(gcmd, tool)
-                center_x, center_y, agg = self._measure_xy(gcmd, debug)
+                center_x, center_y, agg = self._measure_xy(
+                    gcmd, tool, runstamp, debug)
                 curve, agg_z = self._measure_z_curve(gcmd, center_x, center_y)
         merge_aggregate(agg, agg_z)
         record = anchor_record(
@@ -3481,15 +3496,17 @@ class EddyToolCalibration:
                 needed.append(self.baseline['tool'])
             self._require_anchors(gcmd, needed)
             self._preheat_anchored(gcmd, tools)
+        runstamp = log_timestamp()
         summary = []
         for tool in tools:
-            summary.append(
-                self._calibrate_one_offset(gcmd, tool, debug, multiple_tools))
+            summary.append(self._calibrate_one_offset(
+                gcmd, tool, runstamp, debug, multiple_tools))
         if multiple_tools:
             with self._internal_errors(gcmd):
                 gcmd.respond_info("\n".join(fleet_summary_rows(summary)))
 
-    def _calibrate_one_offset(self, gcmd, tool, debug, multiple_tools):
+    def _calibrate_one_offset(self, gcmd, tool, runstamp, debug,
+                              multiple_tools):
         """Measure one tool's offsets, report them, and apply them.
 
         Returns the tool's entry for the fleet summary: its offsets, or None
@@ -3501,7 +3518,7 @@ class EddyToolCalibration:
                 self._mount_tool(gcmd, tool)
             with self._phase(gcmd, tool, 'measurement', multiple_tools):
                 result = self._run_tool_measurement(
-                    gcmd, tool, debug, self.calibrate_z,
+                    gcmd, tool, runstamp, debug, self.calibrate_z,
                     self._anchored_setpoint(gcmd, tool))
             self._publish_measurement(tool, result, is_baseline_run)
             offsets = self._offsets(tool, result, self.calibrate_z)
@@ -3625,13 +3642,15 @@ class EddyToolCalibration:
                 % (tool,))
             return None
 
-    def _run_tool_measurement(self, gcmd, tool, debug, include_z, setpoint):
+    def _run_tool_measurement(self, gcmd, tool, runstamp, debug, include_z,
+                              setpoint):
         """Measure one tool, recorded against the setpoint it was held at.
 
         setpoint is what the caller heated this tool to before the measurement
         started, and None when it heated nothing.
         """
-        center_x, center_y, agg = self._measure_xy(gcmd, debug)
+        center_x, center_y, agg = self._measure_xy(
+            gcmd, tool, runstamp, debug)
         curve = None
         z_crossing = None
         z_trigger = None
@@ -3766,6 +3785,7 @@ class EddyToolCalibration:
         # written fails in a second rather than after minutes of heating.
         log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
         self._study_preheat(gcmd, heating, tool)
+        runstamp = log_timestamp()
         by_cycle = dict((axis, []) for axis in axes)
         with self._retreating():
             # The first cycle measures whatever is mounted, so the tool is
@@ -3776,8 +3796,8 @@ class EddyToolCalibration:
             # toolchange starts from.
             with self._retreating():
                 measured = self._run_study_cycle(
-                    gcmd, tool, cycle, cycles, runs, include_z, setpoint,
-                    debug, state, docking_tool, log, fields)
+                    gcmd, tool, runstamp, cycle, cycles, runs, include_z,
+                    setpoint, debug, state, docking_tool, log, fields)
             for axis in axes:
                 by_cycle[axis].append(measured[axis])
         self._report_study(
@@ -3885,8 +3905,9 @@ class EddyToolCalibration:
             self._mount_tool(gcmd, docking_tool)
             self._mount_tool(gcmd, tool)
 
-    def _run_study_cycle(self, gcmd, tool, cycle, cycles, runs, include_z,
-                         setpoint, debug, state, docking_tool, log, fields):
+    def _run_study_cycle(self, gcmd, tool, runstamp, cycle, cycles, runs,
+                         include_z, setpoint, debug, state, docking_tool, log,
+                         fields):
         """One cycle: dock and remount the tool, then measure it runs times.
 
         fields pairs every axis with the result field it reads. Returns the
@@ -3901,7 +3922,7 @@ class EddyToolCalibration:
                 measurement_progress_row(cycle, cycles, run, runs))
             with self._study_step(gcmd, 'measurement', cycle, run, log):
                 result = self._run_tool_measurement(
-                    gcmd, tool, debug, include_z, setpoint)
+                    gcmd, tool, runstamp, debug, include_z, setpoint)
             offsets = self._offsets(tool, result, include_z)
             entry = self._log_entry('EDDY_REPEATABILITY', result, offsets)
             try:
