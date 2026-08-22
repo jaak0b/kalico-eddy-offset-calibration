@@ -3050,6 +3050,8 @@ class EddyToolCalibration:
             center_x, center_y, angle_deg, length)
         samples, stats = self._collect_scan(
             gcmd, start_x, start_y, end_x, end_y, scan_z)
+        if self.save_csv and samples:
+            self._save_csv(gcmd, label, tool, runstamp, samples, debug)
         self._report_sensor_health(gcmd, stats)
         if not samples:
             raise gcmd.error(
@@ -3060,8 +3062,6 @@ class EddyToolCalibration:
                 "The %s pass returned %d samples, below the configured "
                 "samples_min of %d. Lower scan_speed or raise scan_length."
                 % (label, len(samples), self.samples_min))
-        if self.save_csv:
-            self._save_csv(gcmd, label, tool, runstamp, samples, debug)
         xs = [s[2] for s in samples]
         ys = [s[3] for s in samples]
         freqs = [s[1] for s in samples]
