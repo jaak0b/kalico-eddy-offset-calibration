@@ -1671,24 +1671,18 @@ def history_filename(tool):
 
 
 def scan_dump_filename(label, tool, timestamp, existing):
-    """File name for a scan dump that cannot overwrite an earlier one.
-
-    existing holds the file names already in the directory. A name already
-    taken gets _1, _2 and so on appended before the extension.
-    """
     parts = ['eddy_scan']
     if tool is not None:
         parts.append('T%d' % (int(tool),))
     parts.append(label.replace(' ', '_'))
     parts.append(timestamp.replace(':', '-'))
     root = '_'.join(parts)
-    suffix = '.csv'
-    name = root + suffix
-    if name not in existing:
-        return name
-    prefix = root + '_'
-    return "%s%d%s" % (
-        prefix, next_numbered_index(existing, prefix, suffix), suffix)
+    name = root + '.csv'
+    n = 1
+    while name in existing:
+        name = '%s_%d.csv' % (root, n)
+        n += 1
+    return name
 
 
 def next_study_filename(existing, tool):
