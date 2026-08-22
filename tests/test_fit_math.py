@@ -924,12 +924,58 @@ def test_the_sample_drop_rows_open_with_the_raw_count():
     ]
 
 
+# --- the rounds of one XY measurement ---------------------------------------
+
+
+def test_the_opening_round_is_the_coarse_one():
+    assert etc.round_label('measurement', 0) == 'measurement coarse'
+    assert etc.round_label('locate', 0) == 'locate coarse'
+
+
+def test_the_second_round_is_the_refine_one():
+    assert etc.round_label('measurement', 1) == 'measurement refine'
+    assert etc.round_label('locate', 1) == 'locate refine'
+
+
+def test_further_refine_rounds_are_numbered_from_two():
+    assert etc.round_label('measurement', 2) == 'measurement refine 2'
+    assert etc.round_label('measurement', 3) == 'measurement refine 3'
+    assert etc.round_label('locate', 5) == 'locate refine 5'
+
+
+def test_rounds_that_agree_within_the_tolerance_have_converged():
+    assert etc.round_outcome(
+        (100.0, -40.0), (100.03, -40.02), 0.05, 2, 6) == 'converged'
+
+
+def test_rounds_exactly_the_tolerance_apart_have_converged():
+    assert etc.round_outcome(
+        (100.0, -40.0), (100.05, -40.0), 0.05, 2, 6) == 'converged'
+    assert etc.round_outcome(
+        (100.0, -40.0), (100.0, -39.95), 0.05, 2, 6) == 'converged'
+
+
+def test_rounds_that_disagree_continue_while_rounds_remain():
+    assert etc.round_outcome(
+        (100.0, -40.0), (100.06, -40.0), 0.05, 2, 6) == 'continue'
+    assert etc.round_outcome(
+        (100.0, -40.0), (100.04, -40.04), 0.05, 5, 6) == 'continue'
+
+
+def test_rounds_that_still_disagree_at_the_last_round_are_exhausted():
+    assert etc.round_outcome(
+        (100.0, -40.0), (100.06, -40.0), 0.05, 6, 6) == 'exhausted'
+    assert etc.round_outcome(
+        (100.0, -40.0), (100.0, -40.2), 0.05, 2, 2) == 'exhausted'
+
+
 # --- what a command aggregates over its collections ------------------------
 
 
 def test_a_fresh_aggregate_has_counted_nothing():
     assert etc.new_aggregate() == {
         'samples_used': 0,
+        'rounds': 0,
         'dropped_low_freq': 0,
         'dropped_no_position': 0,
         'dropped_outside_move': 0,
@@ -946,6 +992,7 @@ def test_an_aggregate_takes_the_kept_count_and_the_drops_of_a_collection():
 
     assert agg == {
         'samples_used': 120,
+        'rounds': 0,
         'dropped_low_freq': 4,
         'dropped_no_position': 0,
         'dropped_outside_move': 1,
@@ -965,6 +1012,7 @@ def test_a_second_collection_adds_to_the_counts_of_the_first():
 
     assert agg == {
         'samples_used': 200,
+        'rounds': 0,
         'dropped_low_freq': 10,
         'dropped_no_position': 2,
         'dropped_outside_move': 0,
@@ -975,6 +1023,7 @@ def test_merging_two_aggregates_sums_every_counter():
     # The XY rounds and the descent of one measurement report as one figure.
     planar = etc.new_aggregate()
     planar['samples_used'] = 6916
+    planar['rounds'] = 3
     planar['dropped_outside_move'] = 3
     descent = etc.new_aggregate()
     descent['samples_used'] = 1250
@@ -984,6 +1033,7 @@ def test_merging_two_aggregates_sums_every_counter():
 
     assert planar == {
         'samples_used': 8166,
+        'rounds': 3,
         'dropped_low_freq': 5,
         'dropped_no_position': 0,
         'dropped_outside_move': 3,
@@ -993,17 +1043,20 @@ def test_merging_two_aggregates_sums_every_counter():
 def test_an_aggregate_that_dropped_nothing_shows_only_the_sample_count():
     agg = etc.new_aggregate()
     agg['samples_used'] = 6916
+    agg['rounds'] = 2
 
-    assert etc.aggregate_rows(agg) == ["samples used: 6916"]
+    assert etc.aggregate_rows(agg) == ["samples used: 6916", "rounds: 2"]
 
 
 def test_an_aggregate_that_dropped_a_sample_lists_every_drop_reason():
     agg = etc.new_aggregate()
     agg['samples_used'] = 6916
+    agg['rounds'] = 4
     agg['dropped_no_position'] = 3
 
     assert etc.aggregate_rows(agg) == [
         "samples used: 6916",
+        "rounds: 4",
         "dropped below freq_min: 0",
         "dropped without a position: 3",
         "dropped outside the move: 0",

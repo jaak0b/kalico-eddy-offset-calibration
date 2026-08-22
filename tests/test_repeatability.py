@@ -459,14 +459,14 @@ def test_the_drift_log_header_lists_every_column_in_file_order():
     assert etc.csv_header(etc.HISTORY_COLUMNS) == (
         "timestamp,command,center_x,center_y,offset_x,offset_y,z_crossing,"
         "trigger_z,offset_z,baseline_session,setpoint_temperature,"
-        "observed_temperature,samples_used\n")
+        "observed_temperature,samples_used,rounds\n")
 
 
 def test_a_study_file_carries_the_cycle_and_run_in_front_of_the_measurement():
     assert etc.csv_header(etc.STUDY_COLUMNS) == (
         "cycle,run,timestamp,command,center_x,center_y,offset_x,offset_y,"
         "z_crossing,trigger_z,offset_z,baseline_session,setpoint_temperature,"
-        "observed_temperature,samples_used\n")
+        "observed_temperature,samples_used,rounds\n")
 
 
 def test_a_log_row_writes_each_value_at_the_precision_it_is_reported_at():
@@ -484,11 +484,12 @@ def test_a_log_row_writes_each_value_at_the_precision_it_is_reported_at():
         'setpoint_temperature': 150.0,
         'observed_temperature': 151.84,
         'samples_used': 6916,
+        'rounds': 2,
     })
 
     assert row == (
         "2026-08-01T12:00:00Z,EDDY_CALIBRATE_OFFSET,99.0577,-40.5779,0.0224,"
-        "-0.2598,1.2346,2.3457,0.0157,3,150.0,151.8,6916\n")
+        "-0.2598,1.2346,2.3457,0.0157,3,150.0,151.8,6916,2\n")
 
 
 def test_a_value_that_was_not_measured_is_written_as_an_empty_field():
@@ -506,11 +507,12 @@ def test_a_value_that_was_not_measured_is_written_as_an_empty_field():
         'setpoint_temperature': None,
         'observed_temperature': None,
         'samples_used': 3458,
+        'rounds': 3,
     })
 
     assert row == (
         "2026-08-01T12:00:00Z,EDDY_REPEATABILITY,99.0577,-40.5779,,,,,,,,,"
-        "3458\n")
+        "3458,3\n")
 
 
 def test_a_study_of_an_unheated_tool_still_records_the_reading_it_measured():
@@ -530,11 +532,12 @@ def test_a_study_of_an_unheated_tool_still_records_the_reading_it_measured():
         'setpoint_temperature': None,
         'observed_temperature': 24.6,
         'samples_used': 3458,
+        'rounds': 2,
     })
 
     assert row == (
         "2026-08-01T12:00:00Z,EDDY_REPEATABILITY,99.0577,-40.5779,,,,,,,,24.6,"
-        "3458\n")
+        "3458,2\n")
 
 
 def test_a_log_row_missing_a_column_is_rejected():
@@ -553,6 +556,7 @@ def test_a_log_row_missing_a_column_is_rejected():
             'baseline_session': None,
             'observed_temperature': 149.7,
             'samples_used': 10,
+            'rounds': 2,
         })
 
 

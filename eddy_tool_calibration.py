@@ -1409,7 +1409,7 @@ def new_aggregate():
     Every field an aggregate carries is created here, because
     add_to_aggregate and merge_aggregate read them without a default.
     """
-    agg = {'samples_used': 0}
+    agg = {'samples_used': 0, 'rounds': 0}
     agg.update((field, 0) for field, _label in SAMPLE_DROP_FIELDS)
     return agg
 
@@ -1426,8 +1426,9 @@ def merge_aggregate(agg, other):
 
 
 def aggregate_rows(agg):
-    """Labeled summary rows: total samples used, and drops if any."""
-    rows = ["samples used: %d" % (agg['samples_used'],)]
+    """Labeled summary rows: total samples used, rounds, and drops if any."""
+    rows = ["samples used: %d" % (agg['samples_used'],),
+            "rounds: %d" % (agg['rounds'],)]
     if any_dropped(agg):
         rows.extend(drop_count_rows(agg))
     return rows
@@ -1557,6 +1558,7 @@ HISTORY_COLUMNS = (
     ('setpoint_temperature', '%.1f'),
     ('observed_temperature', '%.1f'),
     ('samples_used', '%d'),
+    ('rounds', '%d'),
 )
 
 STUDY_COLUMNS = (('cycle', '%d'), ('run', '%d')) + HISTORY_COLUMNS
@@ -2036,14 +2038,33 @@ def default_scan_length(coil_inner_diameter):
 # configured coil position, which is much larger than the coil itself.
 LOCATE_SCAN_LENGTH_FACTOR = 3.0
 
-# The scan rounds one XY measurement runs, in order, and the label each one
-# reports under.
-XY_MEASUREMENT_ROUNDS = ('measurement coarse', 'measurement refine')
+# The prefix the rounds of one XY measurement report under, and the prefix
+# EDDY_LOCATE's rounds report under. Its opening round covers
+# locate_scan_length rather than scan_length, so its rounds carry labels of
+# their own.
+XY_MEASUREMENT_LABEL = 'measurement'
+LOCATE_LABEL = 'locate'
 
-# The scan rounds EDDY_LOCATE runs, in order, and the label each one reports
-# under. Its opening round covers locate_scan_length rather than scan_length,
-# so these rounds carry labels of their own.
-LOCATE_ROUNDS = ('locate coarse', 'locate refine')
+ROUND_OUTCOMES = ('continue', 'converged', 'exhausted')
+
+
+def round_label(prefix, index):
+    if index == 0:
+        return "%s coarse" % (prefix,)
+    if index == 1:
+        return "%s refine" % (prefix,)
+    return "%s refine %d" % (prefix, index)
+
+
+def round_outcome(previous_center, center, tolerance, rounds_used,
+                  max_rounds):
+    distance = math.hypot(center[0] - previous_center[0],
+                          center[1] - previous_center[1])
+    if distance <= tolerance:
+        return 'converged'
+    if rounds_used < max_rounds:
+        return 'continue'
+    return 'exhausted'
 
 
 class EddyToolCalibration:
@@ -2133,6 +2154,9 @@ class EddyToolCalibration:
             'edge_margin', 0.15, above=0.0, below=0.5)
         self.freq_min = config.getfloat(
             'freq_min', FREQ_MIN_DEFAULT, minval=0.0)
+        self.center_tolerance = config.getfloat(
+            'center_tolerance', 0.05, above=0.0)
+        self.max_rounds = config.getint('max_rounds', 6, minval=2)
 
         self._reject_removed_options(config)
 
@@ -3118,6 +3142,7 @@ class EddyToolCalibration:
             setpoint_temperature=result['setpoint_temperature'],
             observed_temperature=result['observed_temperature'],
             samples_used=result['agg']['samples_used'],
+            rounds=result['agg']['rounds'],
         )
 
     def _append_history(self, gcmd, tool, entry, completed):
@@ -3211,33 +3236,57 @@ class EddyToolCalibration:
                 % (e,))
         return center_x, center_y, agg
 
-    def _scan_rounds(self, labels, first_length):
-        """Pair every round of a measurement with the length its passes cover.
+    def _measure_rounds(self, gcmd, center_x, center_y, prefix, first_length,
+                        tool, runstamp, debug):
+        """Scan rounds until two consecutive refine rounds agree.
 
         Only the opening round covers first_length: it is the one that has to
         bracket the uncertainty in the center estimate it starts from.
         """
-        return [(label, first_length if index == 0 else self.scan_length)
-                for index, label in enumerate(labels)]
-
-    def _measure_rounds(self, gcmd, center_x, center_y, rounds, tool,
-                        runstamp, debug):
         agg = new_aggregate()
-        for label, length in rounds:
+        centers = []
+        while True:
+            index = len(centers)
+            label = round_label(prefix, index)
             center_x, center_y, round_agg = self._measure_center(
-                gcmd, center_x, center_y, length, label, tool, runstamp, debug)
+                gcmd, center_x, center_y,
+                first_length if index == 0 else self.scan_length,
+                label, tool, runstamp, debug)
             merge_aggregate(agg, round_agg)
+            agg['rounds'] += 1
+            centers.append((label, center_x, center_y))
             if debug:
                 gcmd.respond_info("\n".join(center_rows(
                     center_x, center_y, "%s center" % (label,))))
-        return center_x, center_y, agg
+            if index == 0:
+                continue
+            outcome = round_outcome(
+                centers[-2][1:], centers[-1][1:], self.center_tolerance,
+                agg['rounds'], self.max_rounds)
+            if outcome == 'continue':
+                continue
+            if outcome == 'converged':
+                return center_x, center_y, agg
+            if outcome == 'exhausted':
+                rows = []
+                for round_name, x, y in centers:
+                    rows.extend(center_rows(x, y, "%s center" % (round_name,)))
+                raise gcmd.error(
+                    "The center did not settle: the last two rounds still "
+                    "disagree by more than center_tolerance (%.4f mm) after "
+                    "max_rounds (%d) rounds.\n%s\nCheck that nothing moves "
+                    "the toolhead or the bed between passes, then raise "
+                    "center_tolerance or max_rounds in the [%s] config "
+                    "section if the spread is acceptable."
+                    % (self.center_tolerance, self.max_rounds,
+                       "\n".join(rows), self.name))
+            raise unhandled_member('round outcome', outcome, ROUND_OUTCOMES)
 
     def _measure_xy(self, gcmd, tool, runstamp, debug):
         center_x, center_y = self.center if self.center else (
             self.coil_x, self.coil_y)
         return self._measure_rounds(
-            gcmd, center_x, center_y,
-            self._scan_rounds(XY_MEASUREMENT_ROUNDS, self.scan_length),
+            gcmd, center_x, center_y, XY_MEASUREMENT_LABEL, self.scan_length,
             tool, runstamp, debug)
 
     def _measure_z_curve(self, gcmd, center_x, center_y):
@@ -3335,9 +3384,8 @@ class EddyToolCalibration:
         runstamp = log_timestamp()
         with self._retreating():
             refined_x, refined_y, agg = self._measure_rounds(
-                gcmd, self.coil_x, self.coil_y,
-                self._scan_rounds(LOCATE_ROUNDS, self.locate_scan_length),
-                None, runstamp, debug)
+                gcmd, self.coil_x, self.coil_y, LOCATE_LABEL,
+                self.locate_scan_length, None, runstamp, debug)
             self.center = (refined_x, refined_y)
             self._respond_measurement(
                 gcmd, new_center_rows(refined_x, refined_y), agg)
