@@ -762,21 +762,41 @@ def test_a_tools_drift_log_is_named_after_the_tool():
 
 def test_a_scan_dump_is_named_after_its_tool_pass_and_run():
     assert (etc.scan_dump_filename(
-        "coarse 45 deg", 2, "2026-08-21T12:34:56Z")
+        "coarse 45 deg", 2, "2026-08-21T12:34:56Z", [])
         == "eddy_scan_T2_coarse_45_deg_2026-08-21T12-34-56Z.csv")
 
 
 def test_a_dump_without_a_tool_skips_the_tool_segment():
     assert (etc.scan_dump_filename(
-        "coarse 45 deg", None, "2026-08-21T12:34:56Z")
+        "coarse 45 deg", None, "2026-08-21T12:34:56Z", [])
         == "eddy_scan_coarse_45_deg_2026-08-21T12-34-56Z.csv")
 
 
 def test_the_timestamp_colons_become_hyphens_in_the_file_name():
-    name = etc.scan_dump_filename("fine 0 deg", 0, "2026-01-02T03:04:05Z")
+    name = etc.scan_dump_filename(
+        "fine 0 deg", 0, "2026-01-02T03:04:05Z", [])
 
     assert ":" not in name
     assert name == "eddy_scan_T0_fine_0_deg_2026-01-02T03-04-05Z.csv"
+
+
+def test_a_dump_whose_name_is_taken_gets_a_numbered_suffix():
+    existing = ["eddy_scan_T0_coarse_225_deg_2026-08-21T23-34-32Z.csv"]
+
+    assert (etc.scan_dump_filename(
+        "coarse 225 deg", 0, "2026-08-21T23:34:32Z", existing)
+        == "eddy_scan_T0_coarse_225_deg_2026-08-21T23-34-32Z_1.csv")
+
+
+def test_a_dump_whose_numbered_name_is_taken_too_takes_the_next_number():
+    existing = [
+        "eddy_scan_T0_coarse_225_deg_2026-08-21T23-34-32Z.csv",
+        "eddy_scan_T0_coarse_225_deg_2026-08-21T23-34-32Z_1.csv",
+    ]
+
+    assert (etc.scan_dump_filename(
+        "coarse 225 deg", 0, "2026-08-21T23:34:32Z", existing)
+        == "eddy_scan_T0_coarse_225_deg_2026-08-21T23-34-32Z_2.csv")
 
 
 def test_the_first_study_of_a_tool_takes_the_first_index():

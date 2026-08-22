@@ -1670,13 +1670,25 @@ def history_filename(tool):
     return "history_T%d.csv" % (int(tool),)
 
 
-def scan_dump_filename(label, tool, timestamp):
+def scan_dump_filename(label, tool, timestamp, existing):
+    """File name for a scan dump that cannot overwrite an earlier one.
+
+    existing holds the file names already in the directory. A name already
+    taken gets _1, _2 and so on appended before the extension.
+    """
     parts = ['eddy_scan']
     if tool is not None:
         parts.append('T%d' % (int(tool),))
     parts.append(label.replace(' ', '_'))
     parts.append(timestamp.replace(':', '-'))
-    return '_'.join(parts) + '.csv'
+    root = '_'.join(parts)
+    suffix = '.csv'
+    name = root + suffix
+    if name not in existing:
+        return name
+    prefix = root + '_'
+    return "%s%d%s" % (
+        prefix, next_numbered_index(existing, prefix, suffix), suffix)
 
 
 def next_study_filename(existing, tool):
@@ -3075,10 +3087,11 @@ class EddyToolCalibration:
 
     def _save_csv(self, gcmd, label, tool, runstamp, samples, debug):
         directory = self._data_dir()
-        path = os.path.join(
-            directory, scan_dump_filename(label, tool, runstamp))
+        path = None
         try:
             os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, scan_dump_filename(
+                label, tool, runstamp, os.listdir(directory)))
             with open(path, 'w') as f:
                 f.write("print_time,frequency,x,y\n")
                 for print_time, freq, x, y in samples:
@@ -3087,7 +3100,7 @@ class EddyToolCalibration:
             raise gcmd.error(
                 "Could not write the scan data to %s (directory %s): %s. "
                 "Set save_csv to False or fix the directory permissions."
-                % (path, directory, e))
+                % (path or directory, directory, e))
         if debug:
             gcmd.respond_info("scan data: %s" % (path,))
 
