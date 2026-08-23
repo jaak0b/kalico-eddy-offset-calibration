@@ -1428,7 +1428,7 @@ def merge_aggregate(agg, other):
 def aggregate_rows(agg):
     """Labeled summary rows: total samples used, rounds, and drops if any."""
     rows = ["samples used: %d" % (agg['samples_used'],),
-            "rounds: %d" % (agg['rounds'],)]
+            "XY rounds: %d" % (agg['rounds'],)]
     if any_dropped(agg):
         rows.extend(drop_count_rows(agg))
     return rows
@@ -1562,6 +1562,15 @@ HISTORY_COLUMNS = (
 )
 
 STUDY_COLUMNS = (('cycle', '%d'), ('run', '%d')) + HISTORY_COLUMNS
+
+
+def unmeasured_log_entry(command):
+    """A log row for a run that produced no measurement: every measured
+    field empty, so the run is on record without reading as measured.
+    """
+    entry = dict((name, None) for name, _format in HISTORY_COLUMNS)
+    entry.update(timestamp=log_timestamp(), command=command)
+    return entry
 
 
 def offset_fields(offsets):
@@ -1835,32 +1844,27 @@ def repeatability_statistics(cycles):
     (repeatability), and the cycle means differ by the measurement plus
     whatever the docking between cycles adds (reproducibility).
 
-    cycles is a list of one list of values per cycle, every cycle holding the
-    same number of runs. Returns a dict holding the grand mean, the pooled
-    within-cycle standard deviation, the standard deviation of the cycle
-    means, the docking component that follows from the two, the range and the
-    largest deviation from the grand mean.
+    cycles is a list of one list of values per cycle. A cycle that measured
+    nothing is left out, and the cycles need not hold the same number of
+    runs: a run that failed leaves its cycle one value short. Returns a dict
+    holding the grand mean, the pooled within-cycle standard deviation, the
+    standard deviation of the cycle means, the docking component that follows
+    from the two, the range and the largest deviation from the grand mean.
 
     The docking component is the between-cycle variance component of that
-    decomposition: the observed variance of the cycle means carries the
-    measurement's own variance divided by the number of runs, so that share
-    is subtracted. The manual's convention when the subtraction leaves nothing
-    is followed here: the component is reported as zero and flagged as
-    unresolved, never as a negative variance.
+    decomposition, in the form for cycles of unequal size (Searle, Casella
+    and McCulloch, Variance Components, 1992, chapter 3, the unbalanced
+    one-way classification): the between-cycle mean square carries the
+    measurement's own variance times the effective runs per cycle n0, so that
+    share is subtracted and the rest is divided by n0. With equal cycles n0
+    is the number of runs and the form is the manual's. The manual's
+    convention when the subtraction leaves nothing is followed here: the
+    component is reported as zero and flagged as unresolved, never as a
+    negative variance.
     """
     if not cycles:
         raise ValueError("a repeatability study needs at least one cycle")
-    run_count = len(cycles[0])
-    if run_count < 2:
-        raise ValueError(
-            "a repeatability study needs at least 2 runs per cycle, got %d"
-            % (run_count,))
     for index, runs in enumerate(cycles):
-        if len(runs) != run_count:
-            raise ValueError(
-                "cycle %d holds %d runs and cycle 1 holds %d, and the "
-                "decomposition needs the same number of runs in every cycle"
-                % (index + 1, len(runs), run_count))
         # A value that is not finite passes every ordered comparison the
         # summary makes and comes back out as a confident zero spread beside a
         # plausible range, so it is refused here.
@@ -1869,27 +1873,38 @@ def repeatability_statistics(cycles):
                 raise ValueError(
                     "cycle %d run %d measured %r, which is not a finite "
                     "number" % (index + 1, run_index + 1, value))
+    cycles = [runs for runs in cycles if runs]
     cycle_count = len(cycles)
     values = [value for runs in cycles for value in runs]
+    within_dof = len(values) - cycle_count
+    if within_dof < 1:
+        raise ValueError(
+            "a repeatability study needs at least 2 runs in one cycle to "
+            "measure the spread, and no cycle holds more than 1")
     grand_mean = sum(values) / len(values)
-    cycle_means = [sum(runs) / run_count for runs in cycles]
+    cycle_means = [sum(runs) / len(runs) for runs in cycles]
     within_ss = sum((value - mean) ** 2
                     for runs, mean in zip(cycles, cycle_means)
                     for value in runs)
-    within_variance = within_ss / (cycle_count * (run_count - 1))
+    within_variance = within_ss / within_dof
     mean_spread = None
     between = None
     between_resolved = None
     if cycle_count > 1:
-        mean_variance = (sum((mean - grand_mean) ** 2 for mean in cycle_means)
-                         / (cycle_count - 1))
-        mean_spread = math.sqrt(mean_variance)
-        component = mean_variance - within_variance / run_count
+        mean_spread = math.sqrt(
+            sum((mean - sum(cycle_means) / cycle_count) ** 2
+                for mean in cycle_means) / (cycle_count - 1))
+        between_ms = (sum(len(runs) * (mean - grand_mean) ** 2
+                          for runs, mean in zip(cycles, cycle_means))
+                      / (cycle_count - 1))
+        effective_runs = ((len(values) - sum(len(runs) ** 2 for runs in cycles)
+                           / float(len(values))) / (cycle_count - 1))
+        component = (between_ms - within_variance) / effective_runs
         between_resolved = component > 0.0
         between = math.sqrt(component) if between_resolved else 0.0
     return {
         'cycle_count': cycle_count,
-        'run_count': run_count,
+        'value_count': len(values),
         'mean': grand_mean,
         'within': math.sqrt(within_variance),
         'cycle_mean_spread': mean_spread,
@@ -1936,15 +1951,16 @@ def worst_deviation_row(label, stats):
             % (label, stats['max_deviation']))
 
 
-def repeatability_summary_rows(tool, runs, cycles, state, docking_tool,
-                               include_z, axes, stats_by_axis,
+def repeatability_summary_rows(tool, runs, cycles, not_settled, state,
+                               docking_tool, include_z, axes, stats_by_axis,
                                step_distances, path):
     rows = [
         "repeatability summary:",
         tool_row(tool),
         "runs per cycle: %d" % (runs,),
         "cycles: %d" % (cycles,),
-        "measurements: %d" % (runs * cycles,),
+        "measurements: %d" % (stats_by_axis[axes[0]]['value_count'],),
+        "runs that did not settle: %d" % (not_settled,),
         "z descent: %s" % ("included" if include_z else "skipped",),
         docking_row(state, docking_tool, cycles),
         "",
@@ -2051,9 +2067,14 @@ ROUND_OUTCOMES = ('continue', 'converged', 'exhausted')
 def round_label(prefix, index):
     if index == 0:
         return "%s coarse" % (prefix,)
-    if index == 1:
-        return "%s refine" % (prefix,)
-    return "%s refine %d" % (prefix, index)
+    return "%s refine %d" % (prefix, index + 1)
+
+
+class CenterNotSettled(Exception):
+    """Marker of the one round failure a repeatability study records and
+    continues past; the error a command raises derives from it and from
+    the gcode command error, so every other command still aborts on it.
+    """
 
 
 def round_outcome(previous_center, center, tolerance, rounds_used,
@@ -2072,6 +2093,9 @@ class EddyToolCalibration:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name()
+        self.center_not_settled = type(
+            'CenterNotSettledError',
+            (CenterNotSettled, self.printer.command_error), {})
 
         # Geometry. coil_x, coil_y and coil_z are machine coordinates.
         self.coil_x = config.getfloat('coil_x')
@@ -3074,18 +3098,29 @@ class EddyToolCalibration:
             center_x, center_y, angle_deg, length)
         samples, stats = self._collect_scan(
             gcmd, start_x, start_y, end_x, end_y, scan_z)
+        write_failure = None
         if self.save_csv and samples:
-            self._save_csv(gcmd, label, tool, runstamp, samples, debug)
-        self._report_sensor_health(gcmd, stats)
-        if not samples:
-            raise gcmd.error(
-                "The %s pass produced no usable samples. %s"
-                % (label, self._sample_diagnosis(stats, no_sample_cause)))
-        if len(samples) < self.samples_min:
-            raise gcmd.error(
-                "The %s pass returned %d samples, below the configured "
-                "samples_min of %d. Lower scan_speed or raise scan_length."
-                % (label, len(samples), self.samples_min))
+            try:
+                self._save_csv(gcmd, label, tool, runstamp, samples, debug)
+            except self.printer.command_error as e:
+                write_failure = e
+        try:
+            self._report_sensor_health(gcmd, stats)
+            if not samples:
+                raise gcmd.error(
+                    "The %s pass produced no usable samples. %s"
+                    % (label, self._sample_diagnosis(stats, no_sample_cause)))
+            if len(samples) < self.samples_min:
+                raise gcmd.error(
+                    "The %s pass returned %d samples, below the configured "
+                    "samples_min of %d. Lower scan_speed or raise scan_length."
+                    % (label, len(samples), self.samples_min))
+        except self.printer.command_error as e:
+            if write_failure is None:
+                raise
+            raise gcmd.error("%s %s" % (e, write_failure))
+        if write_failure is not None:
+            raise write_failure
         xs = [s[2] for s in samples]
         ys = [s[3] for s in samples]
         freqs = [s[1] for s in samples]
@@ -3178,33 +3213,32 @@ class EddyToolCalibration:
 
     # -- measurement ------------------------------------------------------
 
+    def _flush_pending_rows(self, gcmd, pending_rows, debug):
+        if debug:
+            return
+        for block in pending_rows:
+            gcmd.respond_info(block)
+
     def _measure_center(self, gcmd, center_x, center_y, length, label, tool,
-                        runstamp, debug):
+                        runstamp, debug, pending_rows):
         """One full multi-direction XY measurement around a center estimate.
 
-        With DEBUG=0 the per-pass diagnostic rows are held back and flushed
-        only if this measurement fails, so a failed pass still reports its
-        diagnostics in full.
+        With DEBUG=0 the per-pass diagnostic rows are held back in
+        pending_rows, which _measure_rounds owns across every round, and are
+        flushed on failure so all rounds up to the failing one still report
+        their diagnostics in full.
         """
         angles = expand_scan_angles(self.scan_angles, self.pair_scans)
         scan_z = self._machine_z(self.scan_height)
         peaks = []
         agg = new_aggregate()
-        pending_rows = []
-
-        def flush_pending_rows():
-            if debug:
-                return
-            for block in pending_rows:
-                gcmd.respond_info(block)
-
         for angle in angles:
             try:
                 result, stats = self._scan_pass(
                     gcmd, center_x, center_y, angle, length, scan_z,
                     "%s %.0f deg" % (label, angle), tool, runstamp, debug)
             except Exception:
-                flush_pending_rows()
+                self._flush_pending_rows(gcmd, pending_rows, debug)
                 raise
             rows = [
                 "pass angle: %.1f deg" % (angle,),
@@ -3229,7 +3263,7 @@ class EddyToolCalibration:
         try:
             center_x, center_y = solve_center_lsq(projections)
         except ValueError as e:
-            flush_pending_rows()
+            self._flush_pending_rows(gcmd, pending_rows, debug)
             raise gcmd.error(
                 "The scan directions did not reconstruct a center: %s. Set "
                 "scan_angles to two directions at least 30 degrees apart."
@@ -3238,20 +3272,21 @@ class EddyToolCalibration:
 
     def _measure_rounds(self, gcmd, center_x, center_y, prefix, first_length,
                         tool, runstamp, debug):
-        """Scan rounds until two consecutive refine rounds agree.
+        """Scan rounds until two consecutive rounds agree.
 
         Only the opening round covers first_length: it is the one that has to
         bracket the uncertainty in the center estimate it starts from.
         """
         agg = new_aggregate()
         centers = []
+        pending_rows = []
         while True:
             index = len(centers)
             label = round_label(prefix, index)
             center_x, center_y, round_agg = self._measure_center(
                 gcmd, center_x, center_y,
                 first_length if index == 0 else self.scan_length,
-                label, tool, runstamp, debug)
+                label, tool, runstamp, debug, pending_rows)
             merge_aggregate(agg, round_agg)
             agg['rounds'] += 1
             centers.append((label, center_x, center_y))
@@ -3271,7 +3306,8 @@ class EddyToolCalibration:
                 rows = []
                 for round_name, x, y in centers:
                     rows.extend(center_rows(x, y, "%s center" % (round_name,)))
-                raise gcmd.error(
+                self._flush_pending_rows(gcmd, pending_rows, debug)
+                raise self.center_not_settled(
                     "The center did not settle: the last two rounds still "
                     "disagree by more than center_tolerance (%.4f mm) after "
                     "max_rounds (%d) rounds.\n%s\nCheck that nothing moves "
@@ -3285,9 +3321,10 @@ class EddyToolCalibration:
     def _measure_xy(self, gcmd, tool, runstamp, debug):
         center_x, center_y = self.center if self.center else (
             self.coil_x, self.coil_y)
-        return self._measure_rounds(
-            gcmd, center_x, center_y, XY_MEASUREMENT_LABEL, self.scan_length,
-            tool, runstamp, debug)
+        with self._internal_errors(gcmd):
+            return self._measure_rounds(
+                gcmd, center_x, center_y, XY_MEASUREMENT_LABEL,
+                self.scan_length, tool, runstamp, debug)
 
     def _measure_z_curve(self, gcmd, center_x, center_y):
         """Stepwise descent over the coil center, returning the Z curve.
@@ -3383,9 +3420,10 @@ class EddyToolCalibration:
         debug = self._debug_flag(gcmd)
         runstamp = log_timestamp()
         with self._retreating():
-            refined_x, refined_y, agg = self._measure_rounds(
-                gcmd, self.coil_x, self.coil_y, LOCATE_LABEL,
-                self.locate_scan_length, None, runstamp, debug)
+            with self._internal_errors(gcmd):
+                refined_x, refined_y, agg = self._measure_rounds(
+                    gcmd, self.coil_x, self.coil_y, LOCATE_LABEL,
+                    self.locate_scan_length, None, runstamp, debug)
             self.center = (refined_x, refined_y)
             self._respond_measurement(
                 gcmd, new_center_rows(refined_x, refined_y), agg)
@@ -3838,7 +3876,8 @@ class EddyToolCalibration:
             fields = [(axis, study_axis_field(axis)) for axis in axes]
         # Resolved before anything is heated, so a directory that cannot be
         # written fails in a second rather than after minutes of heating.
-        log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0}
+        log = {'path': self._study_csv_path(gcmd, tool), 'rows': 0,
+               'not_settled': 0}
         self._study_preheat(gcmd, heating, tool)
         runstamp = log_timestamp()
         by_cycle = dict((axis, []) for axis in axes)
@@ -3856,8 +3895,8 @@ class EddyToolCalibration:
             for axis in axes:
                 by_cycle[axis].append(measured[axis])
         self._report_study(
-            gcmd, tool, runs, cycles, include_z, state, docking_tool,
-            log['path'], axes, by_cycle)
+            gcmd, tool, runs, cycles, log['not_settled'], include_z, state,
+            docking_tool, log['path'], axes, by_cycle)
 
     def _heating_setpoint(self, gcmd, heating, tool):
         """The setpoint a study heats the tool to, or None when it does not."""
@@ -3934,22 +3973,35 @@ class EddyToolCalibration:
         """Name the cycle and the run a study failed in.
 
         run is None for the toolchange that opens a cycle, which belongs to the
-        cycle rather than to any one measurement. log carries the study file
-        and how many rows have reached it.
+        cycle rather than to any one measurement. log carries the study file,
+        how many rows have reached it and how many runs did not settle.
+
+        A run whose center did not settle is the one failure a study records
+        and continues past: it is counted in log, and the dict this yields
+        holds the error under not_settled, which is None when the step
+        completed. Every other error stops the study.
         """
         self._require_phase(gcmd, phase)
+        step = {'not_settled': None}
         try:
-            yield
+            yield step
         except self.printer.command_error as e:
             where = ("cycle %d" % (cycle,) if run is None
                      else "cycle %d run %d" % (cycle, run))
+            if isinstance(e, CenterNotSettled) and run is not None:
+                log['not_settled'] += 1
+                step['not_settled'] = e
+                gcmd.respond_raw(
+                    "!! Run %d of cycle %d is recorded as failed, and the "
+                    "study continues: %s" % (run, cycle, e))
+                return
             if not log['rows']:
                 raise gcmd.error(
-                    "The study stopped during %s of %s: %s. It had written no "
-                    "measurements yet." % (phase, where, e))
+                    "The study stopped during %s of %s: %s. It had recorded "
+                    "no runs yet." % (phase, where, e))
             raise gcmd.error(
-                "The study stopped during %s of %s: %s. The %d measurements "
-                "it already took are in %s."
+                "The study stopped during %s of %s: %s. The %d runs it "
+                "already recorded are in %s."
                 % (phase, where, e, log['rows'], log['path']))
 
     def _exercise_docking(self, gcmd, tool, cycle, state, docking_tool, log):
@@ -3975,26 +4027,18 @@ class EddyToolCalibration:
         for run in range(1, runs + 1):
             gcmd.respond_info(
                 measurement_progress_row(cycle, cycles, run, runs))
-            with self._study_step(gcmd, 'measurement', cycle, run, log):
+            with self._study_step(
+                    gcmd, 'measurement', cycle, run, log) as step:
                 result = self._run_tool_measurement(
                     gcmd, tool, runstamp, debug, include_z, setpoint)
+            if step['not_settled'] is not None:
+                self._append_study_row(
+                    gcmd, log, cycle, run,
+                    unmeasured_log_entry('EDDY_REPEATABILITY'))
+                continue
             offsets = self._offsets(tool, result, include_z)
             entry = self._log_entry('EDDY_REPEATABILITY', result, offsets)
-            try:
-                append_csv(
-                    log['path'], STUDY_COLUMNS,
-                    dict(entry, cycle=cycle, run=run))
-            except ValueError as e:
-                raise gcmd.error(
-                    "Cycle %d run %d is complete, and it could not be "
-                    "written: %s" % (cycle, run, e))
-            except OSError as e:
-                raise gcmd.error(
-                    "Cycle %d run %d is complete, and it could not be written "
-                    "to %s: %s. Fix the directory permissions, or point "
-                    "log_dir at a directory the printer host can write."
-                    % (cycle, run, log['path'], e))
-            log['rows'] += 1
+            self._append_study_row(gcmd, log, cycle, run, entry)
             self._append_history(
                 gcmd, tool, entry,
                 "Cycle %d run %d is complete and written to %s."
@@ -4003,8 +4047,24 @@ class EddyToolCalibration:
                 measured[axis].append(result[field])
         return measured
 
-    def _report_study(self, gcmd, tool, runs, cycles, include_z, state,
-                      docking_tool, path, axes, by_cycle):
+    def _append_study_row(self, gcmd, log, cycle, run, entry):
+        try:
+            append_csv(
+                log['path'], STUDY_COLUMNS, dict(entry, cycle=cycle, run=run))
+        except ValueError as e:
+            raise gcmd.error(
+                "Cycle %d run %d finished, and its row could not be "
+                "written: %s" % (cycle, run, e))
+        except OSError as e:
+            raise gcmd.error(
+                "Cycle %d run %d finished, and its row could not be written "
+                "to %s: %s. Fix the directory permissions, or point "
+                "log_dir at a directory the printer host can write."
+                % (cycle, run, log['path'], e))
+        log['rows'] += 1
+
+    def _report_study(self, gcmd, tool, runs, cycles, not_settled, include_z,
+                      state, docking_tool, path, axes, by_cycle):
         stats_by_axis = {}
         for axis in axes:
             try:
@@ -4015,8 +4075,8 @@ class EddyToolCalibration:
                     "measurements themselves are in %s." % (axis, e, path))
         with self._internal_errors(gcmd):
             rows = repeatability_summary_rows(
-                tool, runs, cycles, state, docking_tool, include_z, axes,
-                stats_by_axis, self._step_distances(), path)
+                tool, runs, cycles, not_settled, state, docking_tool,
+                include_z, axes, stats_by_axis, self._step_distances(), path)
         gcmd.respond_info("\n".join(rows))
 
     def get_status(self, eventtime):

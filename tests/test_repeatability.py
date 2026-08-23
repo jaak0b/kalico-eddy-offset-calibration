@@ -116,7 +116,7 @@ def test_the_study_reports_the_shape_it_was_run_in():
     stats = etc.repeatability_statistics(two_cycles_of_three_runs())
 
     assert stats['cycle_count'] == 2
-    assert stats['run_count'] == 3
+    assert stats['value_count'] == 6
 
 
 def test_cycle_means_no_further_apart_than_the_noise_resolve_no_docking():
@@ -151,14 +151,58 @@ def test_a_single_cycle_pools_its_own_runs_over_one_less_degree_of_freedom():
     assert stats['within'] == pytest.approx(0.2, abs=1e-12)
 
 
-def test_cycles_of_different_lengths_are_rejected():
-    with pytest.raises(ValueError, match="same number of runs"):
-        etc.repeatability_statistics([[10.0, 10.2], [10.6, 10.8, 11.0]])
+# A cycle short of one run, as a run that did not settle leaves it:
+#
+#   cycle 1: 10.0, 10.2, 10.4   mean 10.2
+#   cycle 2: 10.6, 10.8         mean 10.7
+#
+# Five values, grand mean 52.0 / 5 = 10.4. Within-cycle sums of squares are
+# 0.08 and 0.02, pooled over 5 - 2 = 3 degrees of freedom: variance 0.1 / 3,
+# standard deviation sqrt(1 / 30) = 0.18257418583505536.
+#
+# The between-cycle mean square weights each cycle mean by its runs:
+# (3 * 0.04 + 2 * 0.09) / 1 = 0.30. The effective runs per cycle are
+# (5 - (9 + 4) / 5) / 1 = 2.4, so the docking component is
+# (0.30 - 0.1 / 3) / 2.4 = 0.1111..., whose square root is 0.3333333333333333.
+# The cycle means themselves, 10.2 and 10.7, have a standard deviation of
+# sqrt(0.125) = 0.3535533905932738.
+
+
+def test_a_cycle_short_of_one_run_pools_over_one_less_degree_of_freedom():
+    stats = etc.repeatability_statistics([[10.0, 10.2, 10.4], [10.6, 10.8]])
+
+    assert stats['value_count'] == 5
+    assert stats['mean'] == pytest.approx(10.4, abs=1e-12)
+    assert stats['within'] == pytest.approx(0.18257418583505536, abs=1e-12)
+
+
+def test_a_cycle_short_of_one_run_weights_its_mean_by_its_runs():
+    stats = etc.repeatability_statistics([[10.0, 10.2, 10.4], [10.6, 10.8]])
+
+    assert stats['cycle_mean_spread'] == pytest.approx(
+        0.3535533905932738, abs=1e-12)
+    assert stats['between'] == pytest.approx(0.3333333333333333, abs=1e-12)
+    assert stats['between_resolved'] is True
+
+
+def test_a_cycle_that_measured_nothing_is_left_out():
+    # With the empty cycle left out this is the two-cycle table above.
+    stats = etc.repeatability_statistics(
+        [[10.0, 10.2, 10.4], [], [10.6, 10.8, 11.0]])
+
+    assert stats['cycle_count'] == 2
+    assert stats['between_dof'] == 1
+    assert stats['within'] == pytest.approx(0.2, abs=1e-12)
 
 
 def test_a_study_of_one_run_per_cycle_is_rejected():
     with pytest.raises(ValueError, match="at least 2 runs"):
         etc.repeatability_statistics([[10.0], [10.6]])
+
+
+def test_a_study_whose_runs_all_failed_is_rejected():
+    with pytest.raises(ValueError, match="at least 2 runs"):
+        etc.repeatability_statistics([[], []])
 
 
 def test_a_study_with_no_cycles_is_rejected():
@@ -231,7 +275,7 @@ def test_the_summary_lists_settings_then_a_blank_line_then_the_figures():
         'x': {
             'within': 0.0057, 'cycle_mean_spread': 0.005, 'between': 0.00001,
             'between_resolved': True, 'between_dof': 2,
-            'max_deviation': 0.0121,
+            'max_deviation': 0.0121, 'value_count': 14,
         },
         'y': {
             'within': 0.0046, 'cycle_mean_spread': 0.005, 'between': 0.0031,
@@ -241,7 +285,7 @@ def test_the_summary_lists_settings_then_a_blank_line_then_the_figures():
     }
 
     rows = etc.repeatability_summary_rows(
-        0, 5, 3, 'through_tool', 1, False, ['x', 'y'], stats,
+        0, 5, 3, 1, 'through_tool', 1, False, ['x', 'y'], stats,
         [('stepper_x', 0.0125), ('stepper_y', 0.0125)],
         '/log_dir/repeatability_T0_001.csv')
 
@@ -250,7 +294,8 @@ def test_the_summary_lists_settings_then_a_blank_line_then_the_figures():
         "tool: T0",
         "runs per cycle: 5",
         "cycles: 3",
-        "measurements: 15",
+        "measurements: 14",
+        "runs that did not settle: 1",
         "z descent: skipped",
         "docking between cycles: each cycle mounts T1 and remounts the "
         "measured tool",
@@ -271,6 +316,7 @@ def test_the_summary_gives_z_the_same_three_rows_as_x_and_y_in_position():
     stats = {
         'x': {
             'within': 0.01, 'cycle_mean_spread': None, 'max_deviation': 0.02,
+            'value_count': 3,
         },
         'y': {
             'within': 0.01, 'cycle_mean_spread': None, 'max_deviation': 0.02,
@@ -281,7 +327,7 @@ def test_the_summary_gives_z_the_same_three_rows_as_x_and_y_in_position():
     }
 
     rows = etc.repeatability_summary_rows(
-        0, 3, 1, 'no_other_tool', None, True, ['x', 'y', 'z'], stats, [],
+        0, 3, 1, 0, 'no_other_tool', None, True, ['x', 'y', 'z'], stats, [],
         '/log_dir/repeatability_T0_002.csv')
 
     assert rows == [
@@ -290,6 +336,7 @@ def test_the_summary_gives_z_the_same_three_rows_as_x_and_y_in_position():
         "runs per cycle: 3",
         "cycles: 1",
         "measurements: 3",
+        "runs that did not settle: 0",
         "z descent: included",
         "docking between cycles: not exercised, tool_count names no second "
         "tool to dock through",
@@ -563,6 +610,15 @@ def test_a_log_row_missing_a_column_is_rejected():
 def test_a_log_row_carrying_a_field_the_layout_has_no_column_for_is_rejected():
     with pytest.raises(ValueError, match="unknown field centre_x"):
         etc.csv_row((('center_x', '%.4f'),), {'centre_x': 1.0})
+
+
+def test_an_unmeasured_study_row_carries_only_cycle_run_and_command():
+    entry = dict(
+        etc.unmeasured_log_entry('EDDY_REPEATABILITY'),
+        cycle=1, run=2, timestamp='2026-08-01T12:00:00Z')
+
+    assert etc.csv_row(etc.STUDY_COLUMNS, entry) == (
+        "1,2,2026-08-01T12:00:00Z,EDDY_REPEATABILITY,,,,,,,,,,,,\n")
 
 
 # --- log timestamps --------------------------------------------------------

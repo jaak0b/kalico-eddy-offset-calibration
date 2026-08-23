@@ -226,6 +226,8 @@ BASELINE = {'tool': 0, 'x': 100.0, 'y': -40.0, 'z_curve': None,
 
 
 def _measured(x, y, z_trigger, session_id=4):
+    agg = etc.new_aggregate()
+    agg['samples_used'] = 6916
     return {
         'x': x,
         'y': y,
@@ -234,7 +236,7 @@ def _measured(x, y, z_trigger, session_id=4):
         'z_trigger': z_trigger,
         'setpoint_temperature': 150.0,
         'observed_temperature': 149.7,
-        'agg': {'samples_used': 6916},
+        'agg': agg,
         'session_id': session_id,
         'measured_time': 1234.5,
     }

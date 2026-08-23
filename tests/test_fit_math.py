@@ -932,15 +932,16 @@ def test_the_opening_round_is_the_coarse_one():
     assert etc.round_label('locate', 0) == 'locate coarse'
 
 
-def test_the_second_round_is_the_refine_one():
-    assert etc.round_label('measurement', 1) == 'measurement refine'
-    assert etc.round_label('locate', 1) == 'locate refine'
+def test_the_second_round_is_refine_2():
+    assert etc.round_label('measurement', 1) == 'measurement refine 2'
+    assert etc.round_label('locate', 1) == 'locate refine 2'
 
 
-def test_further_refine_rounds_are_numbered_from_two():
-    assert etc.round_label('measurement', 2) == 'measurement refine 2'
-    assert etc.round_label('measurement', 3) == 'measurement refine 3'
-    assert etc.round_label('locate', 5) == 'locate refine 5'
+def test_further_refine_rounds_carry_their_round_number():
+    # The third round (index 2) is round 3, so max_rounds: 6 ends at refine 6.
+    assert etc.round_label('measurement', 2) == 'measurement refine 3'
+    assert etc.round_label('measurement', 3) == 'measurement refine 4'
+    assert etc.round_label('locate', 5) == 'locate refine 6'
 
 
 def test_rounds_that_agree_within_the_tolerance_have_converged():
@@ -949,10 +950,12 @@ def test_rounds_that_agree_within_the_tolerance_have_converged():
 
 
 def test_rounds_exactly_the_tolerance_apart_have_converged():
+    # A 3-4-5 triangle: hypot(0.03, 0.04) is exactly 0.05 in binary
+    # floating point, so the comparison is made at the tolerance itself.
     assert etc.round_outcome(
-        (100.0, -40.0), (100.05, -40.0), 0.05, 2, 6) == 'converged'
+        (0.0, 0.0), (0.03, 0.04), 0.05, 2, 6) == 'converged'
     assert etc.round_outcome(
-        (100.0, -40.0), (100.0, -39.95), 0.05, 2, 6) == 'converged'
+        (0.0, 0.0), (-0.04, 0.03), 0.05, 2, 6) == 'converged'
 
 
 def test_rounds_that_disagree_continue_while_rounds_remain():
@@ -1045,7 +1048,7 @@ def test_an_aggregate_that_dropped_nothing_shows_only_the_sample_count():
     agg['samples_used'] = 6916
     agg['rounds'] = 2
 
-    assert etc.aggregate_rows(agg) == ["samples used: 6916", "rounds: 2"]
+    assert etc.aggregate_rows(agg) == ["samples used: 6916", "XY rounds: 2"]
 
 
 def test_an_aggregate_that_dropped_a_sample_lists_every_drop_reason():
@@ -1056,7 +1059,7 @@ def test_an_aggregate_that_dropped_a_sample_lists_every_drop_reason():
 
     assert etc.aggregate_rows(agg) == [
         "samples used: 6916",
-        "rounds: 4",
+        "XY rounds: 4",
         "dropped below freq_min: 0",
         "dropped without a position: 3",
         "dropped outside the move: 0",
