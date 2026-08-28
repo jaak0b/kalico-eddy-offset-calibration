@@ -713,9 +713,6 @@ def preheat_plan_rows(entries, band, settle_time):
         % (float(band),))
     rows.append(
         "settle time after reaching the band: %.1f s" % (float(settle_time),))
-    rows.append(
-        "The command waits for every listed tool to read inside its band, "
-        "including a tool that has to cool into it.")
     return rows
 
 
