@@ -275,6 +275,14 @@ switch_probe_z_start:
 #   Maximum distance between the fitted peak and the peak sample, as a
 #   fraction of the fit window. A fit landing beyond it is reported as
 #   failed rather than pulled back into range. The default is 0.5.
+#center_tolerance: 0.05
+#   Distance (in mm) two consecutive rounds of an XY measurement may
+#   differ by before the measurement stops and reports the last round's
+#   center. Rounds that differ by more are followed by another refine
+#   round. Must be greater than 0. The default is 0.05mm.
+#max_rounds: 6
+#   Most scan rounds, counting the coarse round, one XY measurement runs
+#   before it is reported as not settled. At least 2. The default is 6.
 ```
 
 ### Logging

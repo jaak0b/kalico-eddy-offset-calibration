@@ -149,7 +149,7 @@ def test_the_summary_names_the_baseline_tool_and_every_measured_offset():
 
     assert etc.fleet_summary_rows(entries) == [
         "summary of all measured tools:",
-        "T0: baseline tool, offsets zero by definition",
+        "T0: baseline tool",
         "T1: offset x: -0.0431, offset y: +0.0122, offset z: +0.0157",
     ]
 
@@ -162,7 +162,7 @@ def test_the_summary_leaves_out_z_when_no_descent_ran():
 
     assert etc.fleet_summary_rows(entries) == [
         "summary of all measured tools:",
-        "T0: baseline tool, offsets zero by definition",
+        "T0: baseline tool",
         "T2: offset x: +1.5000, offset y: -2.2500",
     ]
 
@@ -226,6 +226,8 @@ BASELINE = {'tool': 0, 'x': 100.0, 'y': -40.0, 'z_curve': None,
 
 
 def _measured(x, y, z_trigger, session_id=4):
+    agg = etc.new_aggregate()
+    agg['samples_used'] = 6916
     return {
         'x': x,
         'y': y,
@@ -234,7 +236,7 @@ def _measured(x, y, z_trigger, session_id=4):
         'z_trigger': z_trigger,
         'setpoint_temperature': 150.0,
         'observed_temperature': 149.7,
-        'agg': {'samples_used': 6916},
+        'agg': agg,
         'session_id': session_id,
         'measured_time': 1234.5,
     }

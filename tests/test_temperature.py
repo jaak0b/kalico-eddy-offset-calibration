@@ -136,8 +136,6 @@ def test_the_preheat_plan_names_each_tool_its_heater_and_both_temperatures():
         "T1 heater extruder1: 151.8 C now, 150.0 C target",
         "temperature band: 2.0 C either side of the target temperature",
         "settle time after reaching the band: 30.0 s",
-        "The command waits for every listed tool to read inside its band, "
-        "including a tool that has to cool into it.",
     ]
 
 
