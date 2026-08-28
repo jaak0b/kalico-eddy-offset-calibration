@@ -240,8 +240,7 @@ def test_an_unresolved_docking_component_says_so_beside_the_zero():
     }
 
     assert etc.docking_spread_row('y', stats) == (
-        "y docking spread: 0.0000 mm (1 degrees of freedom), the cycle "
-        "means differ by no more than the measurement itself")
+        "y docking spread: 0.0000 mm (1 degrees of freedom)")
 
 
 def test_a_study_whose_measurements_never_varied_says_exactly_that():

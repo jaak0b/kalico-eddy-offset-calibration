@@ -1938,8 +1938,7 @@ def docking_spread_row(label, stats):
         return ("%s docking spread: 0.0000 mm (%d degrees of freedom), the "
                 "measurements did not vary at all"
                 % (label, stats['between_dof']))
-    return ("%s docking spread: 0.0000 mm (%d degrees of freedom), the "
-            "cycle means differ by no more than the measurement itself"
+    return ("%s docking spread: 0.0000 mm (%d degrees of freedom)"
             % (label, stats['between_dof']))
 
 
