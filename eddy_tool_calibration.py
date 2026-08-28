@@ -1262,7 +1262,7 @@ def fleet_summary_rows(entries):
         offsets = entry['offsets']
         if offsets is None:
             rows.append(
-                "T%d: baseline tool, offsets zero by definition" % (tool,))
+                "T%d: baseline tool" % (tool,))
             continue
         rows.append("T%d: %s" % (tool, ", ".join(offset_rows(offsets))))
     return rows
