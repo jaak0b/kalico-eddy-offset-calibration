@@ -196,6 +196,28 @@ Numbered for unambiguous reference; do not cite rule numbers in shipped source o
     or how wrong the current text looks. A factual error found in the README is reported in
     chat with suggested text; the owner decides what, if anything, changes.
 
+17. **What you must produce for anything you call a bug.** Every bug claim (in a code review,
+    audit, or verification report) carries three things. A claim missing any of them is not a
+    bug, and belongs in a secondary observations list or nowhere.
+
+    1. **A reproduction with the real actors.** Say who does what, in order, in the words of
+       the product: "the user runs EDDY_CALIBRATE_OFFSET with T1 docked, then the scan pass
+       aborts". Never a sentence that begins "if a caller passes".
+    2. **A failing test you actually ran.** Write it, run it narrowly (a single pytest file or
+       node, never the whole suite), and quote the real failure output. If you cannot make the
+       current code fail, say so and drop the claim. A defect nobody can express as a failing
+       test is a defect nobody meets.
+    3. **What the user loses, and whether they can tell.** Name the consequence: work or data
+       destroyed, an offset silently wrong that looks right, a step that cannot be retried,
+       time lost to a command that refuses without a reason. "Wrong according to the code" is
+       not a consequence.
+
+    Proof tests: reviewers may create test files, only under `tests/`, only to prove a finding.
+    **Delete every test file you created before you report**, and end the report with the
+    output of `git status --short` so the owner can see the working tree carries only the
+    intended change. A reviewer never edits production code, and never edits or deletes a test
+    that was already there.
+
 **Verification bar.** `python -m pytest tests/` green before any feature is declared finished.
 Final acceptance for measurement-facing changes is a run on the owner's real printer (Eddy Coil
 dev unit or crab board), verified by the owner, per the validation ladder in `docs/design.md`

@@ -84,8 +84,7 @@ coil_z:
 #   provided.
 coil_inner_diameter:
 #   Bore (in mm) of the sensing coil. Must be greater than 0. It sets the
-#   default fit_window_radius and scan_length. This parameter must be
-#   provided.
+#   default scan_length. This parameter must be provided.
 ```
 
 ### Toolchanger
@@ -262,19 +261,21 @@ switch_probe_z_start:
 #   noise readings. The default is 1000000.0.
 #edge_margin: 0.15
 #   Fraction of each pass treated as its edge, above 0 and below 0.5. The
-#   edges are left out of the search for the peak, and are used to tell
-#   whether the pass peaks up or down. The default is 0.15.
-#fit_window_radius:
-#   Half width (in mm) of the sample window either side of the peak that
-#   the curve is fitted to. The default is half of coil_inner_diameter.
-#fit_sigma_fraction: 0.5
-#   Standard deviation of the fit's weighting, as a fraction of the fit
-#   window. It makes samples near the peak count for more than samples at
-#   the window's edge. The default is 0.5.
-#fit_vertex_limit: 0.5
-#   Maximum distance between the fitted peak and the peak sample, as a
-#   fraction of the fit window. A fit landing beyond it is reported as
-#   failed rather than pulled back into range. The default is 0.5.
+#   edges are left out of the search for the point the pass is centered
+#   on. The default is 0.15.
+#smoothing_samples: 5
+#   Width (in samples) of the moving average applied to each pass before
+#   it is fitted. At least 1, which leaves the pass unsmoothed. The
+#   default is 5.
+#signal_span_ratio_min: 10.0
+#   Minimum ratio between the frequency span of a pass and its own noise
+#   level. A pass below it is reported as failed rather than fitted. The
+#   default is 10.0.
+#correlation_quality_min: 0.8
+#   Minimum correlation quality of a pass, between 0.0 and 1.0, where 1.0
+#   means the two halves of the pass mirror each other exactly. A pass
+#   below it is reported as failed rather than fitted. The default is
+#   0.8.
 #center_tolerance: 0.05
 #   Distance (in mm) two consecutive rounds of an XY measurement may
 #   differ by before the measurement stops and reports the last round's

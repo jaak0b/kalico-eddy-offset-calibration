@@ -5,10 +5,9 @@ built from, or a value hand-calculated once outside the test with its
 derivation cited beside the literal. No expectation is computed by the
 production code.
 
-Fixture geometry used by the response-curve tests: 401 samples spanning
-x = 0.00 to 4.00 mm at a 0.01 mm sample spacing, y held at 0, a bell-shaped
-response of width 0.3 mm, and a fit window of 100 samples either side with a
-Gaussian weight sigma of 50 samples.
+Fixture geometry used by the scan-pass tests: 401 samples spanning
+x = 0.00 to 4.00 mm at a 0.01 mm sample spacing, y held at 0, and profile
+features of width 0.3 mm.
 """
 
 import math
@@ -23,96 +22,192 @@ import eddy_tool_calibration as etc
 SAMPLE_STEP = 0.01
 SAMPLE_COUNT = 401
 RESPONSE_WIDTH = 0.3
-HALF_WINDOW = 100
-SIGMA = 50.0
 EDGE_MARGIN = 0.15
 VERTEX_LIMIT = 0.5
+SMOOTH_WINDOW = 5
+SPAN_RATIO_MIN = 10.0
+QUALITY_MIN = 0.8
 
 
-def build_response(center, amplitude, baseline, noise=0.0, seed=0):
-    """Synthetic bell response centered on a known position (the oracle)."""
+def fit_pass(xs, ys, freqs):
+    return etc.fit_scan_pass(
+        xs, ys, freqs, EDGE_MARGIN, SMOOTH_WINDOW, SPAN_RATIO_MIN,
+        QUALITY_MIN)
+
+
+def build_pass(shape, noise=0.0, seed=0):
+    """Synthetic scan pass whose frequency at each x is shape(x), plus
+    optional reproducible Gaussian noise."""
     rng = random.Random(seed)
     xs = [i * SAMPLE_STEP for i in range(SAMPLE_COUNT)]
     ys = [0.0] * SAMPLE_COUNT
     freqs = []
     for x in xs:
-        gap = x - center
-        value = baseline + amplitude * math.exp(
-            -(gap * gap) / (2.0 * RESPONSE_WIDTH * RESPONSE_WIDTH))
+        value = shape(x)
         if noise:
             value += rng.gauss(0.0, noise)
         freqs.append(value)
     return xs, ys, freqs
 
 
+def bell(center, amplitude, baseline):
+    """A single bell, mirror-symmetric about the seeded center."""
+    def shape(x):
+        gap = x - center
+        return baseline + amplitude * math.exp(
+            -(gap * gap) / (2.0 * RESPONSE_WIDTH * RESPONSE_WIDTH))
+    return shape
+
+
+def two_humps(center, amplitude, baseline):
+    """Two equal bells 0.5 mm either side of the seeded center with a dip
+    between them, the shape a wide coil shows at a low scan height."""
+    left = bell(center - 0.5, amplitude, 0.0)
+    right = bell(center + 0.5, amplitude, 0.0)
+    def shape(x):
+        return baseline + left(x) + right(x)
+    return shape
+
+
+def flat_top(center, amplitude, baseline):
+    """A plateau, flat within 0.7 mm of the seeded center with 0.3 mm linear
+    ramps down to the baseline on both sides."""
+    def shape(x):
+        rise = 1.0 - max(0.0, abs(x - center) - 0.7) / 0.3
+        return baseline + amplitude * min(1.0, max(0.0, rise))
+    return shape
+
+
+def build_response(center, amplitude, baseline, noise=0.0, seed=0):
+    """Synthetic bell pass centered on a known position (the oracle)."""
+    return build_pass(bell(center, amplitude, baseline), noise, seed)
+
+
 # --- seed recovery ---------------------------------------------------------
 
 
 def test_recovers_the_center_of_a_noiseless_peak():
-    # Arrange: response peaking at exactly x = 2.375 mm.
+    # Arrange: a bell peaking at exactly x = 2.375 mm, half a sample spacing
+    # off any sample, the worst case for discretization.
     xs, ys, freqs = build_response(2.375, 50000.0, 10000000.0)
 
     # Act
-    result = etc.fit_scan_pass(
-        xs, ys, freqs, HALF_WINDOW, SIGMA, EDGE_MARGIN, VERTEX_LIMIT)
+    result = fit_pass(xs, ys, freqs)
 
-    # Assert: 2.375 mm is the seed the fixture was generated from. It sits
-    # exactly between two samples, the worst case for discretization, so the
+    # Assert: 2.375 mm is the seed the fixture was generated from; the
     # tolerance is one fifth of the 0.01 mm sample spacing.
-    assert result['peak_type'] == 'peak'
     assert result['peak_x'] == pytest.approx(2.375, abs=0.002)
 
 
+def test_recovers_the_center_of_a_noiseless_peak_on_a_sample_point():
+    # Arrange: the same bell seeded exactly on the sample at x = 2.370 mm.
+    xs, ys, freqs = build_response(2.370, 50000.0, 10000000.0)
+
+    # Act
+    result = fit_pass(xs, ys, freqs)
+
+    # Assert: seed center 2.370, tolerance as above.
+    assert result['peak_x'] == pytest.approx(2.370, abs=0.002)
+
+
 def test_recovers_the_center_of_a_noiseless_valley():
-    # Arrange: same seed center, response inverted into a valley.
+    # Arrange: the seed center with the bell inverted into a valley. The
+    # analytic expectation is the same seed: the pass mirrors about its
+    # deepest point exactly as it would about its highest, so the fit must
+    # return 2.375 mm whichever way the amplitude points.
     xs, ys, freqs = build_response(2.375, -50000.0, 10000000.0)
 
     # Act
-    result = etc.fit_scan_pass(
-        xs, ys, freqs, HALF_WINDOW, SIGMA, EDGE_MARGIN, VERTEX_LIMIT)
+    result = fit_pass(xs, ys, freqs)
 
     # Assert: seed center 2.375, tolerance as above.
-    assert result['peak_type'] == 'valley'
+    assert result['peak_x'] == pytest.approx(2.375, abs=0.002)
+
+
+def test_recovers_the_center_of_two_equal_humps_with_a_dip():
+    # Arrange: two equal humps 0.5 mm either side of the seeded center
+    # 2.375 mm, so the strongest reading sits on a hump 0.5 mm away from the
+    # true center and only the mirror match can recover the seed.
+    xs, ys, freqs = build_pass(two_humps(2.375, 50000.0, 10000000.0))
+
+    # Act
+    result = fit_pass(xs, ys, freqs)
+
+    # Assert: seed center 2.375, tolerance as in the single-bell case.
+    assert result['peak_x'] == pytest.approx(2.375, abs=0.002)
+
+
+def test_recovers_the_center_of_two_equal_humps_on_a_sample_point():
+    # Arrange: the same two-hump shape seeded on the sample at x = 2.370 mm.
+    xs, ys, freqs = build_pass(two_humps(2.370, 50000.0, 10000000.0))
+
+    # Act
+    result = fit_pass(xs, ys, freqs)
+
+    # Assert
+    assert result['peak_x'] == pytest.approx(2.370, abs=0.002)
+
+
+def test_recovers_the_center_of_a_flat_topped_profile():
+    # Arrange: a plateau, flat within 0.7 mm of the seeded center 2.375 mm,
+    # so no single sample marks the center at all.
+    xs, ys, freqs = build_pass(flat_top(2.375, 50000.0, 10000000.0))
+
+    # Act
+    result = fit_pass(xs, ys, freqs)
+
+    # Assert
     assert result['peak_x'] == pytest.approx(2.375, abs=0.002)
 
 
 def test_recovers_the_center_of_a_noisy_peak():
-    # Arrange: 50 Hz Gaussian sensor noise on a 50 kHz response, fixed seed.
+    # Arrange: 50 Hz Gaussian sensor noise on a 50 kHz bell, fixed seed.
     xs, ys, freqs = build_response(
         2.375, 50000.0, 10000000.0, noise=50.0, seed=1234)
 
     # Act
-    result = etc.fit_scan_pass(
-        xs, ys, freqs, HALF_WINDOW, SIGMA, EDGE_MARGIN, VERTEX_LIMIT)
+    result = fit_pass(xs, ys, freqs)
 
     # Assert: seed center 2.375. At a noise-to-amplitude ratio of 1:1000 the
     # tolerance is half the 0.01 mm sample spacing.
     assert result['peak_x'] == pytest.approx(2.375, abs=0.005)
 
 
-def test_recovers_the_center_of_a_noisy_valley():
-    # Arrange
-    xs, ys, freqs = build_response(
-        2.375, -50000.0, 10000000.0, noise=50.0, seed=1234)
+def test_recovers_the_center_of_noisy_humps():
+    # Arrange: the two-hump shape under the same 1:1000 noise.
+    xs, ys, freqs = build_pass(
+        two_humps(2.375, 50000.0, 10000000.0), noise=50.0, seed=1234)
 
     # Act
-    result = etc.fit_scan_pass(
-        xs, ys, freqs, HALF_WINDOW, SIGMA, EDGE_MARGIN, VERTEX_LIMIT)
+    result = fit_pass(xs, ys, freqs)
 
-    # Assert: seed center 2.375, tolerance as in the noisy peak case.
+    # Assert: seed center 2.375, tolerance as in the noisy bell case.
     assert result['peak_x'] == pytest.approx(2.375, abs=0.005)
 
 
+def test_recovers_the_center_of_a_noisy_flat_topped_profile():
+    # Arrange: the plateau under the same 1:1000 noise. The flat top leaves
+    # the mirror match only the two ramps to line up, so the tolerance is a
+    # full 0.01 mm sample spacing.
+    xs, ys, freqs = build_pass(
+        flat_top(2.375, 50000.0, 10000000.0), noise=50.0, seed=1234)
+
+    # Act
+    result = fit_pass(xs, ys, freqs)
+
+    # Assert
+    assert result['peak_x'] == pytest.approx(2.375, abs=0.01)
+
+
 def test_mirroring_the_response_reflects_the_recovered_center():
-    # Arrange: reversing the sample order mirrors the response about the
-    # midpoint of the 0.00 to 4.00 mm span, so a peak at 2.375 mm lands at
+    # Arrange: reversing the sample order mirrors the profile about the
+    # midpoint of the 0.00 to 4.00 mm span, so a bell at 2.375 mm lands at
     # 4.000 - 2.375 = 1.625 mm.
     xs, ys, freqs = build_response(2.375, 50000.0, 10000000.0)
     mirrored = list(reversed(freqs))
 
     # Act
-    result = etc.fit_scan_pass(
-        xs, ys, mirrored, HALF_WINDOW, SIGMA, EDGE_MARGIN, VERTEX_LIMIT)
+    result = fit_pass(xs, ys, mirrored)
 
     # Assert
     assert result['peak_x'] == pytest.approx(1.625, abs=0.002)
@@ -123,13 +218,12 @@ def test_mirroring_the_response_reflects_the_recovered_center():
        baseline=st.floats(min_value=1000000.0, max_value=50000000.0))
 def test_recovered_center_is_invariant_under_amplitude_and_offset(
         amplitude, baseline):
-    # Arrange: the same seed center under any response amplitude and any
+    # Arrange: the same seed center under any bell amplitude and any
     # constant frequency offset.
     xs, ys, freqs = build_response(2.375, amplitude, baseline)
 
     # Act
-    result = etc.fit_scan_pass(
-        xs, ys, freqs, HALF_WINDOW, SIGMA, EDGE_MARGIN, VERTEX_LIMIT)
+    result = fit_pass(xs, ys, freqs)
 
     # Assert: seed center 2.375, tolerance as in the noiseless case.
     assert result['peak_x'] == pytest.approx(2.375, abs=0.002)
@@ -140,52 +234,82 @@ def test_recovered_center_is_invariant_under_amplitude_and_offset(
 
 def test_rejects_a_pass_with_too_few_samples():
     with pytest.raises(ValueError, match="at least 3 samples"):
-        etc.fit_scan_pass(
-            [0.0, 0.1], [0.0, 0.0], [1.0, 2.0], HALF_WINDOW, SIGMA,
-            EDGE_MARGIN, VERTEX_LIMIT)
+        fit_pass([0.0, 0.1], [0.0, 0.0], [1.0, 2.0])
 
 
-def test_rejects_an_extremum_on_the_edge_of_the_search_window():
-    # Arrange: 100 samples, a 15% edge margin, so the search window starts at
-    # sample 15. The single high sample sits exactly there.
-    freqs = [0.0] * 100
-    freqs[15] = 1.0
+def test_rejects_a_pass_whose_signal_barely_clears_its_own_noise():
+    # Arrange: the field failure this gate exists for: a chord missing the
+    # coil, drifting 150 Hz across the pass under 40 Hz of sensor noise.
+    def drift(x):
+        return 10000000.0 + 150.0 * x / 4.0
+    xs, ys, freqs = build_pass(drift, noise=40.0, seed=99)
 
     # Act / Assert
-    with pytest.raises(ValueError, match="edge of the search window"):
-        etc.find_extremum_index(freqs, 'peak', EDGE_MARGIN)
+    with pytest.raises(ValueError, match="too flat"):
+        fit_pass(xs, ys, freqs)
+
+
+def test_a_healthy_pass_clears_the_signal_gate():
+    # Arrange: a 50 kHz bell under the same 40 Hz noise.
+    xs, ys, freqs = build_response(
+        2.375, 50000.0, 10000000.0, noise=40.0, seed=99)
+
+    # Act
+    result = fit_pass(xs, ys, freqs)
+
+    # Assert: the pass is accepted and recovers the seed center.
+    assert result['peak_x'] == pytest.approx(2.375, abs=0.005)
+
+
+def test_rejects_a_pass_whose_halves_do_not_mirror_each_other():
+    # Arrange: a pure ramp, the shape of a pass cut off before the coil.
+    # Reflecting a ramp reverses its slope everywhere, so no point on it can
+    # mirror the pass and the fit must refuse rather than return a
+    # confident center.
+    def ramp(x):
+        return 10000000.0 + 50000.0 * x / 4.0
+    xs, ys, freqs = build_pass(ramp, noise=50.0, seed=7)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="do not mirror"):
+        fit_pass(xs, ys, freqs)
+
+
+def test_rejects_a_flat_pass():
+    # Arrange: a constant reading, so neither side of any point carries a
+    # shape to match.
+    xs, ys, freqs = build_pass(lambda x: 12345.0)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="do not mirror"):
+        fit_pass(xs, ys, freqs)
 
 
 def test_rejects_a_fitted_vertex_outside_the_window():
     # Arrange: a downward parabola whose true vertex sits at sample 60, fitted
     # in a 10 sample window around sample 20. The vertex is 40 samples away,
     # past the 5 sample limit (10 * 0.5).
-    freqs = [-((i - 60.0) ** 2) for i in range(41)]
+    values = [-((i - 60.0) ** 2) for i in range(41)]
 
     # Act / Assert
     with pytest.raises(ValueError, match="past the"):
-        etc.fit_vertex_offset(freqs, 20, 10, 5.0, 'peak', VERTEX_LIMIT)
+        etc.fit_vertex_offset(values, 20, 10, 5.0, VERTEX_LIMIT)
 
 
-def test_rejects_a_fit_whose_curvature_contradicts_the_peak_type():
-    # Arrange: an upward parabola presented as a peak.
-    freqs = [(i - 20.0) ** 2 for i in range(41)]
+def test_rejects_a_fit_that_opens_upward():
+    # Arrange: an upward parabola, which holds no maximum to refine.
+    values = [(i - 20.0) ** 2 for i in range(41)]
 
     # Act / Assert
     with pytest.raises(ValueError, match="opens upward"):
-        etc.fit_vertex_offset(freqs, 20, 10, 5.0, 'peak', VERTEX_LIMIT)
-
-
-def test_rejects_an_unknown_peak_type():
-    with pytest.raises(ValueError, match="unhandled peak type"):
-        etc.find_extremum_index([1.0, 2.0, 1.0] * 40, 'plateau', EDGE_MARGIN)
+        etc.fit_vertex_offset(values, 20, 10, 5.0, VERTEX_LIMIT)
 
 
 def test_rejects_a_flat_fit_window():
-    freqs = [1000.0] * 41
+    values = [1000.0] * 41
 
     with pytest.raises(ValueError, match="no curvature"):
-        etc.fit_vertex_offset(freqs, 20, 10, 5.0, 'peak', VERTEX_LIMIT)
+        etc.fit_vertex_offset(values, 20, 10, 5.0, VERTEX_LIMIT)
 
 
 def test_recovers_the_vertex_when_the_fit_window_is_clipped_at_the_pass_start():
@@ -193,10 +317,10 @@ def test_recovers_the_vertex_when_the_fit_window_is_clipped_at_the_pass_start():
     # 6.4, fitted around sample 3 with a 10 sample half window. The window is
     # clipped by the start of the pass and so covers samples 0 to 13, which is
     # asymmetric about sample 3 (7 samples left of it are missing).
-    freqs = [-((i - 6.4) ** 2) for i in range(41)]
+    values = [-((i - 6.4) ** 2) for i in range(41)]
 
     # Act
-    offset = etc.fit_vertex_offset(freqs, 3, 10, 5.0, 'peak', VERTEX_LIMIT)
+    offset = etc.fit_vertex_offset(values, 3, 10, 5.0, VERTEX_LIMIT)
 
     # Assert: the seeded vertex sits 6.4 - 3 = 3.4 samples past the fit index.
     # The data is an exact quadratic, so a correct solve of the normal
@@ -209,24 +333,14 @@ def test_recovers_the_vertex_when_the_fit_window_is_clipped_at_the_pass_start():
 def test_recovers_the_vertex_when_the_fit_window_is_symmetric():
     # Arrange: the same exact parabola with its vertex seeded at sample 20.25,
     # fitted around sample 20 so the 10 sample half window is symmetric.
-    freqs = [-((i - 20.25) ** 2) for i in range(41)]
+    values = [-((i - 20.25) ** 2) for i in range(41)]
 
     # Act
-    offset = etc.fit_vertex_offset(freqs, 20, 10, 5.0, 'peak', VERTEX_LIMIT)
+    offset = etc.fit_vertex_offset(values, 20, 10, 5.0, VERTEX_LIMIT)
 
     # Assert: the seeded vertex sits 20.25 - 20 = 0.25 samples past the fit
     # index, recovered to floating-point round-off as above.
     assert offset == pytest.approx(0.25, abs=1e-12)
-
-
-def test_rejects_a_pass_with_no_response_contrast():
-    # Arrange: a flat pass, so the middle band and the edges read the same and
-    # the response has neither a peak nor a valley.
-    freqs = [12345.0] * 100
-
-    # Act / Assert
-    with pytest.raises(ValueError, match="no contrast"):
-        etc.detect_peak_type(freqs, EDGE_MARGIN)
 
 
 # --- weighted quadratic solve ----------------------------------------------
@@ -779,20 +893,6 @@ def test_shared_reference_recovers_a_seeded_height_shift_between_two_tools():
 def test_rejects_a_shared_reference_from_a_single_step():
     with pytest.raises(ValueError, match="at least 2 steps"):
         etc.z_curve_shared_reference([(1.0, 100.0)])
-
-
-# --- fit window sizing -----------------------------------------------------
-
-
-def test_fit_half_window_covers_the_window_radius_in_samples():
-    # Arrange / Act: 250 samples per second at 5 mm/s gives 50 samples per mm,
-    # so a 1.0 mm window radius is 50 samples.
-    assert etc.fit_half_window_samples(250.0, 5.0, 1.0) == 50
-
-
-def test_rejects_a_scan_speed_of_zero_when_sizing_the_fit_window():
-    with pytest.raises(ValueError, match="scan speed"):
-        etc.fit_half_window_samples(250.0, 0.0, 1.0)
 
 
 # --- scan length sizing ----------------------------------------------------

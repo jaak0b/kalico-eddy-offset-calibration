@@ -38,12 +38,6 @@ import time
 # signal rather than trimming real data.
 FREQ_MIN_DEFAULT = 1000000.0
 
-# Provenance: upstream peak-type auto-detection compares the average of the
-# scan edges against the average of the middle band, taken as 35% to 65% of
-# the pass.
-PEAK_TYPE_CENTER_LOW_FRACTION = 0.35
-PEAK_TYPE_CENTER_HIGH_FRACTION = 0.65
-
 # Provenance: upstream treats the weighted normal equations as singular below
 # 1e-10 and a fitted quadratic term below 1e-10 as flat. Both are numerical
 # guards on a division, not tuning.
@@ -53,8 +47,6 @@ FIT_CURVATURE_EPSILON = 1e-10
 # Provenance: upstream treats the least-squares normal equations of the center
 # reconstruction as singular below 1e-12. Numerical guard on a division.
 LSQ_DET_EPSILON = 1e-12
-
-PEAK_TYPES = ('peak', 'valley')
 
 
 def unhandled_member(kind, value, members):
@@ -70,69 +62,6 @@ def is_batch_run(start_args):
     hardware answers and no sensor delivers data.
     """
     return start_args.get('debugoutput') is not None
-
-
-def detect_peak_type(freqs, edge_margin):
-    """Ported from upstream's auto-detection: the response is a peak when the
-    middle band of the pass reads higher than its two edges, a valley when it
-    reads lower. edge_margin is the fraction of the pass treated as edge.
-    """
-    n = len(freqs)
-    if n < 3:
-        raise ValueError(
-            "peak-type detection needs at least 3 samples, got %d" % (n,))
-    if not 0.0 < edge_margin < 0.5:
-        raise ValueError(
-            "edge margin must be between 0 and 0.5, got %r" % (edge_margin,))
-    edge_count = max(1, int(round(n * edge_margin)))
-    edge = list(freqs[:edge_count]) + list(freqs[n - edge_count:])
-    low = int(round(n * PEAK_TYPE_CENTER_LOW_FRACTION))
-    high = max(low + 1, int(round(n * PEAK_TYPE_CENTER_HIGH_FRACTION)))
-    center = list(freqs[low:high])
-    if not center:
-        raise ValueError(
-            "peak-type detection found no samples in the middle band of a "
-            "%d sample pass" % (n,))
-    edge_avg = sum(edge) / len(edge)
-    center_avg = sum(center) / len(center)
-    if center_avg > edge_avg:
-        return 'peak'
-    if center_avg < edge_avg:
-        return 'valley'
-    raise ValueError(
-        "the frequency readings show no contrast between the middle of the "
-        "pass and its edges, both average %.3f Hz, so the scan may not cross "
-        "the coil" % (edge_avg,))
-
-
-def find_extremum_index(freqs, peak_type, edge_margin):
-    n = len(freqs)
-    if n < 3:
-        raise ValueError(
-            "the peak search needs at least 3 samples, got %d" % (n,))
-    if not 0.0 < edge_margin < 0.5:
-        raise ValueError(
-            "edge margin must be between 0 and 0.5, got %r" % (edge_margin,))
-    margin = max(1, int(round(n * edge_margin)))
-    lo = margin
-    hi = n - margin
-    if hi - lo < 3:
-        raise ValueError(
-            "the peak search window holds %d samples after trimming %d edge "
-            "samples from a %d sample pass" % (max(0, hi - lo), margin, n))
-    window = list(freqs[lo:hi])
-    if peak_type == 'peak':
-        best = max(window)
-    elif peak_type == 'valley':
-        best = min(window)
-    else:
-        raise unhandled_member('peak type', peak_type, PEAK_TYPES)
-    best_idx = lo + window.index(best)
-    if best_idx == lo or best_idx == hi - 1:
-        raise ValueError(
-            "the strongest reading lies on the edge of the search window at "
-            "sample %d of %d" % (best_idx, n))
-    return best_idx
 
 
 def determinant_3x3(rows):
@@ -170,15 +99,15 @@ def solve_weighted_quadratic(w, wx, wx2, wx3, wx4, wy, wxy, wx2y):
         for column in range(3))
 
 
-def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
-                      vertex_limit):
+def fit_vertex_offset(values, peak_idx, half_window, sigma, vertex_limit):
     """Ported from upstream's _refine_peak_position: a Gaussian-weighted
-    quadratic least-squares fit. Returns the vertex position as a fractional
-    sample offset relative to peak_idx. Deliberate deviation from upstream,
-    which clamped a vertex that fell outside the window; a clamp turns a
-    failed fit into a plausible looking number, so this raises instead.
+    quadratic least-squares fit of a maximum. Returns the vertex position as
+    a fractional sample offset relative to peak_idx. Deliberate deviation
+    from upstream, which clamped a vertex that fell outside the window; a
+    clamp turns a failed fit into a plausible looking number, so this raises
+    instead.
     """
-    n = len(freqs)
+    n = len(values)
     if peak_idx < 0 or peak_idx >= n:
         raise ValueError(
             "fit index %d lies outside the %d sample pass" % (peak_idx, n))
@@ -188,9 +117,7 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
             % (half_window,))
     if sigma <= 0.0:
         raise ValueError(
-            "fit_sigma_fraction must be greater than 0, got %r" % (sigma,))
-    if peak_type not in PEAK_TYPES:
-        raise unhandled_member('peak type', peak_type, PEAK_TYPES)
+            "fit weight sigma must be greater than 0, got %r" % (sigma,))
     start_idx = max(0, peak_idx - half_window)
     end_idx = min(n, peak_idx + half_window + 1)
     if end_idx - start_idx < 3:
@@ -198,7 +125,7 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
             "only %d samples surround the peak, and the quadratic fit needs "
             "at least 3" % (end_idx - start_idx,))
     xs = [float(i - peak_idx) for i in range(start_idx, end_idx)]
-    ys = [float(freqs[i]) for i in range(start_idx, end_idx)]
+    ys = [float(values[i]) for i in range(start_idx, end_idx)]
     ws = [math.exp(-(x * x) / (2.0 * sigma * sigma)) for x in xs]
     w = sum(ws)
     wx = sum(wi * x for wi, x in zip(ws, xs))
@@ -213,14 +140,10 @@ def fit_vertex_offset(freqs, peak_idx, half_window, sigma, peak_type,
         raise ValueError(
             "quadratic fit is flat, the readings around the peak carry no "
             "curvature")
-    if peak_type == 'peak' and a > 0.0:
+    if a > 0.0:
         raise ValueError(
             "quadratic fit opens upward around a detected peak, so the "
             "samples around it do not hold the peak")
-    if peak_type == 'valley' and a < 0.0:
-        raise ValueError(
-            "quadratic fit opens downward around a detected valley, so the "
-            "samples around it do not hold the valley")
     x_peak = -b / (2.0 * a)
     max_offset = half_window * vertex_limit
     if abs(x_peak) > max_offset:
@@ -248,27 +171,235 @@ def interpolate_position(xs, ys, index):
     return x, y
 
 
-def fit_scan_pass(xs, ys, freqs, half_window, sigma, edge_margin,
-                  vertex_limit):
+def chord_positions(xs, ys):
+    """Distance of each sample along the pass, projected onto the straight
+    line from the first sample to the last. The scan move is a straight
+    line, so the projection is the sample's position along the pass whatever
+    small lateral jitter the kinematics add.
+    """
+    n = len(xs)
+    if n < 2 or len(ys) != n:
+        raise ValueError(
+            "chord projection needs at least 2 matching x and y samples, "
+            "got %d and %d" % (n, len(ys)))
+    dx = xs[-1] - xs[0]
+    dy = ys[-1] - ys[0]
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        raise ValueError(
+            "the pass did not move: its first and last samples sit at the "
+            "same position")
+    ux = dx / length
+    uy = dy / length
+    return [(x - xs[0]) * ux + (y - ys[0]) * uy for x, y in zip(xs, ys)]
+
+
+def resample_uniform(positions, values, count):
+    """Linear resampling of values onto count evenly spaced positions.
+
+    The sensor delivers samples at a fixed rate, so acceleration at the ends
+    of a pass spaces them unevenly along it; the mirror match below compares
+    samples pairwise by distance and needs even spacing.
+    """
+    n = len(positions)
+    if n < 2 or len(values) != n:
+        raise ValueError(
+            "resampling needs at least 2 matching positions and values, "
+            "got %d and %d" % (n, len(values)))
+    if count < 2:
+        raise ValueError(
+            "resampling needs at least 2 grid points, got %d" % (count,))
+    start = positions[0]
+    end = positions[-1]
+    if end <= start:
+        raise ValueError(
+            "the pass positions do not advance from the first sample to the "
+            "last")
+    step = (end - start) / (count - 1)
+    out = []
+    j = 0
+    for i in range(count):
+        target = start + i * step
+        while j < n - 2 and positions[j + 1] < target:
+            j += 1
+        p0 = positions[j]
+        p1 = positions[j + 1]
+        if p1 <= p0:
+            out.append(float(values[j]))
+            continue
+        t = min(max((target - p0) / (p1 - p0), 0.0), 1.0)
+        out.append(values[j] + t * (values[j + 1] - values[j]))
+    return out
+
+
+def smooth_profile(values, window):
+    """Centered moving average."""
+    n = len(values)
+    if n < 1:
+        raise ValueError("smoothing needs at least one value")
+    if window < 1:
+        raise ValueError(
+            "smoothing_samples must be at least 1, got %r" % (window,))
+    half = int(window) // 2
+    out = []
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        out.append(sum(values[lo:hi]) / (hi - lo))
+    return out
+
+
+def profile_signal_stats(values, smoothed):
+    """Signal span of the smoothed profile and the noise level of the raw
+    one, as (span, noise). The noise level is the standard deviation of the
+    raw profile around its smoothed form, which is what remains after the
+    shape the fit reads is taken out.
+    """
+    if len(values) != len(smoothed) or not values:
+        raise ValueError(
+            "signal statistics need matching raw and smoothed profiles, "
+            "got %d and %d values" % (len(values), len(smoothed)))
+    low, high, _std = spread(smoothed)
+    residuals = [v - s for v, s in zip(values, smoothed)]
+    _rlow, _rhigh, noise = spread(residuals)
+    return high - low, noise
+
+
+def check_pass_signal(span, noise, span_ratio_min):
+    """A pass whose frequency readings barely rise above their own noise
+    carries no usable shape, and a fit run on it locks onto noise.
+    """
+    if noise <= 0.0:
+        return
+    if span < span_ratio_min * noise:
+        raise ValueError(
+            "the signal over the coil is too flat: the readings span %.1f Hz "
+            "against a noise level of %.1f Hz, below signal_span_ratio_min "
+            "(%.1f) times the noise. Raise scan_height or shorten "
+            "scan_length so the pass stays over the coil" % (
+                span, noise, span_ratio_min))
+
+
+def mirror_correlation(values, center_idx):
+    """Normalized cross-correlation between the samples on either side of
+    center_idx, each side read outward from it (standard matched-filter
+    detection of an even signal: the profile is correlated against its own
+    reflection). Reads 1.0 when the two sides mirror each other exactly.
+    """
+    n = len(values)
+    if center_idx < 1 or center_idx > n - 2:
+        raise ValueError(
+            "mirror index %d leaves no samples on one side of a %d sample "
+            "pass" % (center_idx, n))
+    half = min(center_idx, n - 1 - center_idx)
+    left = [values[center_idx - d] for d in range(1, half + 1)]
+    right = [values[center_idx + d] for d in range(1, half + 1)]
+    mean_left = sum(left) / half
+    mean_right = sum(right) / half
+    num = sum((a - mean_left) * (b - mean_right)
+              for a, b in zip(left, right))
+    den_left = sum((a - mean_left) ** 2 for a in left)
+    den_right = sum((b - mean_right) ** 2 for b in right)
+    if den_left <= 0.0 or den_right <= 0.0:
+        # A side with no variation carries no shape to match, so the
+        # correlation there is defined as no match rather than left to a
+        # division by zero.
+        return 0.0
+    return num / math.sqrt(den_left * den_right)
+
+
+def mirror_correlation_profile(values, edge_margin):
+    """Correlation of the pass against its own reflection at every interior
+    sample, as (first candidate index, correlations). edge_margin is the
+    fraction of the pass excluded at each end, where too few samples remain
+    on the short side for the comparison to mean anything.
+    """
+    n = len(values)
+    if not 0.0 < edge_margin < 0.5:
+        raise ValueError(
+            "edge margin must be between 0 and 0.5, got %r" % (edge_margin,))
+    margin = max(3, int(round(n * edge_margin)))
+    lo = margin
+    hi = n - margin
+    if hi - lo < 3:
+        raise ValueError(
+            "the mirror search window holds %d samples after trimming %d "
+            "edge samples from a %d sample pass" % (max(0, hi - lo),
+                                                    margin, n))
+    return lo, [mirror_correlation(values, c) for c in range(lo, hi)]
+
+
+def check_mirror_quality(quality, quality_min):
+    if quality < quality_min:
+        raise ValueError(
+            "the two halves of the pass do not mirror each other: the "
+            "correlation quality is %.3f, below correlation_quality_min "
+            "%.3f. The pass may be cut short or not centered on the coil; "
+            "shorten scan_length or raise scan_height" % (
+                quality, quality_min))
+
+
+# Standard three-point parabolic interpolation of a sampled maximum: the
+# parabola through the strongest sample and its two neighbors is an exact
+# interpolation, its vertex lies within half a sample of the strongest one
+# by construction, and its weights cancel out of the vertex, so all three
+# fit parameters are fixed by the method rather than tunable.
+MIRROR_REFINE_HALF_WINDOW = 1
+MIRROR_REFINE_SIGMA = 1.0
+MIRROR_VERTEX_LIMIT = 0.5
+
+
+def fit_mirror_point(values, edge_margin, quality_min):
+    """The point the pass mirrors about, as (fractional sample index,
+    correlation quality). The correlation maximum is refined to sub-sample
+    precision by the same parabolic vertex fit that upstream's peak
+    refinement uses, applied to the correlation readings around the maximum.
+    """
+    lo, correlations = mirror_correlation_profile(values, edge_margin)
+    best = max(correlations)
+    best_local = correlations.index(best)
+    check_mirror_quality(best, quality_min)
+    if best_local == 0 or best_local == len(correlations) - 1:
+        raise ValueError(
+            "the best mirror match lies on the edge of the search window at "
+            "sample %d of %d" % (lo + best_local, len(values)))
+    offset = fit_vertex_offset(
+        correlations, best_local, MIRROR_REFINE_HALF_WINDOW,
+        MIRROR_REFINE_SIGMA, MIRROR_VERTEX_LIMIT)
+    return lo + best_local + offset, best
+
+
+def fit_scan_pass(xs, ys, freqs, edge_margin, smooth_window, span_ratio_min,
+                  quality_min):
     """Fit one directional scan pass, returning a dict with peak_x, peak_y,
-    peak_type, extremum_index, vertex_offset and sample_count.
+    mirror_index, signal_span, noise_level, correlation_quality and
+    sample_count.
     """
     n = len(freqs)
     if len(xs) != n or len(ys) != n:
         raise ValueError(
             "scan pass has %d frequency samples but %d x and %d y positions"
             % (n, len(xs), len(ys)))
-    peak_type = detect_peak_type(freqs, edge_margin)
-    peak_idx = find_extremum_index(freqs, peak_type, edge_margin)
-    offset = fit_vertex_offset(
-        freqs, peak_idx, half_window, sigma, peak_type, vertex_limit)
-    peak_x, peak_y = interpolate_position(xs, ys, peak_idx + offset)
+    if n < 3:
+        raise ValueError(
+            "the mirror search needs at least 3 samples, got %d" % (n,))
+    chord = chord_positions(xs, ys)
+    profile = resample_uniform(chord, freqs, n)
+    grid_xs = resample_uniform(chord, xs, n)
+    grid_ys = resample_uniform(chord, ys, n)
+    smoothed = smooth_profile(profile, smooth_window)
+    span, noise = profile_signal_stats(profile, smoothed)
+    check_pass_signal(span, noise, span_ratio_min)
+    mirror_index, quality = fit_mirror_point(
+        smoothed, edge_margin, quality_min)
+    peak_x, peak_y = interpolate_position(grid_xs, grid_ys, mirror_index)
     return {
         'peak_x': peak_x,
         'peak_y': peak_y,
-        'peak_type': peak_type,
-        'extremum_index': peak_idx,
-        'vertex_offset': offset,
+        'mirror_index': mirror_index,
+        'signal_span': span,
+        'noise_level': noise,
+        'correlation_quality': quality,
         'sample_count': n,
     }
 
@@ -1310,22 +1441,6 @@ def validate_log_dir(config_dir, log_dir, csv_dir):
             "drift logs and the study files with it." % (log_dir,))
 
 
-def fit_half_window_samples(sample_rate, scan_speed, window_radius):
-    """Fit half window in samples for a scan speed and window radius in mm."""
-    if sample_rate <= 0.0:
-        raise ValueError(
-            "sensor sample rate must be greater than 0, got %r"
-            % (sample_rate,))
-    if scan_speed <= 0.0:
-        raise ValueError(
-            "scan speed must be greater than 0, got %r" % (scan_speed,))
-    if window_radius <= 0.0:
-        raise ValueError(
-            "fit_window_radius must be greater than 0, got %r"
-            % (window_radius,))
-    return max(1, int(sample_rate / scan_speed * window_radius))
-
-
 def spread(values):
     """Minimum, maximum and population standard deviation of a sample set.
 
@@ -2159,19 +2274,29 @@ class EddyToolCalibration:
         self.query_time = config.getfloat(
             'query_time', QUERY_COLLECT_TIME_DEFAULT, above=0.0)
 
-        # Fit tuning. Deliberate deviation from upstream, which shrinks the
-        # bore by a further 0.5 mm before halving it; that shrink is
-        # unexplained and an unexplained constant is not carried over.
-        self.fit_window_radius = config.getfloat(
-            'fit_window_radius', self.coil_inner_diameter / 2.0, above=0.0)
-        # Upstream's convention: a Gaussian weight whose standard deviation is
-        # half the fit window.
-        self.fit_sigma_fraction = config.getfloat(
-            'fit_sigma_fraction', 0.5, above=0.0)
-        self.fit_vertex_limit = config.getfloat(
-            'fit_vertex_limit', 0.5, above=0.0)
+        # Fit tuning.
         self.edge_margin = config.getfloat(
             'edge_margin', 0.15, above=0.0, below=0.5)
+        # 5 samples at the driver's 250 Hz rate and the 4.0 mm/s default
+        # scan speed cover 0.08 mm, well under the bore of either documented
+        # coil, so the average takes out sensor noise without flattening the
+        # shape the mirror match reads.
+        self.smoothing_samples = config.getint(
+            'smoothing_samples', 5, minval=1)
+        # Matched-filter detection needs the signal to stand clear of the
+        # noise floor. On the recorded passes that motivated the check, a
+        # chord missing the coil spanned about 4 times its own noise while a
+        # usable pass spanned more than 50 times it, so 10 separates the two
+        # with margin on both sides.
+        self.signal_span_ratio_min = config.getfloat(
+            'signal_span_ratio_min', 10.0, minval=0.0)
+        # The normalized cross-correlation of a pass against its own
+        # reflection reads near 1.0 when the pass crosses the coil whole and
+        # falls sharply when one side is cut off or reads a different shape,
+        # so 0.8 accepts noisy but complete passes and rejects truncated
+        # ones.
+        self.correlation_quality_min = config.getfloat(
+            'correlation_quality_min', 0.8, minval=0.0, maxval=1.0)
         self.freq_min = config.getfloat(
             'freq_min', FREQ_MIN_DEFAULT, minval=0.0)
         self.center_tolerance = config.getfloat(
@@ -2324,6 +2449,17 @@ class EddyToolCalibration:
     # -- config and persisted state ---------------------------------------
 
     def _reject_removed_options(self, config):
+        for option in ('fit_window_radius', 'fit_sigma_fraction',
+                       'fit_vertex_limit'):
+            if config.get(option, None) is None:
+                continue
+            raise config.error(
+                "%s: remove %s. The XY fit no longer searches for the "
+                "strongest sample and fits a window around it; it matches "
+                "each pass against its own reflection, and that match has "
+                "no window to size. The pass acceptance thresholds are "
+                "signal_span_ratio_min and correlation_quality_min now."
+                % (self.name, option))
         if config.get('z_offset_mode', None) is not None:
             raise config.error(
                 "%s: remove z_offset_mode and set calibrate_z instead. Every "
@@ -3120,13 +3256,10 @@ class EddyToolCalibration:
         xs = [s[2] for s in samples]
         ys = [s[3] for s in samples]
         freqs = [s[1] for s in samples]
-        half_window = fit_half_window_samples(
-            self.sensor.data_rate, self.scan_speed, self.fit_window_radius)
         try:
             result = fit_scan_pass(
-                xs, ys, freqs, half_window,
-                half_window * self.fit_sigma_fraction, self.edge_margin,
-                self.fit_vertex_limit)
+                xs, ys, freqs, self.edge_margin, self.smoothing_samples,
+                self.signal_span_ratio_min, self.correlation_quality_min)
         except ValueError as e:
             raise gcmd.error(
                 "The %s pass did not yield a usable fit: %s. Run "
@@ -3238,12 +3371,14 @@ class EddyToolCalibration:
                 raise
             rows = [
                 "pass angle: %.1f deg" % (angle,),
-                "frequency peak type: %s" % (result['peak_type'],),
                 "samples: %d" % (result['sample_count'],),
-                "peak sample: %d" % (result['extremum_index'],),
-                "peak offset: %+.3f samples" % (result['vertex_offset'],),
-                "peak x: %.4f" % (result['peak_x'],),
-                "peak y: %.4f" % (result['peak_y'],),
+                "signal span: %.1f Hz" % (result['signal_span'],),
+                "noise level: %.1f Hz" % (result['noise_level'],),
+                "correlation quality: %.3f"
+                % (result['correlation_quality'],),
+                "center sample: %.2f" % (result['mirror_index'],),
+                "pass center x: %.4f" % (result['peak_x'],),
+                "pass center y: %.4f" % (result['peak_y'],),
             ]
             rows.extend(sample_drop_rows(stats))
             if debug:
