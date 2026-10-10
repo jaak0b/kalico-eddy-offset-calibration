@@ -9,7 +9,7 @@ Uses a bed-mounted LDC1612 eddy-current coil (e.g. BTT Eddy Coil/Duo/USB or a Ca
 ## What you need
 
 - A toolchanger running Kalico or Klipper.
-- An LDC1612 board (e.g. BTT Eddy Coil/Duo/Usb or Cartographer flashed with Klipper firmware) mounted to the bed, coil facing up.
+- An LDC1612 board (e.g. BTT Eddy Coil/Duo/Usb mounted to the bed, coil facing up.)
 - For Z offsets: a contact switch (sexbolt, sexball, any fixed Z endstop).
 - Your own toolchange and offset-apply gcode to change tools and apply offsets. This plugin is universal and it is not targeting any specific toolchange plugin.
 
@@ -333,7 +333,7 @@ apply_offsets_gcode:
 
 ## Supported hardware
 
-Any eddy style probe with an LDC1612 works as long as it is flashed with stock Klipper firmware and reachable over I2C.
+Any eddy style probe with a relativly small coil and an LDC1612 works as long as it is flashed with stock Klipper firmware and reachable over I2C.
 
 | Board |  |
 |---|---|
@@ -341,7 +341,7 @@ Any eddy style probe with an LDC1612 works as long as it is flashed with stock K
 | BTT Eddy USB | Expected to work unmodified; I have not tried one. Its RP2040 runs standard Klipper firmware as a second MCU |
 | BTT Eddy Duo | Expected to work in USB mode only. |
 | [chengxg "Little Crab" dual-coil board](https://oshwhub.com/cxg01/project_lbabffjk) | The board this plugin's algorithm comes from; a sharper XY signal than the BTT coils. Mine are still being assembled, so unmeasured here |
-| Cartographer | Only works if the board is flashed with Klipper firmware. Cartographer's own firmware will not work |
+| Cartographer | It is not supported at this time due to the coil beeing to big. |
 
 ### BTT Eddy Coil
 
