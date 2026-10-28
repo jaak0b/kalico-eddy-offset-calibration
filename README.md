@@ -2,7 +2,7 @@
 
 A Kalico and Klipper plugin that accurately measures per-tool XYZ nozzle offsets on a toolchanger, even when the nozzle is dirty.
 
-Uses a bed-mounted LDC1612 eddy-current coil (e.g. BTT Eddy Coil/Duo/USB or a Cartographer flashed with Klipper firmware).
+Uses a bed-mounted LDC1612 eddy-current coil (e.g. BTT Eddy Coil/Duo/USB).
 
 [![A calibration run on my printer](https://img.youtube.com/vi/lr-eFiMrt0E/hqdefault.jpg)](https://www.youtube.com/watch?v=lr-eFiMrt0E)
 
@@ -43,7 +43,7 @@ Eddy Coil, measured with `EDDY_REPEATABILITY`.
 ## Install
 
 Requires Kalico or stock Klipper v0.13.0 or newer, an LDC1612 board
-reachable over I2C (e.g. BTT Eddy Coil/Duo/Usb or Cartographer flashed with Klipper firmware) and Python 3 with no third-party packages.
+reachable over I2C (e.g. BTT Eddy Coil/Duo/Usb) and Python 3 with no third-party packages.
 
 ```
 cd ~
@@ -341,7 +341,7 @@ Any eddy style probe with a relativly small coil and an LDC1612 works as long as
 | BTT Eddy USB | Expected to work unmodified; I have not tried one. Its RP2040 runs standard Klipper firmware as a second MCU |
 | BTT Eddy Duo | Expected to work in USB mode only. |
 | [chengxg "Little Crab" dual-coil board](https://oshwhub.com/cxg01/project_lbabffjk) | The board this plugin's algorithm comes from; a sharper XY signal than the BTT coils. Mine are still being assembled, so unmeasured here |
-| Cartographer | It is not supported at this time due to the coil beeing to big. |
+| Cartographer | Currently unsupported due to the coil beeing to big. |
 
 ### BTT Eddy Coil
 
